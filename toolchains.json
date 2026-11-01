@@ -1,0 +1,33 @@
+{
+  "flutter": {
+    "version": "3.47.9",
+    "revision": "c197ca5199e9ee5661e865596c9c07294dfab51c",
+    "dart": "3.13.7"
+  },
+  "node": "24.22.2",
+  "npm": "11.19.1",
+  "cmake": "3.29.2",
+  "ninja": "1.12.0",
+  "core": {
+    "repository": "https://github.com/vnotex/vxcore.git",
+    "revision": "c3319ca9a7dfd5432cad1f7c35de6be099fc87bf",
+    "desktopReference": "f8026adb4c43f78d90251148e24b6e72ca28f3d7"
+  },
+  "androidEditorBuild": {
+    "compileSdk": 36,
+    "targetSdk": 36,
+    "minSdk": 24,
+    "ndk": "28.2.13676358",
+    "gradle": "9.3.1",
+    "androidGradlePlugin": "9.1.0",
+    "kotlin": "2.4.0",
+    "java": "17.0.20.1+1"
+  },
+  "iosEditorBuild": {
+    "minimumOs": "15.0",
+    "xcode": "26.6",
+    "xcodeBuild": "17F113",
+    "sdk": "26.5",
+    "status": "selected; not executed on this Windows host"
+  }
+}

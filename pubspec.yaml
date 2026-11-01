@@ -1,0 +1,6 @@
+name: vnote_mobile_workspace
+publish_to: none
+environment:
+  sdk: '>=3.13.7 <4.0.0'
+workspace:
+  - apps/vnote_mobile

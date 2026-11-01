@@ -1,0 +1,28 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: LGPL-3.0-only -->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <title>VNote editor validation</title>
+  <link rel="stylesheet" href="editor.css">
+  <script src="editor.js" defer></script>
+</head>
+<body>
+  <header>
+    <h1>Editor validation</h1>
+    <p>Memory only. No notebook, draft storage, save, or sync connection.</p>
+  </header>
+  <p id="status" role="status" aria-live="polite" aria-atomic="true">Waiting for the host. Editing is disabled.</p>
+  <p id="history-notice" role="status" hidden>Older undo history reached its limit and was removed. Current text and recent undo steps are retained.</p>
+  <button id="retry" type="button" hidden>Retry sending unreceived edits</button>
+  <main id="editor" aria-label="Markdown source editor"></main>
+  <section id="refusal" hidden aria-labelledby="refusal-title">
+    <h2 id="refusal-title">Composition was not committed</h2>
+    <p>The previous document is retained. This is the last in-limit provisional candidate, for copying only.</p>
+    <textarea id="candidate" readonly aria-label="Uncommitted composition candidate" spellcheck="false"></textarea>
+    <button id="dismiss" type="button">Dismiss candidate</button>
+  </section>
+</body>
+</html>

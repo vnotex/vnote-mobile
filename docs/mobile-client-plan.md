@@ -67,7 +67,7 @@ Confirmed: `vxcore` is a Qt-free C++ library with a public C ABI and an MIT top-
 
 Not yet verified: mobile builds, complete transitive dependency portability, Apple/Android transport and credential integration, native packaging, CodeMirror behavior on devices, or the full compatibility matrix. Treat these as Phase 1 gates, not completed features. The inspected `vxcore_context_create` ignores `config_json`; there is no supported sandbox-path injection mechanism. The path-provider prerequisite in section 5.3 must be resolved before first device use. Native transport also needs an explicit audit: Android currently falls into OpenSSL/curl configuration intended for non-Apple Unix, while the Apple branch assumes SDK-provided libcurl headers and library. Verify iOS support instead of assuming that macOS dependencies exist in the iOS SDK; make any necessary portable dependency changes upstream.
 
-Required development access: a Mac with the selected Xcode for iOS builds, a physical iPhone, a physical Android phone, simulators/emulators, and a controlled WebDAV endpoint. Android work on Windows/Linux is useful but does not prove iOS readiness. Store accounts, signing identities, app identifiers, repository publication and the new application's license require owner decisions/credentials before public distribution; never invent or expose them.
+Required development access: a Mac with the selected Xcode for iOS builds, a physical iPhone, a physical Android phone, simulators/emulators, and a controlled WebDAV endpoint. Android work on Windows/Linux is useful but does not prove iOS readiness. Store accounts, signing identities, app identifiers and repository publication require owner decisions/credentials before public distribution; never invent or expose them. The owner selected GNU LGPLv3 for the mobile application, matching VNote, on 2026-11-01.
 
 ## 4. Proposed new repository
 
@@ -223,7 +223,7 @@ Required ADRs before the corresponding implementation:
 5. WebDAV capabilities, state reconciliation, save/apply reservations, credentials and conflict UI.
 6. Import/export and share-in transaction boundaries, platform storage and backup/privacy policy.
 
-ADRs select one implementation, explain rejected alternatives and list observable acceptance cases. Do not turn open questions into placeholder production branches. The new app's own license and store identity remain explicit owner decisions before publication; the MIT license of `vxcore` does not relicense transitive dependencies or copied desktop code.
+ADRs select one implementation, explain rejected alternatives and list observable acceptance cases. Do not turn open questions into placeholder production branches. The new app uses GNU LGPLv3 by owner decision; store identity remains an explicit owner decision before publication. The MIT license of `vxcore` does not relicense transitive dependencies or copied desktop code.
 
 ## 7. Verification contract
 

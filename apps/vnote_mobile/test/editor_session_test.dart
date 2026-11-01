@@ -1,0 +1,531 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+import 'dart:convert';
+
+import 'package:flutter_test/flutter_test.dart';
+import 'package:vnote_mobile/services/editor_session.dart';
+
+const generation = '0123456789abcdef0123456789abcdef';
+
+EditorSession sessionWith(String text) {
+  final session = EditorSession(
+    initialText: text,
+    generationFactory: () => generation,
+  );
+  addTearDown(session.dispose);
+  return session;
+}
+
+Map<String, Object?> message(
+  String type,
+  int revision,
+  String requestId,
+  Map<String, Object?> payload,
+) => {
+  'v': 1,
+  'type': type,
+  'documentId': EditorSession.documentId,
+  'generation': generation,
+  'revision': revision,
+  'requestId': requestId,
+  ...payload,
+};
+
+Map<String, Object?>? deliver(
+  EditorSession session,
+  Map<String, Object?> message,
+) => session.receive(jsonEncode(message));
+
+void open(EditorSession session) {
+  final load = session.beginLoad()!;
+  final ack = deliver(
+    session,
+    message('ready', 0, load['requestId']! as String, {
+      'textLength': session.value.text.length,
+    }),
+  );
+  expect(ack?['stage'], 'received');
+  expect(session.value.ready, isTrue);
+}
+
+Map<String, Object?> edit({
+  int revision = 1,
+  int baseRevision = 0,
+  String requestId = 'editor-1',
+  int from = 0,
+  int to = 0,
+  String insert = 'x',
+  int anchor = 0,
+  int head = 0,
+}) => message('edit', revision, requestId, {
+  'baseRevision': baseRevision,
+  'changes': [
+    {'from': from, 'to': to, 'insert': insert},
+  ],
+  'selection': {'anchor': anchor, 'head': head},
+});
+
+void expectRejectedWithoutMutation(
+  EditorSession session,
+  Map<String, Object?> request,
+) {
+  final text = session.value.text;
+  final revision = session.value.revision;
+  final ack = deliver(session, request);
+  expect(ack?['stage'], 'rejected');
+  expect(ack?['throughRevision'], revision);
+  expect(session.value.text, text);
+  expect(session.value.revision, revision);
+  expect(session.value.error, isNotEmpty);
+}
+
+void main() {
+  group('session and handshake', () {
+    test('injected generation is validated as a 128-bit session token', () {
+      expect(
+        () => EditorSession(generationFactory: () => 'invalid'),
+        throwsArgumentError,
+      );
+    });
+
+    test(
+      'load is diagnostic and only matching ready grants volatile receipt',
+      () {
+        final session = sessionWith('hello');
+        final load = session.beginLoad()!;
+        expect(session.value.ready, isFalse);
+        final ready = message('ready', 0, load['requestId']! as String, {
+          'textLength': 5,
+        });
+        final ack = deliver(session, ready);
+        expect(ack?['stage'], 'received');
+        expect(ack?['requestId'], load['requestId']);
+        expect(session.value.ready, isTrue);
+        expect(deliver(session, ready), ack);
+      },
+    );
+
+    test('mismatched load reply preserves the initial source', () {
+      final session = sessionWith('hello');
+      final load = session.beginLoad()!;
+      expectRejectedWithoutMutation(
+        session,
+        message('ready', 0, load['requestId']! as String, {'textLength': 4}),
+      );
+      expect(session.value.ready, isFalse);
+    });
+
+    test('a page reload cannot silently replace a live document', () {
+      final session = sessionWith('hello');
+      open(session);
+      deliver(session, edit());
+      expect(session.beginLoad(), isNull);
+      expect(session.value.text, 'xhello');
+      expect(session.value.revision, 1);
+    });
+
+    test('an edit before ready cannot mutate source', () {
+      final session = sessionWith('hello');
+      session.beginLoad();
+      expectRejectedWithoutMutation(session, edit());
+    });
+
+    test('wrong document and generation have no current-session effects', () {
+      final session = sessionWith('hello');
+      open(session);
+      final before = session.value;
+      expect(
+        deliver(session, {
+          ...edit(),
+          'generation': 'ffffffffffffffffffffffffffffffff',
+        }),
+        isNull,
+      );
+      expect(
+        deliver(session, {...edit(), 'documentId': 'another-document'}),
+        isNull,
+      );
+      expect(identical(session.value, before), isTrue);
+      expect(deliver(session, edit())?['stage'], 'received');
+    });
+  });
+
+  group('atomic revisions and duplicate requests', () {
+    test('applies all ranges against the same base in one revision', () {
+      final session = sessionWith('abcdef');
+      open(session);
+      final ack = deliver(
+        session,
+        message('edit', 1, 'editor-1', {
+          'baseRevision': 0,
+          'changes': [
+            {'from': 1, 'to': 2, 'insert': 'XY'},
+            {'from': 4, 'to': 6, 'insert': '!'},
+          ],
+          'selection': {'anchor': 3, 'head': 6},
+        }),
+      );
+      expect(ack?['stage'], 'received');
+      expect(session.value.text, 'aXYcd!');
+      expect(session.value.revision, 1);
+      expect(session.value.anchor, 3);
+      expect(session.value.head, 6);
+    });
+
+    test('out-of-order base and revision gaps preserve existing text', () {
+      for (final request in [
+        edit(baseRevision: 1, revision: 2),
+        edit(revision: 2),
+      ]) {
+        final session = sessionWith('abc');
+        open(session);
+        expectRejectedWithoutMutation(session, request);
+      }
+    });
+
+    test('exact duplicate replays original receipt without applying twice', () {
+      final session = sessionWith('abc');
+      open(session);
+      final request = edit();
+      final ack = deliver(session, request);
+      deliver(
+        session,
+        edit(baseRevision: 1, revision: 2, requestId: 'editor-2', insert: 'y'),
+      );
+      expect(deliver(session, request), ack);
+      expect(session.value.text, 'yxabc');
+      expect(session.value.revision, 2);
+      expect(session.value.error, isNull);
+    });
+
+    test('duplicate ID with changed content faults without replacing text', () {
+      final session = sessionWith('abc');
+      open(session);
+      deliver(session, edit());
+      expectRejectedWithoutMutation(session, edit(insert: 'different'));
+      expect(session.value.text, 'xabc');
+    });
+
+    test('evicted requests cannot be reapplied outside the 64-entry cache', () {
+      final session = sessionWith('abc');
+      open(session);
+      final first = edit();
+      deliver(session, first);
+      for (var number = 2; number <= 66; number++) {
+        deliver(
+          session,
+          message('selection', 1, 'editor-$number', {'anchor': 0, 'head': 0}),
+        );
+      }
+      expectRejectedWithoutMutation(session, first);
+      expect(session.value.text, 'xabc');
+    });
+
+    test('stale selection is ignored and future selection is rejected', () {
+      final session = sessionWith('abc');
+      open(session);
+      deliver(session, edit(anchor: 1, head: 1));
+      final before = session.value;
+      expect(
+        deliver(
+          session,
+          message('selection', 0, 'editor-2', {'anchor': 0, 'head': 0}),
+        ),
+        isNull,
+      );
+      expect(identical(session.value, before), isTrue);
+      expectRejectedWithoutMutation(
+        session,
+        message('selection', 2, 'editor-3', {'anchor': 0, 'head': 0}),
+      );
+    });
+
+    test('overlapping ranges reject the entire batch', () {
+      final session = sessionWith('abcdef');
+      open(session);
+      expectRejectedWithoutMutation(
+        session,
+        message('edit', 1, 'editor-1', {
+          'baseRevision': 0,
+          'changes': [
+            {'from': 1, 'to': 4, 'insert': 'x'},
+            {'from': 3, 'to': 5, 'insert': 'y'},
+          ],
+          'selection': {'anchor': 0, 'head': 0},
+        }),
+      );
+    });
+
+    test('unaddressable envelopes fail without emitting invalid replies', () {
+      for (final request in [
+        {...edit(), 'v': 2},
+        {...edit(), 'revision': 1.0},
+        {...edit(), 'requestId': 'editor-01'},
+      ]) {
+        final session = sessionWith('abc');
+        open(session);
+        expect(deliver(session, request), isNull);
+        expect(session.value.text, 'abc');
+        expect(session.value.revision, 0);
+        expect(session.value.error, isNotEmpty);
+      }
+    });
+
+    test('strict envelope and field types fail closed', () {
+      for (final request in [
+        {...edit(), 'baseRevision': '0'},
+        {...edit(), 'unexpected': true},
+        {...edit(), 'type': 'nativeOpenFile'},
+      ]) {
+        final session = sessionWith('abc');
+        open(session);
+        expectRejectedWithoutMutation(session, request);
+      }
+    });
+  });
+
+  group('exact UTF-16 source boundaries', () {
+    test('BOM, mixed endings, combining marks, and astral text survive', () {
+      const text = '\ufeffA\r\n🌍é\n中\rZ';
+      final session = sessionWith(text);
+      open(session);
+      final ack = deliver(
+        session,
+        edit(from: 4, to: 6, insert: '日本語', anchor: 7, head: 7),
+      );
+      expect(ack?['stage'], 'received');
+      expect(session.value.text, '\ufeffA\r\n日本語é\n中\rZ');
+    });
+
+    test('surrogate and CRLF boundary splits are rejected', () {
+      for (final offset in [2, 4]) {
+        final session = sessionWith('A🌍\r\nZ');
+        open(session);
+        expectRejectedWithoutMutation(session, edit(from: offset, to: offset));
+      }
+    });
+
+    test('invalid resulting selection rejects the whole valid text edit', () {
+      final session = sessionWith('A🌍\r\nZ');
+      open(session);
+      expectRejectedWithoutMutation(
+        session,
+        edit(from: 6, to: 6, anchor: 2, head: 2),
+      );
+    });
+
+    test('selection cannot bisect CRLF', () {
+      final session = sessionWith('A\r\nZ');
+      open(session);
+      expectRejectedWithoutMutation(
+        session,
+        message('selection', 0, 'editor-1', {'anchor': 2, 'head': 2}),
+      );
+    });
+
+    test('committed lone surrogates are rejected, not replacement-decoded', () {
+      for (final unit in [0xd800, 0xdc00]) {
+        final session = sessionWith('prior');
+        open(session);
+        expectRejectedWithoutMutation(
+          session,
+          edit(insert: String.fromCharCode(unit)),
+        );
+      }
+    });
+
+    test('initial invalid source is rejected rather than normalized', () {
+      expect(
+        () => EditorSession(
+          initialText: String.fromCharCode(0xd800),
+          generationFactory: () => generation,
+        ),
+        throwsFormatException,
+      );
+    });
+
+    test('whole CRLF and surrogate replacements are allowed', () {
+      final session = sessionWith('A🌍\r\nZ');
+      open(session);
+      expect(
+        deliver(
+          session,
+          edit(from: 1, to: 5, insert: '中\r', anchor: 3, head: 3),
+        )?['stage'],
+        'received',
+      );
+      expect(session.value.text, 'A中\rZ');
+    });
+  });
+
+  group('resource limits preserve previous source', () {
+    test('insert limit accepts its boundary and rejects one extra unit', () {
+      final accepted = sessionWith('');
+      open(accepted);
+      expect(
+        deliver(
+          accepted,
+          edit(insert: 'a' * EditorSession.maxInsertedUnits),
+        )?['stage'],
+        'received',
+      );
+      final rejected = sessionWith('prior');
+      open(rejected);
+      expectRejectedWithoutMutation(
+        rejected,
+        edit(insert: 'a' * (EditorSession.maxInsertedUnits + 1)),
+      );
+    });
+
+    test('JSON length is checked before parsing malformed oversized input', () {
+      final session = sessionWith('prior');
+      open(session);
+      expect(
+        session.receive('x' * (EditorSession.maxEnvelopeBytes + 1)),
+        isNull,
+      );
+      expect(session.value.text, 'prior');
+      expect(session.value.revision, 0);
+    });
+
+    test('source byte limit applies independently of UTF-16 length', () {
+      final session = sessionWith('é' * (EditorSession.maxSourceBytes ~/ 2));
+      open(session);
+      expectRejectedWithoutMutation(session, edit(insert: 'é'));
+    });
+
+    test('source UTF-16 limit prevents an additional ASCII unit', () {
+      final session = sessionWith('a' * EditorSession.maxSourceUnits);
+      open(session);
+      expectRejectedWithoutMutation(session, edit());
+    });
+
+    test('too many ranges are rejected atomically', () {
+      final session = sessionWith('prior');
+      open(session);
+      expectRejectedWithoutMutation(
+        session,
+        message('edit', 1, 'editor-1', {
+          'baseRevision': 0,
+          'changes': List.generate(
+            EditorSession.maxChanges + 1,
+            (_) => {'from': 0, 'to': 0, 'insert': 'x'},
+          ),
+          'selection': {'anchor': 0, 'head': 0},
+        }),
+      );
+    });
+  });
+
+  group('controls never imply persistence', () {
+    test('diagnostic snapshot is exact, single-use, and received only', () {
+      final session = sessionWith('prior\r\n🌍');
+      open(session);
+      final request = session.requestSnapshot()!;
+      expect(session.requestSnapshot(), isNull);
+      final ack = deliver(
+        session,
+        message('save', 0, request['requestId']! as String, {
+          'mode': 'snapshot',
+          'text': session.value.text,
+        }),
+      );
+      expect(ack?['stage'], 'received');
+      expect(session.value.snapshotRevision, 0);
+      expect(session.value.text, 'prior\r\n🌍');
+      expect(session.canRequestSnapshot, isFalse);
+    });
+
+    test('snapshot mismatch cannot overwrite the mirror', () {
+      final session = sessionWith('prior');
+      open(session);
+      final request = session.requestSnapshot()!;
+      expectRejectedWithoutMutation(
+        session,
+        message('save', 0, request['requestId']! as String, {
+          'mode': 'snapshot',
+          'text': 'other',
+        }),
+      );
+    });
+
+    test(
+      'snapshot must match its requested revision, not just current text',
+      () {
+        final session = sessionWith('prior');
+        open(session);
+        final request = session.requestSnapshot()!;
+        deliver(session, edit());
+        expectRejectedWithoutMutation(
+          session,
+          message('save', 1, request['requestId']! as String, {
+            'mode': 'snapshot',
+            'text': session.value.text,
+          }),
+        );
+        expect(session.value.snapshotRevision, isNull);
+      },
+    );
+
+    test('save request is rejected explicitly as unsupported persistence', () {
+      final session = sessionWith('prior');
+      open(session);
+      expectRejectedWithoutMutation(
+        session,
+        message('save', 0, 'editor-1', {'mode': 'request', 'reason': 'manual'}),
+      );
+    });
+
+    test('close needs discard consent and an exact final revision', () {
+      final session = sessionWith('prior');
+      open(session);
+      final close = session.closeAfterDiscardConsent()!;
+      expect(session.value.closing, isTrue);
+      expect(session.value.closed, isFalse);
+      // Final composition edits are still accepted before close-ready.
+      expect(deliver(session, edit())?['stage'], 'received');
+      expect(
+        deliver(
+          session,
+          message('close', 1, close['requestId']! as String, {
+            'mode': 'ready',
+            'disposition': 'discard',
+          }),
+        ),
+        isNull,
+      );
+      expect(session.value.closed, isTrue);
+      expect(session.value.text, 'xprior');
+    });
+
+    test('unsolicited close cannot retire the current session', () {
+      final session = sessionWith('prior');
+      open(session);
+      expectRejectedWithoutMutation(
+        session,
+        message('close', 0, 'editor-1', {
+          'mode': 'ready',
+          'disposition': 'discard',
+        }),
+      );
+      expect(session.value.closed, isFalse);
+    });
+
+    test('editor rejection is never acknowledged or marked saved', () {
+      final session = sessionWith('prior');
+      open(session);
+      final request = session.command('undo')!;
+      expect(
+        deliver(
+          session,
+          message('ack', 0, request['requestId']! as String, {
+            'stage': 'rejected',
+            'throughRevision': 0,
+            'error': 'composition active',
+          }),
+        ),
+        isNull,
+      );
+      expect(session.value.text, 'prior');
+    });
+  });
+}
