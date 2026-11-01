@@ -41,6 +41,31 @@ void main() {
     await temp.delete(recursive: true);
   });
 
+  test('export staging is a separate persistent sibling and rejects a linked replacement', () async {
+    final exportRoot = await storage.obtainExportRoot();
+    expect(
+      await FileSystemEntity.identical(
+        Directory(exportRoot).parent.path,
+        Directory(storage.root).parent.path,
+      ),
+      isTrue,
+    );
+    expect(await FileSystemEntity.identical(exportRoot, storage.root), isFalse);
+    await Directory(exportRoot).delete();
+    final outside = await Directory('${temp.path}/outside-export').create();
+    await File('${outside.path}/keep.txt').writeAsString('not export staging');
+    await _link(exportRoot, outside.path);
+    try {
+      await expectLater(storage.obtainExportRoot(), throwsStateError);
+      expect(
+        await File('${outside.path}/keep.txt').readAsString(),
+        'not export staging',
+      );
+    } finally {
+      await Link(exportRoot).delete();
+    }
+  });
+
   test(
     'discovery preserves legacy roots and allocation never creates a notebook',
     () async {

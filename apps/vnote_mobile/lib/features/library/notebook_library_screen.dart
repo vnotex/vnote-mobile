@@ -2,6 +2,7 @@
 import 'package:flutter/material.dart';
 
 import '../../services/notebook_library.dart';
+import '../../services/notebook_export.dart';
 
 class NotebookLibraryScreen extends StatefulWidget {
   const NotebookLibraryScreen({
@@ -42,6 +43,36 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
     await library.createNotebook(name);
   }
 
+  Future<void> _export(
+    NotebookLibrary library,
+    NotebookLibraryState snapshot,
+    ManagedNotebookEntry entry,
+  ) async {
+    if (!_isCurrent(library, snapshot)) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text('Export “${entry.name}”?'),
+        content: const Text(
+          'Save a ZIP copy of the saved notebook, including attachments and recycle content. The ZIP itself is not encrypted. Local sync history/state is excluded; the notebook is not changed.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: const Text('Export ZIP'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true && _isCurrent(library, snapshot)) {
+      await library.exportNotebook(entry);
+    }
+  }
+
   @override
   Widget build(
     BuildContext context,
@@ -52,6 +83,7 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
       final idle = !state.busy && !state.closed && state.workspace == null;
       final available = idle && !state.stale;
       final messages = <String>[
+        'Local notebooks need your own exported copies. OS backup exclusion is requested, not guaranteed; app removal or device loss may remove local data.',
         if (state.error != null) state.error!,
         if (state.closed) 'The notebook library is closed.',
         if (state.stale && !state.closed && !state.busy)
@@ -101,8 +133,20 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                   ),
                 ),
               Expanded(
-                child: state.entries.isEmpty
-                    ? Center(
+                child: ListView.builder(
+                  itemCount:
+                      (state.entries.isEmpty ? 1 : state.entries.length) + 1,
+                  itemBuilder: (context, index) {
+                    if (index == 0) {
+                      return _ExportPanel(
+                        library: library,
+                        state: state.exportState,
+                        closed: state.closed,
+                      );
+                    }
+                    if (state.entries.isEmpty) {
+                      return Padding(
+                        padding: const EdgeInsets.all(24),
                         child: Text(
                           state.busy
                               ? 'Loading notebooks…'
@@ -112,34 +156,44 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                               ? 'The notebook library is unavailable.'
                               : 'No notebooks yet. Choose New notebook to create one.',
                         ),
-                      )
-                    : ListView.builder(
-                        itemCount: state.entries.length,
-                        itemBuilder: (context, index) {
-                          final entry = state.entries[index];
-                          return ListTile(
-                            key: ObjectKey(entry),
-                            leading: Icon(
-                              entry.canOpen
-                                  ? Icons.book_outlined
-                                  : Icons.error_outline,
-                            ),
-                            title: Text(entry.name),
-                            subtitle: entry.canOpen
-                                ? null
-                                : Text(
-                                    'Unavailable: ${entry.error ?? 'The notebook could not be opened.'}',
-                                  ),
-                            onTap: available && entry.canOpen
-                                ? () async {
-                                    if (_isCurrent(library, state)) {
-                                      await library.openNotebook(entry);
-                                    }
-                                  }
-                                : null,
-                          );
-                        },
+                      );
+                    }
+                    final entry = state.entries[index - 1];
+                    return ListTile(
+                      key: ObjectKey(entry),
+                      leading: Icon(
+                        entry.canOpen
+                            ? Icons.book_outlined
+                            : Icons.error_outline,
                       ),
+                      title: Text(entry.name),
+                      subtitle: entry.canOpen
+                          ? null
+                          : Text(
+                              'Unavailable: ${entry.error ?? 'The notebook could not be opened.'}',
+                            ),
+                      trailing: IconButton(
+                        tooltip: 'Export ${entry.name}',
+                        icon: const Icon(Icons.ios_share),
+                        onPressed:
+                            available &&
+                                entry.canOpen &&
+                                !state.exportState.busy &&
+                                state.exportState.prepared == null &&
+                                state.exportState.leftovers.isEmpty
+                            ? () => _export(library, state, entry)
+                            : null,
+                      ),
+                      onTap: available && entry.canOpen
+                          ? () async {
+                              if (_isCurrent(library, state)) {
+                                await library.openNotebook(entry);
+                              }
+                            }
+                          : null,
+                    );
+                  },
+                ),
               ),
             ],
           ),
@@ -147,6 +201,141 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
       );
     },
   );
+}
+
+class _ExportPanel extends StatelessWidget {
+  const _ExportPanel({
+    required this.library,
+    required this.state,
+    required this.closed,
+  });
+  final NotebookLibrary library;
+  final NotebookExportState state;
+  final bool closed;
+
+  Future<bool> _confirmDiscard(BuildContext context, String label) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text('Discard “$label”?'),
+          content: const Text(
+            'This removes only the selected app-private export copy or interrupted export data. It does not remove a notebook or a copy already saved to a provider.',
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: const Text('Discard'),
+            ),
+          ],
+        ),
+      ) ==
+      true;
+
+  @override
+  Widget build(BuildContext context) {
+    final prepared = state.prepared;
+    if (!state.busy &&
+        prepared == null &&
+        state.leftovers.isEmpty &&
+        state.error == null &&
+        state.message == null) {
+      return const SizedBox.shrink();
+    }
+    final idle = !closed && !state.busy;
+    return Card(
+      margin: const EdgeInsets.all(12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (state.busy) ...[
+              const LinearProgressIndicator(),
+              Text(switch (state.phase) {
+                NotebookExportPhase.reconciling =>
+                  'Updating private export storage…',
+                NotebookExportPhase.preparing =>
+                  'Preparing saved notebook snapshot…',
+                NotebookExportPhase.archiving => 'Creating ZIP copy…',
+                NotebookExportPhase.saving =>
+                  'Saving to the selected provider…',
+                NotebookExportPhase.idle => '',
+              }),
+            ],
+            if (prepared != null) ...[
+              Text('Prepared export: ${prepared.notebookName}'),
+              Text(
+                '${prepared.bytes} bytes · retained until saved or discarded',
+              ),
+            ],
+            if (state.error != null) SelectableText(state.error!),
+            if (state.message != null) SelectableText(state.message!),
+            if (state.busy && state.phase != NotebookExportPhase.reconciling)
+              TextButton(
+                onPressed: closed ? null : library.cancelExport,
+                child: const Text('Cancel export'),
+              ),
+            if (prepared != null && !state.busy)
+              Wrap(
+                children: [
+                  TextButton.icon(
+                    onPressed: idle ? () => library.saveExport(prepared) : null,
+                    icon: const Icon(Icons.save_alt),
+                    label: const Text('Save export as…'),
+                  ),
+                  TextButton(
+                    onPressed: idle
+                        ? () async {
+                            if (await _confirmDiscard(
+                                  context,
+                                  prepared.notebookName,
+                                ) &&
+                                context.mounted &&
+                                !library.value.closed &&
+                                !library.value.exportState.busy &&
+                                identical(
+                                  library.value.exportState.prepared,
+                                  prepared,
+                                )) {
+                              await library.discardExport(prepared);
+                            }
+                          }
+                        : null,
+                    child: const Text('Discard export'),
+                  ),
+                ],
+              ),
+            for (final leftover in state.leftovers)
+              ListTile(
+                title: Text(leftover.label),
+                subtitle: Text(leftover.reason),
+                trailing: IconButton(
+                  tooltip: 'Discard export data ${leftover.label}',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: idle
+                      ? () async {
+                          if (await _confirmDiscard(context, leftover.label) &&
+                              context.mounted &&
+                              !library.value.closed &&
+                              !library.value.exportState.busy &&
+                              library.value.exportState.leftovers.any(
+                                (item) => identical(item, leftover),
+                              )) {
+                            await library.discardExportLeftover(leftover);
+                          }
+                        }
+                      : null,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _NewNotebookDialog extends StatefulWidget {

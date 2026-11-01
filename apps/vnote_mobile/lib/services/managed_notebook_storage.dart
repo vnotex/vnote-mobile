@@ -4,6 +4,9 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
+
+import 'document_export_platform.dart';
 
 class ManagedNotebookPaths {
   const ManagedNotebookPaths({
@@ -40,6 +43,7 @@ class ManagedNotebookStorage {
   static const maxNotebooks = 1000;
 
   static Future<ManagedNotebookStorage> obtain() async {
+    await MethodChannelDocumentExportPlatform().prepareStorage();
     final support = await getApplicationSupportDirectory();
     final excluded = [
       await getTemporaryDirectory(),
@@ -78,6 +82,22 @@ class ManagedNotebookStorage {
     final local = await child('core/local/');
     final notebooks = await child('notebooks/');
     return ManagedNotebookStorage(app: app, local: local, root: notebooks);
+  }
+
+  Future<String> obtainExportRoot() async {
+    await _validateParent();
+    final support = Directory(root).parent;
+    final expected = Directory.fromUri(support.uri.resolve('exports/'));
+    final canonical = await _canonical(expected);
+    if (!_within(canonical, support.path) ||
+        _key(canonical) != _key(expected.path)) {
+      throw StateError('Export storage escapes its persistent support root.');
+    }
+    await expected.create(recursive: true);
+    if (_key(await expected.resolveSymbolicLinks()) != _key(canonical)) {
+      throw StateError('Export storage changed during initialization.');
+    }
+    return p.normalize(canonical);
   }
 
   Future<void> _validateParent() async {

@@ -32,6 +32,7 @@ enum {
   VXM_EVENT_MUTATE = 7,
   VXM_EVENT_QUERY = 8,
   VXM_EVENT_TAG = 9,
+  VXM_EVENT_EXPORT = 10,
   VXM_MODE_NOTE = 1,
   VXM_MODE_CATALOG = 2,
   VXM_EDITOR_MARKDOWN = 1,
@@ -58,6 +59,10 @@ typedef struct VxmOpenOptions {
   const char *node_id;
   int32_t mode;
   int32_t create_notebook;
+  // Export-only catalog admission: existing pinned UUID, no mutations. Checks
+  // source-rewriting recovery/migrations and persisted session restoration before
+  // core initialization. Ordinary owners retain core's normal recovery behavior.
+  int32_t export_only;
 } VxmOpenOptions;
 
 // Immutable terminal event. Pointers are borrowed until vxm_event_free(), which
@@ -120,12 +125,26 @@ VXM_API int32_t vxm_host_catalog_query(VxmHost *host, uint64_t request_id,
                                      uint64_t generation, const char *json);
 VXM_API int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t request_id,
                                    uint64_t generation, const char *json);
+// Export-only catalog snapshot into an exclusively new absolute destination, outside
+// notebook/app/local roots. Complete portable bytes, not a regenerated catalog.
+// Requires an owner created with export_only=1, mode=VXM_MODE_CATALOG,
+// create_notebook=0, and a nonempty expected_notebook_id. Ordinary catalog
+// owners reject export admission with VXCORE_ERR_INVALID_STATE.
+// Limit: 1 GiB source, 100000 entries, depth 32, component 255/path 1024 UTF-8 bytes.
+// staging_budget_bytes reserves snapshot + conservative ZIP bound, at most
+// 4 GiB - 128 KiB marker allowance; 64 MiB free-space headroom is separate.
+// EXPORT data is <=1024 bytes: {bytes,files,directories,archiveLimit}; notebook
+// identity/name use event metadata. Caller owns any partial destination and must
+// wait for the terminal/close before removing it. Never modifies the live tree.
+VXM_API int32_t vxm_host_catalog_export(VxmHost *host, uint64_t request_id,
+                                       uint64_t generation, const char *destination,
+                                       uint64_t staging_budget_bytes);
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
-// Cancel affects pending requests and the matching active search, checked between
-// files/nodes. Active writes (including tags) are never cancelled. INVALID_STATE
-// means no cancellable matching request. One bounded file may delay cancellation.
+// Cancel affects pending requests and the matching active read-only search/export,
+// checked between files/nodes and each 256 KiB export chunk. Active writes (including tags) are never cancelled. INVALID_STATE
+// means no cancellable matching request. Search may finish one bounded file before cancellation.
 VXM_API int32_t vxm_host_cancel(VxmHost *host, uint64_t request_id, uint64_t generation);
-// Idempotent; stops admission, cancels pending work and the active search, finishes
+// Idempotent; stops admission, cancels pending work and active search/export, finishes
 // active mutations, then emits the separately reserved CLOSED terminal (request 0)
 // after owner teardown. Admitted terminals always precede CLOSED.
 VXM_API void vxm_host_request_close(VxmHost *host);

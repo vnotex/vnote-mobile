@@ -508,3 +508,99 @@ No import/export, notebook removal, attachment editing, draft recovery, preview,
 WebDAV, iOS/physical-device, power-loss, release-signing or publication claim is
 made. Both fixture-based host verification and emulator interaction are recorded;
 neither substitutes for the remaining device gates.
+
+
+## Whole-notebook ZIP export
+
+Implemented native read-only snapshot capture, bounded worker ZIP creation,
+retained export recovery/cleanup and system Save As adapters. Core remains at
+`64237fb`. Ordinary notebook opening/recovery is unchanged: export uses a separate
+capability that refuses auto-restore, recovery and migration side effects before
+creating its context. Notebook serialization is never replaced with a Dart writer.
+
+### Executed verification
+
+- Native MSVC Release real-storage suite passed, including opaque/hidden/recycle/
+  ciphertext/sidecar preservation, classified runtime omission, credential and
+  unsafe layout refusal, source identity changes, snapshot cancellation/close,
+  small output reservations, 100,000-entry rejection, and persisted foreign
+  session records refused before recovery can touch another notebook.
+- **54 bridge tests passed**; generated FFI/core-key drift checks and bridge
+  analysis passed. New coverage includes export-only admission, existing
+  destination/budget guards, complete portable bytes, no-source-migration opening,
+  credential refusal without rewriting config, links/junctions and settled cleanup.
+- **139 Flutter tests passed, with one Windows skip**. The skipped case creates a
+  literal backslash filename, which Windows cannot represent; its POSIX worker
+  guard is not counted as executed here. Tests cover real snapshots/ZIPs, retry,
+  retained/corrupt/interrupted copies, explicit safe leftovers cleanup, provider
+  leases, cancellation/shutdown, stale confirmation, and release of native owner
+  before provider IO. An export completion cannot retire a newer library admission.
+  App analysis reported no issues. Reconciliation/discard now has its own phase,
+  rather than showing an ineffective Cancel button for an uncancellable cleanup.
+- A throwaway scale scenario used the real native snapshot and worker encoder for
+  **10,000 Unicode notes plus a 257 MiB opaque file**, then an archive containing
+  **65,536 empty directories**. Independent Python ZIP reads verified all note
+  bodies/IDs, Unicode flags, opaque bytes/CRC and empty directories. The second
+  archive contained **65,542 entries** with a ZIP64 end record and valid CRCs.
+  The temporary test and generated host ZIP artifacts were removed afterward.
+- Android debug packaging through `node scripts/verify.mjs android` passed for
+  arm64 and x86_64, including offline asset regeneration/checks and enforced lock.
+  The archive dependency is exactly4.6.0; crypto3.0.8/path1.9.1 retain existing
+  resolved versions, and the newly resolved posix dependency is locked at6.5.4.
+- APK NOTICES contained archive's derived-code notices and posix's MIT notice.
+  The actual Legal UI showed archive's two license entries, including the JZLib
+  attribution. `LICENSE-other.md` is explicitly bundled because Flutter's normal
+  collector reads only NOTICES/LICENSE, not that additional upstream notice file.
+
+### Actual Android and desktop round trip
+
+On Medium_Phone, Export Projects reached the real Android Documents UI. Cancelling
+kept the prepared ZIP and retry controls. Force-stop/cold-start restored the same
+prepared copy with an ambiguous-external-outcome warning. Save As then completed
+to Downloads. Independent Python ZIP CRC/content checks matched every Projects
+file exactly. App-private staging was removed only after provider completion;
+all10 managed source files remained byte-for-byte unchanged.
+
+The external Android ZIP was unpacked into an owned temporary directory and opened
+using the existing default Windows desktop SDK C API (mobile extension disabled),
+not the mobile host wrapper. Notebook/node IDs, `LibraryDemoBody` and every portable
+file remained unchanged after desktop open/read/close. The child process isolated
+core test storage under its own TMP/TEMP. Its first DLL load failed because Python
+3.12 excludes PATH from default DLL dependency lookup; adding the declared
+Strawberry IDN runtime directory to that child loader resolved it. No installed
+SDK, system file or user-profile core configuration was modified.
+
+The rebuilt app also exported Personal through Save As. Its seven files, including
+nested note metadata and tag configuration, matched the original baseline exactly.
+The two external ZIP copies remain in Downloads for manual inspection. The final
+rebuilt APK was reinstalled and its hash matched the local build. Its explicit
+Discard confirmation was exercised both with Cancel (copy retained) and Discard
+(private staging removed); all managed source bytes still matched the baseline.
+The app remains running on the library screen. Android package flags show no
+ALLOW_BACKUP and no broad storage/media permission. These
+checks do not establish cloud/OEM device-transfer behavior.
+
+### Corrections and remaining limits
+
+The first100,000-entry native fixture exceeded its existing120-second result wait.
+Snapshot inventory repeatedly restatted identical absolute ancestors and duplicated
+Windows attribute/type queries. The implementation now validates those ancestors
+at phase boundaries, retains root/relative-component checks before access and
+no-follow identity handles, and uses one Windows attribute-handle inspection.
+The original entry count and test wait were retained; the suite then passed.
+No performance guarantee follows from these debug/host checks.
+
+ZIP central-directory finalization is synchronous inside the worker and bounded
+by the entry/path caps; cancellation waits through it, then is checked before
+ready publication. A committed copy is retained if cancellation wins afterward.
+Provider cancellation during copying can leave an incomplete external file;
+provider completion is not remote synchronization or atomic replacement proof.
+
+Android backup exclusion is configured and its package opt-out exercised. iOS
+implements scene-aware export and stable directory-group exclusion, and its plugin
+registration matches the pinned Flutter headers, but **no Xcode build, iOS picker,
+iOS backup artifact or physical-device transfer has been exercised**. Native
+provider-revocation/disk-full/device-loss scenarios are not claimed from injected
+controller failures. The earlier rapid synthetic-input limitation remains outside
+this slice. Managed import, Markdown/assets-only export, attachment editing,
+preview/recovery, WebDAV and publication remain subsequent work.

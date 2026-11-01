@@ -18,6 +18,8 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <sys/stat.h>
 #endif
 
 #include <sqlite3.h>
@@ -120,6 +122,7 @@ std::string text(const Event &event) {
   return event->size ? std::string(reinterpret_cast<const char *>(event->data), static_cast<size_t>(event->size)) : std::string();
 }
 
+struct ExportOnly {};
 struct Host {
   Notifications signals;
   VxmHost *handle = nullptr;
@@ -135,6 +138,11 @@ struct Host {
        bool create = false, const char *name = "Personal") {
     VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
                            create ? name : nullptr, expected, nullptr, mode, create ? 1 : 0};
+    start(options, hold);
+  }
+  Host(Fixture &fixture, ExportOnly, bool hold = false) {
+    VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
+                           nullptr, fixture.notebook_id.c_str(), nullptr, VXM_MODE_CATALOG, 0, 1};
     start(options, hold);
   }
   void start(const VxmOpenOptions &options, bool hold) {
@@ -1042,6 +1050,461 @@ void catalog_tags_are_complete_or_error() {
   }
 }
 
+
+constexpr uint64_t kSnapshotBudget = 4ULL * 1024 * 1024 * 1024 - 128 * 1024;
+int32_t capture(Host &host, uint64_t id, const fs::path &destination, uint64_t budget = kSnapshotBudget) {
+  const auto path = destination.u8string();
+  return vxm_host_catalog_export(host.handle, id, host.generation, path.c_str(), budget);
+}
+void seed_encrypted_export(Fixture &fixture) {
+  VxCoreContextHandle context = nullptr;
+  CHECK(vxcore_context_create_with_paths(nullptr, fixture.app.c_str(), fixture.local.c_str(), &context) == VXCORE_OK);
+  char *notebook = nullptr, *note = nullptr;
+  CHECK(vxcore_notebook_open(context, fixture.notebook.c_str(), &notebook) == VXCORE_OK);
+  const std::string password = "export-test-password";
+  VxCoreEncryptionSetupHandle setup = nullptr;
+  CHECK(vxcore_encryption_prepare_notebook(context, notebook, nullptr, password.data(), password.size(), &setup) == VXCORE_OK);
+  CHECK(vxcore_encryption_commit_notebook(context, setup) == VXCORE_OK);
+  const std::string body = "private encrypted body";
+  CHECK(vxcore_encryption_create_note(context, notebook, ".", "protected.md", "markdown",
+                                      body.data(), body.size(), &note) == VXCORE_OK);
+  vxcore_string_free(note);
+  CHECK(vxcore_notebook_close(context, notebook) == VXCORE_OK);
+  vxcore_string_free(notebook);
+  CHECK(vxcore_prepare_shutdown(context) == VXCORE_OK);
+  vxcore_context_destroy(context);
+}
+void catalog_export_preserves_portable_tree() {
+  Fixture fixture;
+  fixture.seed("original notebook bytes\r\n");
+  seed_encrypted_export(fixture);
+  const auto root = fs::u8path(fixture.notebook);
+  const auto config_path = root / "vx_notebook" / "config.json";
+  auto config = Json::parse(disk(config_path));
+  config["metadata"]["custom"] = Json{{"password", "unrelated nested user metadata is not scanned"}};
+  config["futureField"] = Json::array({1, true, "retained"});
+  config["syncRemoteUrl"] = "https://contributor@gitee.com/team/notes.git";
+  config["assetsFolder"] = "resources/assets";
+  config["recycleBinFolder"] = "custom/recycle";
+  config["ignored"] = Json::array({"*.private", ".hidden"});
+  const auto raw = config.dump(3) + "\n";
+  external_write(config_path, raw);
+  for (const auto *name : {".hidden/empty", "resources/assets/item", "custom/recycle/old",
+                           "nested/vx_sync", "vx_notebook/vx_sync/webdav/snapshots"})
+    fs::create_directories(root / fs::u8path(name));
+  const std::string opaque("\0\xff\xfe\r\n", 5);
+  for (const auto *name : {".hidden/data.private", "resources/assets/item/blob", "custom/recycle/old/body",
+                           "nested/vx_sync/user.data", ".DS_Store", "scratch.tmp", "scratch.vswp", ".gitignore"})
+    external_write(root / fs::u8path(name), opaque);
+  external_write(root / "vx_notebook" / "encryption.vne", opaque); // Opaque legacy bytes are not interpreted.
+  const Json state = {{"version", 1}, {"notebookId", fixture.notebook_id},
+      {"remoteUrl", "https://example.invalid/notes"}, {"usernameHash", std::string(64, '0')},
+      {"entries", Json::object()}, {"conflicts", Json::object()}};
+  external_write(root / "vx_notebook/vx_sync/webdav/state.json", state.dump());
+  external_write(root / "vx_notebook/vx_sync/webdav/snapshots/runtime", "never portable");
+  const auto before_open = snapshot(root);
+  Host host(fixture, ExportOnly{});
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK);
+  const std::string root_id = opened->node_id;
+  opened.reset();
+  CHECK(snapshot(root) == before_open);
+  CHECK(host.mutate(2, VXM_RENAME_NOTEBOOK, root_id, "must not mutate") == VXCORE_ERR_INVALID_STATE);
+  CHECK(host.tag(2, {{"op", "createTag"}, {"name", "must not mutate"}}) == VXCORE_ERR_INVALID_STATE);
+  // Residue created after open is still inspected and safely excluded by capture.
+  fs::create_directories(root / "vx_notebook/vx_import/empty/deeper");
+  fs::create_directories(root / "vx_notebook/vx_transfer/empty/deeper");
+  const auto before = snapshot(root);
+  const auto destination = fixture.root / "snapshot";
+  CHECK(capture(host, 2, destination) == VXCORE_OK);
+  auto result = host.next();
+  CHECK(result->code == VXCORE_OK && result->kind == VXM_EVENT_EXPORT && result->size <= 1024);
+  CHECK(std::string(result->notebook_id) == fixture.notebook_id && std::string(result->notebook_name) == "Personal");
+  auto expected = before;
+  for (auto it = expected.begin(); it != expected.end();) {
+    const auto path = it->first.generic_u8string();
+    bool excluded = false;
+    for (const auto *prefix : {"vx_notebook/vx_sync", "vx_notebook/vx_import", "vx_notebook/vx_transfer"}) {
+      const std::string value(prefix);
+      excluded |= path == value || path.compare(0, value.size() + 1, value + "/") == 0;
+    }
+    if (excluded) it = expected.erase(it); else ++it;
+  }
+  CHECK(snapshot(destination) == expected);
+  CHECK(disk(destination / "vx_notebook/config.json") == raw);
+  uint64_t bytes = 0, files = 0, directories = 0;
+  for (const auto &entry : fs::recursive_directory_iterator(destination)) {
+    if (entry.is_directory()) ++directories;
+    else { ++files; bytes += entry.file_size(); }
+  }
+  const auto summary = Json::parse(text(result));
+  CHECK(summary.at("bytes") == bytes && summary.at("files") == files && summary.at("directories") == directories);
+  CHECK(summary.at("archiveLimit").get<uint64_t>() + bytes <= kSnapshotBudget);
+  CHECK(capture(host, 3, destination) == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_ERR_ALREADY_EXISTS);
+  CHECK(snapshot(destination) == expected && snapshot(root) == before);
+  host.close();
+  CHECK(snapshot(root) == before);
+}
+void catalog_export_refuses_credentials_and_recovery() {
+  Fixture fixture;
+  fixture.seed("unchanged");
+  const auto root = fs::u8path(fixture.notebook);
+  const auto config_path = root / "vx_notebook/config.json";
+  const auto original = Json::parse(disk(config_path));
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  uint64_t id = 2;
+  const auto rejected = [&](const char *reason) {
+    const auto before = snapshot(root);
+    const auto destination = fixture.root / ("refused-" + std::to_string(id));
+    CHECK(capture(host, id++, destination) == VXCORE_OK);
+    auto result = host.next();
+    CHECK(result->code != VXCORE_OK && result->size == 0 && result->data == nullptr);
+    CHECK(std::string(result->message).find(reason) != std::string::npos);
+    CHECK(std::string(result->message).find(fixture.root.u8string()) == std::string::npos);
+    CHECK(!fs::exists(destination) && snapshot(root) == before);
+  };
+  for (const bool metadata : {false, true}) {
+    for (const auto *key : {"credentials", "syncCredentials", "personalAccessToken", "pat", "password"}) {
+      auto config = original;
+      if (metadata) config["metadata"][key] = "never-log-this-secret";
+      else config[key] = "never-log-this-secret";
+      external_write(config_path, config.dump());
+      rejected("credential");
+    }
+  }
+  for (const auto *url : {"https://name:secret@example.invalid/repo", "https://name%3Asecret@example.invalid/repo",
+                          "https://example.invalid/repo?token=secret", "https://example.invalid/repo#secret"}) {
+    auto config = original;
+    config["syncRemoteUrl"] = url;
+    external_write(config_path, config.dump());
+    rejected("synchronization URL");
+  }
+  external_write(config_path, original.dump());
+  for (const auto *journal : {"vx_import", "vx_transfer"}) {
+    const auto path = root / "vx_notebook" / journal / "transaction";
+    fs::create_directories(path);
+    external_write(path / "journal.json", "unresolved recovery bytes");
+    rejected("recovery");
+    fs::remove_all(path.parent_path());
+  }
+  fs::create_directories(root / ".git");
+  rejected("Git");
+  fs::remove_all(root / ".git");
+  fs::create_directories(root / "vx_notebook/vx_sync/webdav");
+  external_write(root / "vx_notebook/vx_sync/webdav/pending.json", "invalid recovery state");
+  rejected("synchronization");
+  fs::remove_all(root / "vx_notebook/vx_sync");
+  fs::create_directories(root / "vx_notebook/vx_sync/webdav");
+  // CheckNotebookSyncReconfiguration inspects every conflict, not only keys.
+  const Json conflict = {{"version", 1}, {"notebookId", fixture.notebook_id},
+      {"remoteUrl", "https://example.invalid/notes"}, {"usernameHash", std::string(64, '0')},
+      {"entries", Json::object()}, {"conflicts", Json{{"Welcome.md", Json::object()}}}};
+  external_write(root / "vx_notebook/vx_sync/webdav/state.json", conflict.dump());
+  const auto conflicted = snapshot(root);
+  CHECK(capture(host, id++, fixture.root / "conflicted") == VXCORE_OK);
+  auto conflict_result = host.next();
+  CHECK(conflict_result->code == VXCORE_ERR_SYNC_CONFLICT && conflict_result->size == 0);
+  CHECK(snapshot(root) == conflicted);
+  fs::remove_all(root / "vx_notebook/vx_sync");
+#if defined(_WIN32)
+  fs::create_directory(root / "vx_notebook/VX_SYNC");
+  rejected("reserved runtime");
+  fs::remove(root / "vx_notebook/VX_SYNC");
+#endif
+  host.close();
+}
+void catalog_export_open_does_not_recover_or_migrate() {
+  for (const int kind : {0, 1, 2, 3, 4}) {
+    Fixture fixture;
+    fixture.seed("unchanged before export owner open");
+    const auto root = fs::u8path(fixture.notebook);
+    if (kind < 2) {
+      const auto directory = root / "vx_notebook" / (kind == 0 ? "vx_import" : "vx_transfer") / "unresolved";
+      fs::create_directories(directory);
+      external_write(directory / "journal.json", "not-json");
+    } else if (kind == 2) {
+      auto config = Json::parse(disk(root / "vx_notebook/config.json"));
+      config["tags"] = Json::array({Json{{"name", "legacy"}, {"parent", ""}}});
+      config["tagsModifiedUtc"] = 0;
+      external_write(root / "vx_notebook/config.json", config.dump());
+    } else if (kind == 3) fs::create_directories(root / "vx_notebook/vx_transfer/empty");
+    else fs::remove(root_metadata(fixture));
+    const auto before = snapshot(root);
+    {
+      Host host(fixture, ExportOnly{});
+      CHECK(host.next()->code != VXCORE_OK);
+      host.close();
+    }
+    CHECK(snapshot(root) == before);
+  }
+  // Ordinary opens retain core's documented malformed-import cleanup behavior.
+  Fixture ordinary;
+  ordinary.seed("ordinary owner recovery");
+  const auto directory = fs::u8path(ordinary.notebook) / "vx_notebook/vx_import/stale";
+  fs::create_directories(directory);
+  external_write(directory / "journal.json", "not-json");
+  Host host(ordinary, VXM_MODE_CATALOG);
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(!fs::exists(directory));
+  host.close();
+}
+void catalog_export_guards_and_limits() {
+  Fixture fixture;
+  fixture.seed("original");
+  const auto root = fs::u8path(fixture.notebook);
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  uint64_t id = 2;
+  const auto reject = [&](const fs::path &destination, uint64_t budget = kSnapshotBudget) {
+    CHECK(capture(host, id++, destination, budget) == VXCORE_OK);
+    auto result = host.next();
+    CHECK(result->code != VXCORE_OK && result->size == 0 && result->data == nullptr);
+    CHECK(disk(fixture.note()) == "original");
+  };
+  CHECK(capture(host, id, fixture.root / "invalid", 0) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(capture(host, id, fixture.root / "invalid", kSnapshotBudget + 1) == VXCORE_ERR_INVALID_PARAM);
+  reject(root / "inside");
+  reject(fs::u8path(fixture.app) / "inside");
+  reject(fs::u8path(fixture.local) / "inside");
+  reject(fixture.root);
+  reject(fixture.root / "tiny", 1024);
+  CHECK(!fs::exists(root / "inside") && !fs::exists(fixture.root / "tiny"));
+  const auto hardlink = root / "hard-link";
+  fs::create_hard_link(fixture.note(), hardlink);
+  reject(fixture.root / "hardlink");
+  fs::remove(hardlink);
+  const auto config_path = root / "vx_notebook/config.json";
+  const auto raw_config = disk(config_path);
+  for (const auto *key : {"assetsFolder", "recycleBinFolder"}) {
+    auto config = Json::parse(raw_config);
+    config[key] = "../outside";
+    external_write(config_path, config.dump());
+    reject(fixture.root / "external-resource");
+  }
+  external_write(config_path, raw_config);
+#if defined(_WIN32)
+  const auto locked = CreateFileW(fixture.note().c_str(), GENERIC_READ, 0, nullptr, OPEN_EXISTING, 0, nullptr);
+  CHECK(locked != INVALID_HANDLE_VALUE);
+  CHECK(capture(host, id++, fixture.root / "unreadable") == VXCORE_OK);
+  auto unreadable = host.next();
+  CHECK(CloseHandle(locked) != 0);
+  CHECK(unreadable->code == VXCORE_ERR_IO && unreadable->size == 0);
+  CHECK(disk(fixture.note()) == "original");
+#endif
+  auto deep = root;
+  for (size_t i = 0; i < 33; ++i) deep /= "d";
+  fs::create_directories(deep);
+  reject(fixture.root / "depth");
+  fs::remove_all(root / "d");
+  const auto huge = root / "huge.bin";
+  external_write(huge, "");
+  fs::resize_file(huge, 1024ULL * 1024 * 1024);
+  reject(fixture.root / "size");
+  CHECK(fs::file_size(huge) == 1024ULL * 1024 * 1024);
+  fs::remove(huge);
+#if !defined(_WIN32)
+  const auto outside = fixture.root / "outside";
+  external_write(outside, "outside unchanged");
+  fs::create_symlink(outside, root / "link");
+  reject(fixture.root / "linked");
+  fs::remove(root / "link");
+  CHECK(disk(outside) == "outside unchanged");
+  for (const auto &name : {std::string("back\\slash"), std::string("control\x01"), std::string("invalid\xff")}) {
+    external_write(root / name, "unchanged");
+    reject(fixture.root / "unsafe-name");
+    fs::remove(root / name);
+  }
+  CHECK(::mkfifo((root / "pipe").c_str(), 0600) == 0);
+  reject(fixture.root / "special");
+  fs::remove(root / "pipe");
+  auto long_path = root;
+  for (size_t i = 0; i < 6; ++i) long_path /= std::string(200, 'a');
+  fs::create_directories(long_path);
+  reject(fixture.root / "long-path");
+  fs::remove_all(root / std::string(200, 'a'));
+#else
+  std::string name;
+  for (size_t i = 0; i < 90; ++i) name += u8"界";
+  external_write(root / fs::u8path(name), "unchanged");
+  reject(fixture.root / "long-component");
+  fs::remove(root / fs::u8path(name));
+#endif
+  host.close();
+}
+void catalog_export_cancellation_and_accounting() {
+  Fixture fixture;
+  fixture.seed("unchanged");
+  const auto root = fs::u8path(fixture.notebook);
+  const auto before = snapshot(root);
+  Host host(fixture, ExportOnly{}, true);
+  host.signals.wait_entered();
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(capture(host, 2, fixture.root / "pending") == VXCORE_OK);
+  CHECK(vxm_host_cancel(host.handle, 2, host.generation) == VXCORE_OK);
+  host.signals.release();
+  auto result = host.next();
+  CHECK(result->code == VXCORE_ERR_CANCELLED && result->size == 0 && result->data == nullptr);
+  CHECK(!fs::exists(fixture.root / "pending"));
+  result.reset();
+  // Holding many snapshot terminals consumes only their actual 1 KiB summaries,
+  // not a source-sized or 8 MiB catalog body reservation.
+  std::vector<Event> held;
+  for (uint64_t id = 3; id < 11; ++id) {
+    CHECK(capture(host, id, fixture.root / ("held-" + std::to_string(id))) == VXCORE_OK);
+    held.push_back(host.next());
+    CHECK(held.back()->code == VXCORE_OK && held.back()->size <= 1024);
+  }
+  for (uint64_t id = 11; id < 19; ++id) {
+    CHECK(capture(host, id, fixture.root / ("race-" + std::to_string(id))) == VXCORE_OK);
+    std::this_thread::yield();
+    const auto cancelled = vxm_host_cancel(host.handle, id, host.generation);
+    result = host.next();
+    CHECK(cancelled == VXCORE_OK ? result->code == VXCORE_ERR_CANCELLED :
+          cancelled == VXCORE_ERR_INVALID_STATE && result->code == VXCORE_OK);
+    if (cancelled == VXCORE_OK) CHECK(result->size == 0 && result->data == nullptr);
+  }
+  CHECK(capture(host, 19, fixture.root / "close-race") == VXCORE_OK);
+  vxm_host_request_close(host.handle);
+  result = host.next();
+  CHECK(result->request_id == 19 && (result->code == VXCORE_OK || result->code == VXCORE_ERR_CANCELLED));
+  host.close();
+  CHECK(snapshot(root) == before);
+}
+
+
+void catalog_export_active_copy_and_source_change() {
+  Fixture fixture;
+  fixture.seed("unchanged");
+  const auto root = fs::u8path(fixture.notebook);
+  const auto blob = root / "large.bin";
+  {
+    std::ofstream output(blob, std::ios::binary);
+    const std::string chunk(256 * 1024, 'x');
+    for (size_t i = 0; i < 128; ++i) output.write(chunk.data(), chunk.size());
+    output.close();
+    CHECK(!output.fail());
+  }
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  const auto wait_for_destination = [](const fs::path &destination) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
+    while (!fs::exists(destination)) {
+      CHECK(std::chrono::steady_clock::now() < deadline);
+      std::this_thread::yield();
+    }
+  };
+  const auto cancelled_path = fixture.root / "active-cancel";
+  CHECK(capture(host, 2, cancelled_path) == VXCORE_OK);
+  wait_for_destination(cancelled_path); // Capture has passed inventory and entered copying.
+  const auto cancelled = vxm_host_cancel(host.handle, 2, host.generation);
+  auto result = host.next();
+  CHECK(cancelled == VXCORE_OK ? result->code == VXCORE_ERR_CANCELLED :
+        cancelled == VXCORE_ERR_INVALID_STATE && result->code == VXCORE_OK);
+  CHECK(fs::file_size(blob) == 32 * 1024 * 1024);
+  // An ordinary outside writer changes only its own file. Snapshot must not
+  // silently report success with an inventory/copy size mismatch.
+  const auto changed_path = fixture.root / "outside-change";
+  CHECK(capture(host, 3, changed_path) == VXCORE_OK);
+  wait_for_destination(changed_path);
+  {
+    std::ofstream output(blob, std::ios::binary | std::ios::app);
+    output.put('y');
+    output.close();
+    CHECK(!output.fail());
+  }
+  result = host.next();
+  if (result->code == VXCORE_OK) {
+    // Completion can linearize before the external append on a fast filesystem.
+    CHECK(fs::file_size(changed_path / "large.bin") == 32 * 1024 * 1024);
+  } else {
+    CHECK(result->code == VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    CHECK(result->size == 0 && result->data == nullptr);
+  }
+  const auto closing_path = fixture.root / "active-close";
+  CHECK(capture(host, 4, closing_path) == VXCORE_OK);
+  wait_for_destination(closing_path);
+  vxm_host_request_close(host.handle);
+  result = host.next();
+  CHECK(result->request_id == 4 && (result->code == VXCORE_ERR_CANCELLED || result->code == VXCORE_OK));
+  host.close();
+  CHECK(disk(fixture.note()) == "unchanged");
+  CHECK(fs::file_size(blob) == 32 * 1024 * 1024 + 1);
+}
+void catalog_export_entry_limit() {
+  std::cout << "Checking export entry-limit preflight..." << std::endl;
+  Fixture fixture;
+  fixture.seed("unchanged");
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  const auto directory = fs::u8path(fixture.notebook) / "many";
+  fs::create_directory(directory);
+  for (size_t i = 0; i < 100000; ++i)
+    fs::create_directory(directory / std::to_string(i));
+  CHECK(capture(host, 2, fixture.root / "over-entry-limit") == VXCORE_OK);
+  auto result = host.next(std::chrono::seconds(120));
+  CHECK(result->code == VXCORE_ERR_UNSUPPORTED && result->size == 0);
+  CHECK(std::string(result->message).find("100000-entry") != std::string::npos);
+  CHECK(!fs::exists(fixture.root / "over-entry-limit"));
+  CHECK(disk(fixture.note()) == "unchanged");
+  host.close();
+}
+
+
+void catalog_export_refuses_persisted_foreign_restore() {
+  Fixture fixture, foreign;
+  fixture.seed("selected notebook");
+  foreign.seed("foreign notebook");
+  const auto foreign_root = fs::u8path(foreign.notebook);
+  const auto journal = foreign_root / "vx_notebook/vx_import/unresolved/journal.json";
+  fs::create_directories(journal.parent_path());
+  external_write(journal, "not-json"); // Ordinary core restore would discard this tree.
+  const auto session_path = fs::u8path(fixture.local) / "vxsession.json";
+  const auto clean = disk(session_path);
+  const auto foreign_before = snapshot(foreign_root);
+  const auto selected_before = snapshot(fs::u8path(fixture.notebook));
+  Json session = Json::parse(clean);
+  session["notebooks"] = Json::array({Json{{"id", foreign.notebook_id}, {"rootFolder", foreign.notebook},
+                                           {"type", "bundled"}, {"readOnly", false}}});
+  const auto refused = [&] {
+    const auto session_bytes = disk(session_path);
+    {
+      Host host(fixture, ExportOnly{});
+      auto opened = host.next();
+      CHECK(opened->code != VXCORE_OK);
+      CHECK(std::string(opened->message).find("normal notebook open and recovery") != std::string::npos);
+      host.close();
+    }
+    CHECK(disk(session_path) == session_bytes);
+    CHECK(snapshot(foreign_root) == foreign_before);
+    CHECK(snapshot(fs::u8path(fixture.notebook)) == selected_before);
+  };
+  external_write(session_path, session.dump());
+  refused();
+  for (const auto *key : {"buffers", "workspaces"}) {
+    session = Json::parse(clean);
+    session[key] = Json::array({Json::object()}); // Unsafe restore shape is refused before core parsing.
+    external_write(session_path, session.dump());
+    refused();
+  }
+  external_write(session_path, "not-json");
+  refused();
+  const auto linked_session = fixture.root / "linked-session.json";
+  external_write(linked_session, clean);
+  fs::remove(session_path);
+  fs::create_hard_link(linked_session, session_path);
+  refused();
+  fs::remove(session_path);
+  fs::remove(linked_session);
+  external_write(session_path, clean);
+  {
+    Host host(fixture, ExportOnly{});
+    CHECK(host.next()->code == VXCORE_OK);
+    host.close();
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -1066,6 +1529,14 @@ int main() {
     catalog_search_result_limits_and_cancellation();
     catalog_tags_preserve_orphans_and_mutation_outcome();
     catalog_tags_are_complete_or_error();
+    catalog_export_preserves_portable_tree();
+    catalog_export_refuses_credentials_and_recovery();
+    catalog_export_open_does_not_recover_or_migrate();
+    catalog_export_guards_and_limits();
+    catalog_export_cancellation_and_accounting();
+    catalog_export_active_copy_and_source_change();
+    catalog_export_entry_limit();
+    catalog_export_refuses_persisted_foreign_restore();
     std::cout << "Native host real-storage tests passed\n";
     return 0;
   } catch (const std::exception &error) {

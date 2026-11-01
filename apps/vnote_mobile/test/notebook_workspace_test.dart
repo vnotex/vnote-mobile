@@ -10,6 +10,7 @@ import 'package:vnote_mobile/features/library/notebook_browser.dart';
 import 'package:vnote_mobile/features/library/notebook_library_screen.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
+import 'package:vnote_mobile/services/notebook_export.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
@@ -138,6 +139,14 @@ class _Catalog implements CatalogCore {
 
   @override
   void cancelSearch() => searchCancellations++;
+  @override
+  Future<CoreExportSnapshot> exportSnapshot(
+    String destination, {
+    required int stagingBudgetBytes,
+  }) async =>
+      throw StateError('Export snapshot requires the real storage fixture.');
+  @override
+  void cancelExport() {}
 
   @override
   Future<CoreTags> tags([String? nodeId]) async {
@@ -303,6 +312,36 @@ Future<String> _createNotebook(ManagedNotebookPaths paths) async {
 // A presentation driver only: lifecycle/storage proof uses the real library
 // service tests. These callbacks record which snapshot the consumer selected.
 class _Library extends NotebookLibrary {
+  final exportedEntries = <ManagedNotebookEntry>[];
+  final discardedExports = <PreparedNotebookExport>[];
+  final discardedLeftovers = <ExportLeftover>[];
+  final savedExports = <PreparedNotebookExport>[];
+  int exportCancellations = 0;
+  @override
+  Future<void> exportNotebook(ManagedNotebookEntry entry) async {
+    exportedEntries.add(entry);
+  }
+
+  @override
+  Future<void> saveExport(PreparedNotebookExport prepared) async {
+    savedExports.add(prepared);
+  }
+
+  @override
+  Future<void> discardExport(PreparedNotebookExport prepared) async {
+    discardedExports.add(prepared);
+  }
+
+  @override
+  Future<void> discardExportLeftover(ExportLeftover leftover) async {
+    discardedLeftovers.add(leftover);
+  }
+
+  @override
+  void cancelExport() {
+    exportCancellations++;
+  }
+
   final createdNames = <String>[];
   final openedEntries = <ManagedNotebookEntry>[];
   final returnedWorkspaces = <NotebookWorkspace>[];
@@ -340,6 +379,139 @@ class _Library extends NotebookLibrary {
 }
 
 void main() {
+  testWidgets(
+    'export confirmation rejects cancellation and stale library snapshots',
+    (tester) async {
+      final entry = ManagedNotebookEntry(
+        location: 'private/book',
+        notebookId: 'book-id',
+        name: 'Personal',
+      );
+      final library = _Library()
+        ..value = NotebookLibraryState(entries: [entry], stale: false);
+      addTearDown(library.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookLibraryScreen(
+            library: library,
+            dark: false,
+            onThemeChanged: (_) {},
+          ),
+        ),
+      );
+      await tester.tap(find.byTooltip('Export Personal'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(library.exportedEntries, isEmpty);
+      await tester.tap(find.byTooltip('Export Personal'));
+      await tester.pumpAndSettle();
+      library.value = NotebookLibraryState(entries: [entry], stale: false);
+      await tester.tap(find.text('Export ZIP'));
+      await tester.pumpAndSettle();
+      expect(library.exportedEntries, isEmpty);
+      await tester.tap(find.byTooltip('Export Personal'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Export ZIP'));
+      await tester.pumpAndSettle();
+      expect(library.exportedEntries, [same(entry)]);
+    },
+  );
+
+  testWidgets(
+    'retained export cleanup rejects stale confirmation and active provider lease',
+    (tester) async {
+      final prepared = PreparedNotebookExport(
+        id: 'a' * 32,
+        notebookId: 'book-id',
+        notebookName: 'Personal',
+        path: 'private/exports/archive.zip',
+        bytes: 42,
+        sha256: 'a' * 64,
+      );
+      final replacement = PreparedNotebookExport(
+        id: 'b' * 32,
+        notebookId: 'other-id',
+        notebookName: 'Other',
+        path: 'private/exports/other.zip',
+        bytes: 42,
+        sha256: 'b' * 64,
+      );
+      final library = _Library()
+        ..value = NotebookLibraryState(
+          stale: false,
+          exportState: NotebookExportState(
+            prepared: prepared,
+            message: 'ZIP retained for retry.',
+          ),
+        );
+      addTearDown(library.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookLibraryScreen(
+            library: library,
+            dark: false,
+            onThemeChanged: (_) {},
+          ),
+        ),
+      );
+      expect(find.textContaining('private/exports'), findsNothing);
+      await tester.tap(find.text('Discard export'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(library.discardedExports, isEmpty);
+      await tester.tap(find.text('Discard export'));
+      await tester.pumpAndSettle();
+      library.value = NotebookLibraryState(
+        stale: false,
+        exportState: NotebookExportState(prepared: replacement),
+      );
+      await tester.tap(find.text('Discard'));
+      await tester.pumpAndSettle();
+      expect(library.discardedExports, isEmpty);
+      const leftover = ExportLeftover(
+        location: 'private/exports/unfinished',
+        label: 'Interrupted export',
+        reason: 'Unrecognized export data.',
+      );
+      library.value = const NotebookLibraryState(
+        stale: false,
+        exportState: NotebookExportState(leftovers: [leftover]),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(
+        find.byTooltip('Discard export data Interrupted export'),
+      );
+      await tester.pumpAndSettle();
+      library.value = NotebookLibraryState(
+        stale: false,
+        exportState: NotebookExportState(
+          phase: NotebookExportPhase.saving,
+          prepared: replacement,
+          leftovers: const [leftover],
+        ),
+      );
+      await tester.tap(find.text('Discard'));
+      await tester.pump();
+      expect(library.discardedLeftovers, isEmpty);
+      expect(find.text('Save export as…'), findsNothing);
+      await tester.tap(find.text('Cancel export'));
+      await tester.pump();
+      expect(library.exportCancellations, 1);
+      library.value = const NotebookLibraryState(
+        stale: false,
+        exportState: NotebookExportState(
+          phase: NotebookExportPhase.reconciling,
+        ),
+      );
+      await tester.pump();
+      expect(find.text('Cancel export'), findsNothing);
+      expect(find.text('Save export as…'), findsNothing);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   test(
     'native notebook rename updates the selected title and survives reopen',
     () async {

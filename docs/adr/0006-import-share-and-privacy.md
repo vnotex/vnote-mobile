@@ -1,6 +1,6 @@
 # ADR 0006: Managed import, share transactions and privacy
 
-Status: selected design for implementation; no mobile picker, share extension, importer, backup policy or transaction tests are claimed to exist.
+Status: whole-notebook ZIP export, retained-artifact recovery and platform Save As adapters are implemented; Android is exercised. iOS build/runtime and actual backup/transfer artifacts remain unverified. Import, share-in and Markdown/assets-only export remain selected designs, not implemented paths.
 
 Scope: [mobile plan sections 5.3 and 5.7](../mobile-client-plan.md). Retain the full first-release import/export/share boundary, including opaque content preservation. Related boundaries: editor drafts in [ADR 0003](0003-editor-protocol-and-durability.md), preview resources in [ADR 0004](0004-rendering-security.md), and the native host's owner-thread/notebook gate.
 
@@ -45,6 +45,74 @@ Capture a stable on-disk notebook/folder copy under the notebook mutation gate, 
 Export a complete bundled notebook with IDs, unknown supported metadata, tags, recycle-bin content, opaque files and sidecars intact. A Markdown/assets export preserves its source bytes and the selected asset tree; disclose when it is not a notebook backup and does not contain notebook metadata. Include hidden/unknown files inside the portable tree unless they are positively classified runtime/secret material; never use a general “ignore dotfiles” or extension allowlist.
 
 Finish copying to an export staging artifact before invoking system UI. A cancelled/failed provider write leaves the live notebook unchanged and the source export retryable. Do not claim arbitrary providers support atomic replace: where they do not, cancellation may leave an explicitly identified incomplete **external copy**, which must not be reported as success. Export temporary files are cleaned by the owning transaction after grants settle or on next startup.
+
+### Implemented whole-notebook export
+
+The library export action is available only after the editor's existing disposition
+barrier has returned to the library. It does not force-save or capture unwritten
+editor input. The source copy is produced by a dedicated read-only export owner;
+that owner is joined before worker ZIP creation or system UI. Live note metadata
+and bodies are never serialized/reconstructed by the export controller.
+
+The archive contains the notebook contents at its root, without a synthetic outer
+folder. Portable hidden/unknown files, raw configuration, IDs, tags, assets,
+recycle content and encrypted note/key sidecars are retained. The exact
+`vx_notebook/vx_sync` runtime tree is excluded only after the public sync recovery
+check; unresolved import/transfer trees and cleanup-triggering residues refuse
+export. Unclassified `.git` data, links/reparse/hardlinked/special files, external
+asset/recycle layouts and unsupported path shapes also refuse rather than being
+silently dropped. There is no extension/dotfile/ignored-pattern filter.
+
+Known credential keys (`credentials`, `syncCredentials`, `personalAccessToken`,
+`pat`, `password`) at configuration root or directly under metadata refuse export.
+Password-bearing URL userinfo, nonempty query or fragment also refuse; username-
+only routing is retained. Config is copied raw, never stripped or rewritten. This
+is not a scanner for arbitrary secrets a user may store in their note bodies.
+
+| Export resource | Hard limit |
+| --- | --- |
+| Source bytes | 1 GiB total; no separate 256 MiB import-file cap |
+| Portable entries | 100,000 files/directories |
+| Paths | Depth 32; component 255 UTF-8 bytes; relative path 1,024 UTF-8 bytes |
+| Owned staging | 4 GiB combined snapshot/archive; 128 KiB marker allowance |
+| Free-space headroom | 64 MiB beyond the conservative reservation |
+| Active/retained work | One operation and one prepared ZIP in normal use |
+
+The combined reservation includes source bytes and a conservative deflate/header
+bound, not only the raw copy. Actual IO/output failures are checked. Snapshot copy
+uses a 256 KiB buffer. ZIP uses pinned [archive 4.6.0](https://pub.dev/packages/archive/versions/4.6.0),
+streamed deflate and incremental 64 KiB steps on a worker isolate; no full-file or
+full-archive buffering. The central-directory finalizer is bounded by the entry/path
+limits but synchronous; cancel waits through it and is checked before publishing
+ready state. ZIP64 is supported. Import-specific expansion and destination
+normalization checks below remain import requirements, not an implemented decoder.
+Backslashes and ambiguous components are refused before the encoder can normalize
+them; accepted spelling is retained.
+
+Each app-private `exports/<transaction>/` directory has a versioned request marker
+published by temporary write, flush and rename before snapshot creation. A complete
+ZIP, size and streaming SHA-256 precede a separate ready marker. Only then may raw
+snapshot bytes be removed. Initialization cleans proven-owned interrupted
+preparation, retains complete ZIPs, and surfaces unmarked/corrupt/multiple records
+for explicit current-item cleanup. Unknown data is never automatically deleted;
+confirmed cleanup stays within that immediate export-root child and does not follow
+links. This prevents a crash-before-marker from permanently wedging the export slot.
+
+Save validates the current artifact and its bytes/hash. Cancel/provider failure
+retains it; a process interruption may leave an external copy completed or partial,
+so retry explicitly saves another chosen copy. Discard waits until no native,
+worker or provider lease remains and requires confirmation. Success means Android
+finished writing/closing its provider stream, or UIKit reported export completion;
+it does not prove remote-provider synchronization or arbitrary atomic replacement.
+Only settled successful saves remove the prepared source automatically.
+
+Android uses `ACTION_CREATE_DOCUMENT` and a bounded worker copy via ContentResolver,
+without broad storage permission or persistent grants. iOS uses scene-aware
+`UIDocumentPickerViewController(forExporting:asCopy:)`; its initial filename is the
+actual `notebook.zip`, because this API has no suggested-name argument. It retains
+the picker/delegate/source through completion or dismissal. Post-presentation
+non-success, including scene loss, reports possible incomplete external output.
+The iOS adapter has no runtime/build evidence on this Windows workstation.
 
 ## Archive/provider preflight and quotas
 
@@ -116,6 +184,17 @@ References: [Apple document picker](https://developer.apple.com/documentation/ui
 Working notebooks, durable drafts and the inbox use persistent sandbox storage, not OS caches. Persistent core app-data/local-data namespaces are separate and must not be globally relocated to a disposable cache. Only proven-derived search/metadata caches, rendered previews and reproducible web assets are disposable; classify files rather than deleting all core local data.
 
 Select **no automatic OS cloud backup or device-transfer inclusion of app-private notebook data in the first release**. Exclude managed notebooks, core configuration/local data, drafts, inbox, temporary exports, dedup ledger and credential ciphertext using the platform's actual backup/data-extraction controls; include App Group contents in the iOS audit. Explain at onboarding/settings that app removal/device loss may remove local data and that explicit notebook export/WebDAV are the available portable-copy mechanisms. WebDAV synchronization is not represented as immutable backup. Minimum-OS/vendor differences in exclusion must be tested and disclosed; an unverified platform rule is not a guarantee. User-created external exports are controlled by the destination provider and may be cloud-backed.
+
+Implemented controls: Android explicitly disables backup and provides old/new XML
+exclusions for all documented credential/device-protected storage domains, including
+both cloud backup and device transfer. No `device_external` domain is invented.
+iOS storage preparation sets/verifies exclusion on stable Application Support,
+`core/`, `notebooks/` and `exports/` directories before child writes, repeats at
+startup/before export, and never replaces those group directories. This follows
+[Apple's directory-group guidance](https://developer.apple.com/documentation/foundation/optimizing-your-app-s-data-for-icloud-backup),
+which explicitly says exclusion is guidance, not a guarantee. Failure is visible;
+there is no unprotected fallback. Android manifest flags are exercised, but actual
+OEM transfer/iOS backup artifacts remain an open verification gate.
 
 Credentials remain in iOS Keychain/Android Keystore-backed encrypted storage via the reviewed credential service. Select device-bound, nonsynchronizing credential storage and require reauthentication after migration. No plaintext fallback, notebook metadata credential, share-in secret, WebView credential, signing key or recovery secret enters the inbox/portable export. Known core sync runtime/session state and application vault data are not portable notebook payload. Preserve unknown user files rather than deleting anything that looks private; if a legacy notebook actually embeds known credential fields, stop export/import and explain the remediation instead of silently leaking or rewriting them.
 

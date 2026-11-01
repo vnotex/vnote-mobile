@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning from the editor requires Write/Discard/Cancel before **Notebooks** can switch the selected notebook. Library discovery, catalog and editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
+The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Export a complete saved notebook ZIP from its library row through system Save As. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning from the editor requires Write/Discard/Cancel before **Notebooks** can switch the selected notebook. Library discovery, catalog and editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
 
 ## Development
 
@@ -80,12 +80,28 @@ is capped at 1,000 candidate notebooks and fails rather than publishing a partia
 library. A failed create may leave an unavailable owned entry for inspection;
 failure is not proof of rollback. There is no notebook-removal UI in this slice.
 
-Managed import/export and attachment editing remain planned offline work;
-preview, autosave/recovery and sync remain later gates. No iOS or physical-device
-completion follows from Android/host verification.
+Whole-notebook ZIP export preserves portable metadata, IDs, hidden/opaque files,
+assets, encrypted sidecars and recycle content. It excludes only classified local
+runtime data and refuses unsafe paths, embedded credentials or unresolved recovery;
+it is not a Git-history backup. The ZIP itself is not encrypted. Export is bounded
+to 1 GiB of source and 100,000 entries within a 4 GiB staging budget. Cancelled or
+failed saves retain one prepared ZIP for retry; interrupted/corrupt staging has an
+explicit discard action that never deletes the notebook. Snapshot capture closes
+its native owner before ZIP/provider work, so other notebooks can open afterward.
+
+Android Save As is exercised. The iOS export adapter is implemented but has not
+been built or run here. OS backup exclusion is configured and requested, not a
+verified guarantee across iOS/OEM transfers. Keep your own exported copies before
+app removal or device loss. See [export/privacy contract](docs/adr/0006-import-share-and-privacy.md).
+
+Managed import, Markdown/assets-only export and attachment editing remain planned
+offline work; preview, autosave/recovery and sync remain later gates. No iOS or
+physical-device completion follows from Android/host verification.
 
 ## License
 
 VNote Mobile is licensed under **GNU LGPLv3**, matching VNote by owner decision. See [COPYING.LESSER](COPYING.LESSER) and its incorporated [GNU GPLv3 terms](COPYING). No warranty is provided under those terms.
 
 `COPYING.LESSER` is copied verbatim from the pinned VNote reference; `COPYING` is the canonical GNU GPLv3 text. The MIT license of vxcore and licenses/notices of Flutter, CodeMirror and all other dependencies remain unchanged. Generated editor assets include their bundled dependency notices; the native host embeds the actual core/dependency notices, and the app includes both application license texts. This is not a completed release license/SBOM review; distribution must also satisfy source, modification/relinking and store obligations.
+
+The pinned Dart archive codec's [derived-code notices](apps/vnote_mobile/licenses/archive-4.6.0.txt) are included through Flutter's additional-license mechanism; its MIT license and the posix package license are included by the standard collector.

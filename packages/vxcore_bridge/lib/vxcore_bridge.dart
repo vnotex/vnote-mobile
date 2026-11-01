@@ -8,6 +8,7 @@ export 'src/core_notebook.dart'
         CoreEditorType,
         CoreEntry,
         CoreException,
+        CoreExportSnapshot,
         CoreNote,
         CoreNotebook,
         CoreWriteResult,

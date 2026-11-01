@@ -101,6 +101,24 @@ final class CoreTags {
   final List<String> assigned;
 }
 
+final class CoreExportSnapshot {
+  const CoreExportSnapshot({
+    required this.notebookId,
+    required this.notebookName,
+    required this.bytes,
+    required this.files,
+    required this.directories,
+    required this.archiveLimit,
+  });
+
+  final String notebookId;
+  final String notebookName;
+  final int bytes;
+  final int files;
+  final int directories;
+  final int archiveLimit;
+}
+
 abstract interface class CatalogCore {
   CoreDirectory get initialDirectory;
   String get nativeNotices;
@@ -120,6 +138,17 @@ abstract interface class CatalogCore {
   Future<void> createTag(String name);
   Future<void> setTags(String nodeId, List<String> tags);
   void cancelSearch();
+
+  /// Captures portable bytes into a new staging directory.
+  ///
+  /// A native implementation requires [CoreNotebook.openExportCatalog]; ordinary
+  /// catalog owners reject export admission. The budget covers snapshot plus ZIP.
+  /// Wait for this future (or [close]) before removing any partial destination.
+  Future<CoreExportSnapshot> exportSnapshot(
+    String destination, {
+    required int stagingBudgetBytes,
+  });
+  void cancelExport();
   Future<void> close();
 }
 
@@ -166,6 +195,7 @@ final class CoreException implements Exception {
 
 const _maxSource = 4 * 1024 * 1024;
 const _maxCatalog = 8 * 1024 * 1024;
+const _maxExportStaging = 4 * 1024 * 1024 * 1024 - 128 * 1024;
 const _maxInteger = 9007199254740991;
 const _invalid = native.VxCoreError.VXCORE_ERR_INVALID_PARAM;
 const _unusable = native.VxCoreError.VXCORE_ERR_INVALID_STATE;
@@ -360,6 +390,43 @@ Map<String, dynamic> _queryObject(native.VxmEvent event) {
   return decoded;
 }
 
+CoreExportSnapshot _exportSnapshot(native.VxmEvent event) {
+  Never malformed() => throw const CoreException(
+    native.VxCoreError.VXCORE_ERR_JSON_PARSE,
+    'Malformed native export summary',
+  );
+  if (event.size <= 0 || event.size > 1024) malformed();
+  final json = _queryObject(event);
+  final bytes = json['bytes'];
+  final files = json['files'];
+  final directories = json['directories'];
+  final archiveLimit = json['archiveLimit'];
+  if (bytes is! int ||
+      bytes < 0 ||
+      bytes > 1024 * 1024 * 1024 ||
+      files is! int ||
+      files < 1 ||
+      directories is! int ||
+      directories < 1 ||
+      files + directories > 100000 ||
+      archiveLimit is! int ||
+      archiveLimit < bytes + 1024 ||
+      bytes + archiveLimit > _maxExportStaging) {
+    malformed();
+  }
+  return CoreExportSnapshot(
+    notebookId: _queryString(
+      event.notebook_id.cast<Utf8>().toDartString(),
+      maximum: 127,
+    ),
+    notebookName: _queryString(event.notebook_name.cast<Utf8>().toDartString()),
+    bytes: bytes,
+    files: files,
+    directories: directories,
+    archiveLimit: archiveLimit,
+  );
+}
+
 CoreSearchResult _searchResult(native.VxmEvent event) {
   final json = _queryObject(event);
   final notebookId = _queryString(json['notebookId'], maximum: 127);
@@ -443,6 +510,7 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
   int _generation = 0;
   int _nextRequest = 2;
   int? _searchRequest;
+  int? _exportRequest;
   final _pending = <int, _Pending>{};
   final _closedEvent = Completer<int>();
   Future<void>? _closing;
@@ -475,6 +543,25 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     localDataPath: localDataPath,
     notebookPath: notebookPath,
     expectedNotebookId: expectedNotebookId,
+    mode: native.VXM_MODE_CATALOG,
+  );
+
+  /// Opens a pinned, export-only owner without source-rewriting recovery.
+  ///
+  /// This is the required factory for [exportSnapshot]. It rejects mutations and
+  /// unsafe persisted restoration, recovery, or migration state. Use [openCatalog]
+  /// separately for normal notebook operations and their existing recovery policy.
+  static Future<CoreNotebook> openExportCatalog({
+    required String appDataPath,
+    required String localDataPath,
+    required String notebookPath,
+    required String expectedNotebookId,
+  }) => _open(
+    appDataPath: appDataPath,
+    localDataPath: localDataPath,
+    notebookPath: notebookPath,
+    expectedNotebookId: expectedNotebookId,
+    exportOnly: true,
     mode: native.VXM_MODE_CATALOG,
   );
 
@@ -512,6 +599,7 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     required String notebookPath,
     required int mode,
     bool createNotebook = false,
+    bool exportOnly = false,
     String? notebookName,
     String? expectedNotebookId,
     String? nodeId,
@@ -544,7 +632,8 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
               : _option(arena, expectedNotebookId)
           ..node_id = nodeId == null ? nullptr : _option(arena, nodeId)
           ..mode = mode
-          ..create_notebook = createNotebook ? 1 : 0;
+          ..create_notebook = createNotebook ? 1 : 0
+          ..export_only = exportOnly ? 1 : 0;
         final out = arena<Pointer<native.VxmHost>>();
         final code = native.vxm_host_create(
           options,
@@ -848,6 +937,71 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     }
   }
 
+  @override
+  Future<CoreExportSnapshot> exportSnapshot(
+    String destination, {
+    required int stagingBudgetBytes,
+  }) async {
+    _requireMode(native.VXM_MODE_CATALOG);
+    final handle = _usableHandle();
+    if (_exportRequest != null) {
+      throw const CoreException(
+        _unusable,
+        'A notebook export is already running',
+      );
+    }
+    if (stagingBudgetBytes <= 0 || stagingBudgetBytes > _maxExportStaging) {
+      throw const CoreException(
+        _invalid,
+        'Invalid combined export staging budget',
+      );
+    }
+    final id = _nextRequest++;
+    final pending = _Pending(
+      native.VXM_EVENT_EXPORT,
+      0,
+      decode: _exportSnapshot,
+    );
+    final code = using(
+      (arena) => native.vxm_host_catalog_export(
+        handle,
+        id,
+        _generation,
+        _option(arena, destination),
+        stagingBudgetBytes,
+      ),
+    );
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native export admission failed');
+    }
+    _pending[id] = pending;
+    _exportRequest = id;
+    try {
+      final result = await pending.completer.future as CoreExportSnapshot;
+      if (result.notebookId != initialDirectory.notebookId ||
+          result.bytes + result.archiveLimit > stagingBudgetBytes) {
+        throw const CoreException(
+          _unusable,
+          'Native export summary correlation failed',
+        );
+      }
+      return result;
+    } finally {
+      if (_exportRequest == id) _exportRequest = null;
+    }
+  }
+
+  @override
+  void cancelExport() {
+    final id = _exportRequest;
+    final handle = _handle;
+    if (id == null || handle == null) return;
+    final code = native.vxm_host_cancel(handle, id, _generation);
+    if (code != native.VxCoreError.VXCORE_OK && code != _unusable) {
+      throw CoreException(code, 'Native export cancellation failed');
+    }
+  }
+
   void _onNotify(int token) {
     final handle = _eventHandle;
     if (token != _token || handle == null) return;
@@ -886,7 +1040,8 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
             pending.completer.complete(
               event.node_id.cast<Utf8>().toDartString(),
             );
-          } else if (event.kind == native.VXM_EVENT_QUERY) {
+          } else if (event.kind == native.VXM_EVENT_QUERY ||
+              event.kind == native.VXM_EVENT_EXPORT) {
             pending.completer.complete(pending.decode!(event));
           } else if (event.kind == native.VXM_EVENT_TAG) {
             pending.completer.complete(true);

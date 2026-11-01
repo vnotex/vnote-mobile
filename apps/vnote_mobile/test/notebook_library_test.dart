@@ -6,6 +6,8 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
+import 'package:vnote_mobile/services/notebook_export.dart';
+import 'package:vnote_mobile/services/document_export_platform.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
@@ -13,6 +15,7 @@ class _Owners {
   int active = 0;
   int maximum = 0;
   Completer<void>? closeGate;
+  Completer<void>? closeEntered;
   Completer<void>? openingGate;
   bool failClose = false;
   void acquire() {
@@ -27,6 +30,24 @@ class _Owners {
       await openingGate?.future;
       return _Catalog(
         await CoreNotebook.openCatalog(
+          appDataPath: paths.app,
+          localDataPath: paths.local,
+          notebookPath: paths.notebook,
+          expectedNotebookId: id,
+        ),
+        this,
+      );
+    } catch (_) {
+      active--;
+      rethrow;
+    }
+  }
+
+  Future<CatalogCore> openExport(ManagedNotebookPaths paths, String id) async {
+    acquire();
+    try {
+      return _Catalog(
+        await CoreNotebook.openExportCatalog(
           appDataPath: paths.app,
           localDataPath: paths.local,
           notebookPath: paths.notebook,
@@ -99,10 +120,21 @@ class _Catalog implements CatalogCore {
   @override
   void cancelSearch() => core.cancelSearch();
   @override
+  Future<CoreExportSnapshot> exportSnapshot(
+    String destination, {
+    required int stagingBudgetBytes,
+  }) =>
+      core.exportSnapshot(destination, stagingBudgetBytes: stagingBudgetBytes);
+  @override
+  void cancelExport() => core.cancelExport();
+  @override
   Future<void> close() => closing ??= _close();
   Future<void> _close() async {
     final gate = owners.closeGate;
     owners.closeGate = null;
+    final entered = owners.closeEntered;
+    owners.closeEntered = null;
+    if (entered != null && !entered.isCompleted) entered.complete();
     await gate?.future;
     try {
       await core.close();
@@ -112,6 +144,41 @@ class _Catalog implements CatalogCore {
     if (owners.failClose) {
       owners.failClose = false;
       throw StateError('Close reported an error after join.');
+    }
+  }
+}
+
+class _ExportProvider implements DocumentExportPlatform {
+  final entered = Completer<String>();
+  final result = Completer<DocumentExportResult>();
+  int saves = 0;
+  @override
+  Future<void> prepareStorage() async {}
+  @override
+  Future<DocumentExportResult> save({
+    required String operationId,
+    required String path,
+    required String suggestedName,
+  }) async {
+    saves++;
+    final reader = await File(path).open();
+    try {
+      entered.complete(path);
+      return await result.future;
+    } finally {
+      await reader.close();
+    }
+  }
+
+  @override
+  Future<void> cancel(String operationId) async {
+    if (!result.isCompleted) {
+      result.complete(
+        const DocumentExportResult(
+          status: DocumentExportStatus.cancelled,
+          externalMayBeIncomplete: true,
+        ),
+      );
     }
   }
 }
@@ -136,17 +203,22 @@ void main() {
   late ManagedNotebookStorage storage;
   late _Owners owners;
   late NotebookLibrary library;
-  NotebookLibrary makeLibrary({LibraryCreateCatalog? create}) =>
-      NotebookLibrary(
-        obtainStorage: () async => storage,
-        openCatalog: owners.open,
-        createCatalog: create ?? owners.create,
-        createWorkspace: (paths, id) => NotebookWorkspace(
-          paths: paths,
-          notebookId: id,
-          openCatalog: owners.open,
-        ),
-      );
+  NotebookLibrary makeLibrary({
+    LibraryCreateCatalog? create,
+    DocumentExportPlatform? exportPlatform,
+  }) => NotebookLibrary(
+    obtainStorage: () async => storage,
+    openCatalog: owners.open,
+    openExportCatalog: owners.openExport,
+    createExporter: (root) =>
+        NotebookExporter(root: root, platform: exportPlatform),
+    createCatalog: create ?? owners.create,
+    createWorkspace: (paths, id) => NotebookWorkspace(
+      paths: paths,
+      notebookId: id,
+      openCatalog: owners.open,
+    ),
+  );
   setUp(() async {
     temp = await Directory.systemTemp.createTemp('vnote-library-');
     storage = ManagedNotebookStorage(
@@ -164,6 +236,98 @@ void main() {
     expect(owners.active, 0);
     await temp.delete(recursive: true);
   });
+
+  test('export releases native owner before provider IO and never retires a newer library operation', () async {
+    await library.shutdown();
+    library.dispose();
+    final provider = _ExportProvider();
+    library = makeLibrary(exportPlatform: provider);
+    await library.initialize();
+    await library.createNotebook('Export source');
+    await library.returnToLibrary(library.value.workspace!);
+    final entry = library.value.entries.single;
+    final exporting = library.exportNotebook(entry);
+    final archive = await Future.any([
+      provider.entered.future,
+      exporting.then<String>(
+        (_) => throw StateError(
+          library.value.exportState.error ??
+              'Export ended before provider entry.',
+        ),
+      ),
+    ]);
+    expect(await File(archive).exists(), isTrue);
+    expect(owners.active, 0);
+    expect(library.value.busy, isFalse);
+    final gate = Completer<void>();
+    owners.openingGate = gate;
+    final opening = library.openNotebook(entry);
+    try {
+      expect(library.value.busy, isTrue);
+      provider.result.complete(
+        const DocumentExportResult(
+          status: DocumentExportStatus.saved,
+          externalMayBeIncomplete: false,
+        ),
+      );
+      await exporting;
+      expect(
+        library.value.busy,
+        isTrue,
+        reason: 'Export completion must not retire the newer open.',
+      );
+      expect(await File(archive).exists(), isFalse);
+    } finally {
+      if (!gate.isCompleted) gate.complete();
+    }
+    expect(await opening, isTrue);
+    expect(
+      library.value.workspace!.value.directory!.notebookId,
+      entry.notebookId,
+    );
+    expect(owners.maximum, 1);
+  });
+
+  test(
+    'cancel after snapshot waits for join and never starts the provider',
+    () async {
+      await library.shutdown();
+      library.dispose();
+      final provider = _ExportProvider();
+      library = makeLibrary(exportPlatform: provider);
+      await library.initialize();
+      await library.createNotebook('Cancel source');
+      await library.returnToLibrary(library.value.workspace!);
+      final gate = Completer<void>();
+      final entered = Completer<void>();
+      owners.closeGate = gate;
+      owners.closeEntered = entered;
+      final exporting = library.exportNotebook(library.value.entries.single);
+      try {
+        await Future.any([
+          entered.future,
+          exporting.then<void>(
+            (_) => throw StateError(
+              library.value.exportState.error ??
+                  'Export ended before owner close.',
+            ),
+          ),
+        ]);
+        library.cancelExport();
+        expect(library.value.busy, isTrue);
+        expect(owners.active, 1);
+        expect(provider.saves, 0);
+      } finally {
+        if (!gate.isCompleted) gate.complete();
+      }
+      await exporting;
+      expect(library.value.exportState.prepared, isNull);
+      expect(library.value.exportState.busy, isFalse);
+      expect(provider.saves, 0);
+      expect(owners.active, 0);
+      expect(await library.openNotebook(library.value.entries.single), isTrue);
+    },
+  );
 
   test(
     'create, rename, switch and restart preserve independent notebook data',

@@ -28,6 +28,23 @@ external int vxm_host_cancel(
     ffi.Uint64,
     ffi.Uint64,
     ffi.Pointer<ffi.Char>,
+    ffi.Uint64,
+  )
+>()
+external int vxm_host_catalog_export(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> destination,
+  int staging_budget_bytes,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
   )
 >()
 external int vxm_host_catalog_list(
@@ -159,6 +176,8 @@ const int VXM_EDITOR_TEXT = 2;
 const int VXM_EVENT_CATALOG_OPEN = 5;
 
 const int VXM_EVENT_CLOSED = 4;
+
+const int VXM_EVENT_EXPORT = 10;
 
 const int VXM_EVENT_LIST = 6;
 
@@ -349,6 +368,9 @@ final class VxmOpenOptions extends ffi.Struct {
   @ffi.Int32()
   external int create_notebook;
 
+  @ffi.Int32()
+  external int export_only;
+
   static ffi.Pointer<VxmOpenOptions> $allocate(
     ffi.Allocator $allocator, {
     required ffi.Pointer<ffi.Char> app_data_path,
@@ -359,6 +381,7 @@ final class VxmOpenOptions extends ffi.Struct {
     required ffi.Pointer<ffi.Char> node_id,
     required int mode,
     required int create_notebook,
+    required int export_only,
   }) => $allocator<VxmOpenOptions>()
     ..ref.app_data_path = app_data_path
     ..ref.local_data_path = local_data_path
@@ -367,5 +390,6 @@ final class VxmOpenOptions extends ffi.Struct {
     ..ref.expected_notebook_id = expected_notebook_id
     ..ref.node_id = node_id
     ..ref.mode = mode
-    ..ref.create_notebook = create_notebook;
+    ..ref.create_notebook = create_notebook
+    ..ref.export_only = export_only;
 }

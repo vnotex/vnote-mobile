@@ -1,6 +1,6 @@
 # ADR 0002: Native ownership, execution and cancellation
 
-Status: the serialized owner host, managed multi-notebook library, notebook search and tags are implemented. Network-worker coordination remains a design, not a verified concurrency claim; iOS and physical-device gates remain open.
+Status: the serialized owner host, managed multi-notebook library, notebook search/tags and read-only export snapshots are implemented. Network-worker coordination remains a design, not a verified concurrency claim; iOS and physical-device gates remain open.
 
 ## Evidence and decisions
 
@@ -50,7 +50,7 @@ The pinned core API accepts `volatile int *cancel_flag`; volatile is not portabl
 
 ## Host ABI and bounded transport
 
-The host ABI is separate from `vxcore_*` exports. The current `vxm_*` boundary implements explicit catalog/note creation, note read/write, catalog list/mutate/query/tag, cancel/drain/free/close/destroy and a borrowed read-only notices export. Later sync handshakes extend these host protocol choices: versioned submit, cancel, reservation-reply, drain-events, release-event and asynchronous shutdown operations. Use fixed-width request ID and context/notebook/session generation; payloads carry operation, captured editor revision, byte length and explicit ownership. Terminal envelope carries actual core code, redacted explanation and outcome (success/error/cancelled/stale), plus partial-application facts. Never retrieve shared last-error text to label a different operation.
+The host ABI is separate from `vxcore_*` exports. The current `vxm_*` boundary implements explicit catalog/note creation, note read/write, catalog list/mutate/query/tag/export, cancel/drain/free/close/destroy and a borrowed read-only notices export. Later sync handshakes extend these host protocol choices: versioned submit, cancel, reservation-reply, drain-events, release-event and asynchronous shutdown operations. Use fixed-width request ID and context/notebook/session generation; payloads carry operation, captured editor revision, byte length and explicit ownership. Terminal envelope carries actual core code, redacted explanation and outcome (success/error/cancelled/stale), plus partial-application facts. Never retrieve shared last-error text to label a different operation.
 
 Current admission limits: 64 admitted operations and 32 MiB total queued input per host, 4 MiB editor source, 8 MiB catalog/query JSON, 64 retained terminals plus one separately reserved close terminal, and 16 MiB aggregate result storage including bounded dynamic metadata. Query/tag JSON input is limited to 16 KiB. Successful query events retain the full allocated 8 MiB reservation until release; errors/cancellations free the body before releasing its charge. Tag mutation output reserves metadata only. Oversized input is rejected before mutation.
 
@@ -136,6 +136,42 @@ paths, overwrites and implicitly moved indexed nodes are refused before dispatch
 UUID assets and captured resource destinations are checked after core success;
 nonfatal core resource failures become explicit partial-outcome errors, never host
 filesystem repairs. Ordinary text suffixes do not receive a Markdown move parser.
+
+### Read-only export capture
+
+`CoreNotebook.openExportCatalog` is the only snapshot-capable factory. It sets
+`export_only`, requires the observed notebook UUID, forbids creation and rejects
+mutations. Ordinary catalog opening/recovery is unchanged. Before context creation,
+export-only initialization checks bounded persisted session state for notebook,
+buffer and workspace auto-restore records; otherwise context construction could
+recover another notebook before the explicit selected open. It refuses restore,
+source-changing recovery residue, malformed/unsafe required metadata and tag
+migration cases. The user must complete normal open/recovery first. The public
+sync reconfiguration guard runs after the proven-clean core open.
+
+`vxm_host_catalog_export` inventories and copies the full portable tree on O under
+the core gate into an absent owned staging directory, using 256 KiB reusable copy
+storage and no-follow file handles. Root/relative link checks and file identities
+are revalidated; ordinary source changes fail instead of returning a truncated
+snapshot. Absolute ancestors are checked at phase boundaries, with root and
+relative components checked at each access; this is not an adversarial filesystem
+snapshot against a foreign writer. An export result reserves only a 1 KiB summary
+plus existing bounded metadata, never a source-sized transport payload.
+
+Search and snapshot share the mutex-linearized active read-only cancellation
+mechanism. Accepted cancellation cannot become late success; close cancels/drains
+these reads but finishes active mutations. Partial staging is caller-owned and
+cannot be discarded until the native future/close has settled.
+
+The library capture callback always closes/joins the export owner, then retires
+only its captured admission token. ZIP generation and system provider I/O run on
+the owned copy afterward, outside the notebook gate. A later library open may be
+active when export finishes; export completion cannot retire that newer operation.
+The ZIP worker is joined before cleanup. Cancellation is checked between body
+chunks/entries; the maintained codec's bounded central-directory finalizer is
+synchronous, so cancellation there waits until finalization and is checked before
+ready publication. A committed ready copy remains retryable if cancellation wins
+after publication. See ADR 0006 for artifact ownership, quotas and provider leases.
 
 ### Additional upstream concurrency gate
 

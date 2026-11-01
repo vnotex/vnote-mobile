@@ -5,12 +5,18 @@ import 'package:flutter/foundation.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'managed_notebook_storage.dart';
+import 'notebook_export.dart';
 import 'notebook_workspace.dart';
 
 typedef LibraryOpenCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
   String? expectedNotebookId,
 );
+typedef LibraryOpenExportCatalog = Future<CatalogCore> Function(
+  ManagedNotebookPaths paths,
+  String notebookId,
+);
+typedef LibraryCreateExporter = NotebookExporter Function(String root);
 typedef LibraryCreateCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
   String name,
@@ -44,7 +50,9 @@ class NotebookLibraryState {
     this.stale = true,
     this.closed = false,
     this.error,
+    this.exportState = const NotebookExportState(),
   });
+  final NotebookExportState exportState;
   final List<ManagedNotebookEntry> entries;
   final NotebookWorkspace? workspace;
   final bool busy;
@@ -60,16 +68,24 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     LibraryOpenCatalog? openCatalog,
     LibraryCreateCatalog? createCatalog,
     LibraryWorkspaceFactory? createWorkspace,
+    LibraryOpenExportCatalog? openExportCatalog,
+    LibraryCreateExporter? createExporter,
   }) : _obtainStorage = obtainStorage ?? ManagedNotebookStorage.obtain,
        _openCatalog = openCatalog ?? _open,
        _createCatalog = createCatalog ?? _create,
        _createWorkspace = createWorkspace ?? _workspaceFor,
+       _openExportCatalog = openExportCatalog ?? _openExport,
+       _createExporter = createExporter ?? _exporterFor,
        super(const NotebookLibraryState());
 
   final Future<ManagedNotebookStorage> Function() _obtainStorage;
   final LibraryOpenCatalog _openCatalog;
   final LibraryCreateCatalog _createCatalog;
   final LibraryWorkspaceFactory _createWorkspace;
+  final LibraryOpenExportCatalog _openExportCatalog;
+  final LibraryCreateExporter _createExporter;
+  NotebookExporter? _exporter;
+  NotebookExportState _exportFallback = const NotebookExportState();
   ManagedNotebookStorage? _storage;
   CatalogCore? _temporary;
   NotebookWorkspace? _workspace;
@@ -112,6 +128,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       stale: _stale || _stopping,
       closed: _stopping,
       error: _error,
+      exportState: _exporter?.value ?? _exportFallback,
     );
   }
 
@@ -129,12 +146,109 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
   }
 
+  Future<void> _ensureExporter() async {
+    if (_stopping) return;
+    try {
+      if (_exporter == null) {
+        final root = await _storage!.obtainExportRoot();
+        if (_stopping) return;
+        final exporter = _createExporter(root);
+        _exporter = exporter;
+        exporter.addListener(_exportChanged);
+      }
+      await _exporter!.initialize();
+    } on Object {
+      _exportFallback = const NotebookExportState(
+        error: 'Private export storage could not be prepared.',
+      );
+    }
+  }
+
+  void _exportChanged() => _publish();
+
+  Future<void> exportNotebook(ManagedNotebookEntry entry) async {
+    final exporter = _exporter;
+    if (_workspace != null ||
+        _stale ||
+        !entry.canOpen ||
+        exporter == null ||
+        exporter.value.busy ||
+        exporter.value.prepared != null ||
+        exporter.value.leftovers.isNotEmpty ||
+        !_entries.any((current) => identical(current, entry)) ||
+        !_admit()) {
+      return;
+    }
+    final admission = _active!;
+    void releaseAdmission() {
+      if (identical(_active, admission)) _retire();
+    }
+
+    try {
+      final paths = await _storage!.existing(entry.location);
+      if (_stopping) return;
+      final prepared = await exporter.prepare(
+        notebookId: entry.notebookId!,
+        notebookName: entry.name,
+        capture: (destination, budget, cancellation) async {
+          cancellation.check();
+          if (_stopping) throw StateError('The notebook library is closing.');
+          final core = await _openExportCatalog(paths, entry.notebookId!);
+          _temporary = core;
+          try {
+            cancellation.onCancel = core.cancelExport;
+            cancellation.check();
+            if (_stopping) throw StateError('The notebook library is closing.');
+            return await core.exportSnapshot(
+              destination,
+              stagingBudgetBytes: budget,
+            );
+          } finally {
+            cancellation.onCancel = null;
+            try {
+              await _release(core);
+            } finally {
+              releaseAdmission();
+            }
+          }
+        },
+      );
+      // ZIP/provider work operates only on the owned snapshot. A newer library
+      // operation may already be active; never retire its admission token.
+      releaseAdmission();
+      if (prepared != null && !_stopping) await exporter.save(prepared);
+    } on Object catch (error) {
+      _error = _describe(error);
+      _publish();
+    } finally {
+      releaseAdmission();
+    }
+  }
+
+  Future<void> saveExport(PreparedNotebookExport prepared) async {
+    if (!_stopping) await _exporter?.save(prepared);
+  }
+
+  Future<void> discardExport(PreparedNotebookExport prepared) async {
+    if (!_stopping) await _exporter?.discard(prepared);
+  }
+
+  Future<void> discardExportLeftover(ExportLeftover leftover) async {
+    if (!_stopping) await _exporter?.discardLeftover(leftover);
+  }
+
+  void cancelExport() {
+    if (!_stopping) _exporter?.cancel();
+  }
+
   Future<void> _discover() async {
     if (_workspace != null) {
       throw StateError('Close the selected notebook first.');
     }
     _stale = true;
     _storage ??= await _obtainStorage();
+    if (_stopping) return;
+    await _ensureExporter();
     if (_stopping) return;
     final candidates = await _storage!.candidates();
     final entries = <ManagedNotebookEntry>[];
@@ -321,6 +435,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   Future<void> shutdown() => _shutdownFuture ??= _shutdown();
   Future<void> _shutdown() async {
     _stopping = true;
+    _exporter?.cancel();
     _publish();
     await _active?.future;
     try {
@@ -328,9 +443,21 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     } finally {
       _workspace?.dispose();
       _workspace = null;
-      final core = _temporary;
-      if (core != null) await _release(core);
-      _publish();
+      try {
+        final core = _temporary;
+        if (core != null) await _release(core);
+      } finally {
+        final exporter = _exporter;
+        if (exporter != null) {
+          try {
+            await exporter.shutdown();
+          } finally {
+            exporter.removeListener(_exportChanged);
+            exporter.dispose();
+          }
+        }
+        _publish();
+      }
     }
   }
 
@@ -341,6 +468,18 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _disposed = true;
     super.dispose();
   }
+
+  static NotebookExporter _exporterFor(String root) =>
+      NotebookExporter(root: root);
+  static Future<CatalogCore> _openExport(
+    ManagedNotebookPaths paths,
+    String id,
+  ) => CoreNotebook.openExportCatalog(
+    appDataPath: paths.app,
+    localDataPath: paths.local,
+    notebookPath: paths.notebook,
+    expectedNotebookId: id,
+  );
 
   static Future<CatalogCore> _open(
     ManagedNotebookPaths paths,

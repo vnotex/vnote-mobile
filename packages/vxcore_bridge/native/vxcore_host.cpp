@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "vxcore_host.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <condition_variable>
+#include <cerrno>
 #include <cstring>
 #include <filesystem>
 #include <limits>
@@ -18,6 +20,10 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include <cmark.h>
@@ -44,7 +50,7 @@ std::mutex core_owner_gate;
 // Accessed only under core_owner_gate, never from control/cancellation calls.
 std::set<fs::path> owned_notebooks;
 
-struct Failure { int32_t code; };
+struct Failure { int32_t code; const char *message = nullptr; };
 void require(bool condition, int32_t code = VXCORE_ERR_INVALID_PARAM) {
   if (!condition) throw Failure{code};
 }
@@ -158,6 +164,331 @@ void safe_tree(const fs::path &path, const std::atomic<bool> *cancelled = nullpt
     no_link(entry.path());
   }
 }
+
+constexpr uint64_t kExportSource = 1024ULL * 1024 * 1024;
+constexpr uint64_t kExportStaging = 4ULL * 1024 * 1024 * 1024 - 128 * 1024;
+constexpr uint64_t kExportHeadroom = 64ULL * 1024 * 1024;
+constexpr size_t kExportSummary = 1024;
+constexpr size_t kExportEntries = 100000;
+constexpr size_t kExportChunk = 256 * 1024;
+void export_require(bool condition, const char *reason, int32_t code = VXCORE_ERR_UNSUPPORTED) {
+  if (!condition) throw Failure{code, reason};
+}
+void export_cancelled(const std::atomic<bool> *cancelled) {
+  require(!cancelled || !cancelled->load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
+}
+void export_name(const std::string &name) {
+  export_require(!name.empty() && name.size() <= 255 && name != "." && name != ".." &&
+                 utf8(reinterpret_cast<const uint8_t *>(name.data()), name.size()),
+                 "Export refused an invalid or oversized filename");
+  for (size_t i = 0; i < name.size(); ++i) {
+    const auto c = static_cast<unsigned char>(name[i]);
+    export_require(c >= 32 && c != 127 && c != '\\' && c != '/' && c != ':',
+                   "Export refused an ambiguous or control-character filename");
+    if (c == 0xc2 && i + 1 < name.size()) {
+      const auto next = static_cast<unsigned char>(name[i + 1]);
+      export_require(next < 0x80 || next > 0x9f, "Export refused a control-character filename");
+    }
+  }
+}
+void export_relative(const std::string &relative) {
+  export_require(!relative.empty() && relative.size() <= 1024,
+                 "Export exceeds the relative path limit");
+  relative_path(relative);
+  size_t depth = 0;
+  for (const auto &part : fs::u8path(relative)) {
+    export_name(part.u8string());
+    export_require(++depth <= 32, "Export exceeds the directory depth limit");
+  }
+}
+// The operation validates absolute ancestors at its phase boundaries. Recheck
+// the anchored root and every relative component before each access, without
+// restatting the same OS/application ancestors for every inventory entry.
+void export_confined(const fs::path &root, const std::string &relative) {
+  relative_path(relative);
+  auto current = root;
+  no_link(current);
+  for (const auto &part : fs::u8path(relative)) { current /= part; no_link(current); }
+}
+void export_reserved_spelling(const fs::path &root, const std::string &relative) {
+  // On case-insensitive filesystems, a differently spelled reserved directory
+  // still belongs to core. Refuse that alias instead of copying runtime secrets.
+  // Distinct spellings on a case-sensitive filesystem remain ordinary data.
+  for (const auto *reserved : {"vx_notebook", "vx_notebook/vx_sync", "vx_notebook/vx_import", "vx_notebook/vx_transfer"}) {
+    const std::string_view expected(reserved);
+    if (relative.size() != expected.size() || std::string_view(relative) == expected) continue;
+    bool matches = true;
+    for (size_t i = 0; i < relative.size(); ++i) {
+      auto c = relative[i];
+      if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+      if (c != expected[i]) { matches = false; break; }
+    }
+    if (!matches) continue;
+    std::error_code error;
+    const bool alias = fs::equivalent(root / fs::u8path(relative), root / fs::u8path(reserved), error);
+    export_require(!alias, "Export refuses ambiguous reserved runtime directory spelling");
+    export_require(!error || error == std::errc::no_such_file_or_directory,
+                   "Export could not classify a reserved runtime path", VXCORE_ERR_IO);
+  }
+}
+// Deliberately no case folding or Unicode normalization of portable filenames.
+// A native handle checks the final component without following it. Parent paths
+// are checked immediately before access; this detects ordinary outside changes,
+// not an adversarial filesystem snapshot.
+struct ExportIdentity {
+  uint64_t device = 0, inode = 0, size = 0, links = 0;
+  int64_t seconds = 0, nanos = 0;
+  bool directory = false;
+  bool same_object(const ExportIdentity &other) const {
+    return device == other.device && inode == other.inode && directory == other.directory;
+  }
+  bool operator==(const ExportIdentity &other) const {
+    return same_object(other) && size == other.size && links == other.links &&
+           seconds == other.seconds && nanos == other.nanos;
+  }
+};
+struct ExportFile {
+#if defined(_WIN32)
+  HANDLE handle = INVALID_HANDLE_VALUE;
+#else
+  int handle = -1;
+#endif
+  ExportFile(const fs::path &path, bool output = false, bool directory = false) {
+#if defined(_WIN32)
+    handle = CreateFileW(path.c_str(), output ? GENERIC_WRITE : directory ? FILE_READ_ATTRIBUTES : GENERIC_READ,
+                         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+                         output ? CREATE_NEW : OPEN_EXISTING,
+                         FILE_FLAG_OPEN_REPARSE_POINT | (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0), nullptr);
+    export_require(handle != INVALID_HANDLE_VALUE, "Export could not safely open a file", VXCORE_ERR_IO);
+#else
+    const int flags = output ? O_WRONLY | O_CREAT | O_EXCL : O_RDONLY | O_NONBLOCK;
+    handle = ::open(path.c_str(), flags | O_CLOEXEC | O_NOFOLLOW | (directory ? O_DIRECTORY : 0), 0600);
+    export_require(handle >= 0, "Export could not safely open a file", VXCORE_ERR_IO);
+#endif
+  }
+  ExportFile(const ExportFile &) = delete;
+  ExportFile &operator=(const ExportFile &) = delete;
+  ~ExportFile() {
+#if defined(_WIN32)
+    if (handle != INVALID_HANDLE_VALUE) CloseHandle(handle);
+#else
+    if (handle >= 0) ::close(handle);
+#endif
+  }
+  ExportIdentity identity() const {
+    ExportIdentity result;
+#if defined(_WIN32)
+    BY_HANDLE_FILE_INFORMATION info{};
+    export_require(GetFileInformationByHandle(handle, &info) != 0,
+                   "Export could not inspect a file", VXCORE_ERR_IO);
+    export_require(!(info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) && GetFileType(handle) == FILE_TYPE_DISK,
+                   "Export refuses links, reparse points, and special files");
+    result.device = info.dwVolumeSerialNumber;
+    result.inode = (uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+    result.size = (uint64_t(info.nFileSizeHigh) << 32) | info.nFileSizeLow;
+    result.links = info.nNumberOfLinks;
+    result.seconds = (uint64_t(info.ftLastWriteTime.dwHighDateTime) << 32) | info.ftLastWriteTime.dwLowDateTime;
+    result.directory = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
+    struct stat info{};
+    export_require(::fstat(handle, &info) == 0, "Export could not inspect a file", VXCORE_ERR_IO);
+    export_require(S_ISREG(info.st_mode) || S_ISDIR(info.st_mode), "Export refuses special files");
+    result.device = info.st_dev;
+    result.inode = info.st_ino;
+    result.size = info.st_size;
+    result.links = info.st_nlink;
+    result.directory = S_ISDIR(info.st_mode);
+#if defined(__APPLE__)
+    result.seconds = info.st_mtimespec.tv_sec;
+    result.nanos = info.st_mtimespec.tv_nsec;
+#else
+    result.seconds = info.st_mtim.tv_sec;
+    result.nanos = info.st_mtim.tv_nsec;
+#endif
+#endif
+    export_require(result.directory || result.links == 1, "Export refuses hard-linked files");
+    return result;
+  }
+  size_t read(uint8_t *buffer, size_t count) {
+#if defined(_WIN32)
+    DWORD received = 0;
+    export_require(ReadFile(handle, buffer, static_cast<DWORD>(count), &received, nullptr) != 0,
+                   "Export could not read a source file", VXCORE_ERR_IO);
+    return received;
+#else
+    ssize_t received;
+    do { received = ::read(handle, buffer, count); } while (received < 0 && errno == EINTR);
+    export_require(received >= 0, "Export could not read a source file", VXCORE_ERR_IO);
+    return static_cast<size_t>(received);
+#endif
+  }
+  void write(const uint8_t *buffer, size_t count) {
+    while (count) {
+#if defined(_WIN32)
+      DWORD written = 0;
+      export_require(WriteFile(handle, buffer, static_cast<DWORD>(count), &written, nullptr) != 0 && written,
+                     "Export could not write staging storage", VXCORE_ERR_IO);
+#else
+      ssize_t written;
+      do { written = ::write(handle, buffer, count); } while (written < 0 && errno == EINTR);
+      export_require(written > 0, "Export could not write staging storage", VXCORE_ERR_IO);
+#endif
+      buffer += written;
+      count -= written;
+    }
+  }
+  // Transient snapshot data needs a checked close, not per-file durability sync.
+  // The controller publishes and flushes the completed ZIP separately.
+  void finish() {
+#if defined(_WIN32)
+    const auto old = handle;
+    handle = INVALID_HANDLE_VALUE;
+    export_require(CloseHandle(old) != 0, "Export could not close staging storage", VXCORE_ERR_IO);
+#else
+    const auto old = handle;
+    handle = -1;
+    export_require(::close(old) == 0, "Export could not close staging storage", VXCORE_ERR_IO);
+#endif
+  }
+};
+ExportIdentity export_identity(const fs::path &path) {
+#if defined(_WIN32)
+  // Attribute access with BACKUP_SEMANTICS works for both files and directories.
+  // The no-follow handle supplies type, reparse, hardlink and identity checks in
+  // one inspection; separate symlink_status/GetFileAttributes calls duplicate it.
+  ExportFile file(path, false, true);
+#else
+  const auto status = fs::symlink_status(path);
+  export_require(fs::is_regular_file(status) || fs::is_directory(status),
+                 "Export refuses missing entries and special files");
+  ExportFile file(path, false, fs::is_directory(status));
+#endif
+  return file.identity();
+}
+
+Json export_json(const fs::path &path, const ExportIdentity &expected,
+                 const std::atomic<bool> *cancelled = nullptr) {
+  export_require(!expected.directory && expected.size <= kJson,
+                 "Export requires bounded regular JSON metadata");
+  ExportFile input(path);
+  require(input.identity() == expected, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  std::string raw(static_cast<size_t>(expected.size), '\0');
+  size_t offset = 0;
+  while (offset < raw.size()) {
+    export_cancelled(cancelled);
+    const auto count = input.read(reinterpret_cast<uint8_t *>(raw.data() + offset),
+                                  std::min(kExportChunk, raw.size() - offset));
+    require(count != 0, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    offset += count;
+  }
+  uint8_t extra;
+  require(input.read(&extra, 1) == 0 && input.identity() == expected && export_identity(path) == expected,
+          VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  auto json = Json::parse(raw, nullptr, false);
+  require(json.is_object(), VXCORE_ERR_JSON_PARSE);
+  return json;
+}
+void export_resources(const fs::path &root, const Json &config) {
+  for (const auto *key : {vxcore::kJsonKeyAssetsFolder, vxcore::kJsonKeyRecycleBinFolder}) {
+    const auto found = config.find(key);
+    std::string resource = key == vxcore::kJsonKeyAssetsFolder ? "vx_assets" : "vx_notebook/recycle_bin";
+    if (found != config.end()) {
+      require(found->is_string(), VXCORE_ERR_JSON_PARSE);
+      if (key == vxcore::kJsonKeyAssetsFolder || !found->get_ref<const std::string &>().empty())
+        resource = found->get<std::string>();
+    }
+    export_relative(resource);
+    confined(root, resource);
+    for (const auto *excluded : {"vx_notebook/vx_sync", "vx_notebook/vx_import", "vx_notebook/vx_transfer"}) {
+      const std::string prefix(excluded);
+      export_require(resource != prefix && resource.compare(0, prefix.size() + 1, prefix + "/") != 0,
+                     "Export refuses resources stored in excluded runtime directories");
+    }
+    const auto status = fs::symlink_status(root / fs::u8path(resource));
+    export_require(!fs::exists(status) || fs::is_directory(status), "Export requires self-contained resource directories");
+  }
+}
+
+bool export_within(const fs::path &path, const fs::path &root) {
+  auto p = path.begin();
+  for (auto r = root.begin(); r != root.end(); ++r, ++p) {
+    if (p == path.end()) return false;
+#if defined(_WIN32)
+    if (CompareStringOrdinal(p->c_str(), -1, r->c_str(), -1, TRUE) != CSTR_EQUAL) return false;
+#else
+    if (*p != *r) return false;
+#endif
+  }
+  return true;
+}
+// Core automatically recovers these journals on open. Refuse before catalog open
+// as well as before capture, so an export owner cannot trigger source recovery.
+void export_journals(const fs::path &root, const std::atomic<bool> *cancelled = nullptr) {
+  for (const auto *name : {"vx_import", "vx_transfer"}) {
+    const auto path = root / "vx_notebook" / name;
+    confined(root, std::string("vx_notebook/") + name);
+    if (!fs::exists(fs::symlink_status(path))) continue;
+    export_require(fs::is_directory(path), "Export requires import and transfer recovery to be resolved");
+    size_t entries = 0;
+    for (const auto &entry : fs::recursive_directory_iterator(path)) {
+      export_cancelled(cancelled);
+      no_link(entry.path());
+      export_relative(entry.path().lexically_relative(root).generic_u8string());
+      export_require(++entries <= kExportEntries && fs::is_directory(entry.symlink_status()),
+                     "Export requires import and transfer recovery to be resolved");
+    }
+  }
+}
+void export_credentials(const Json &config) {
+  const auto inspect = [](const Json &object) {
+    if (!object.is_object()) return;
+    for (const auto *key : {"credentials", "syncCredentials", "personalAccessToken", "pat", "password"})
+      export_require(!object.contains(key), "Export refuses recognized credential fields in notebook configuration");
+    const auto remote = object.find("syncRemoteUrl");
+    if (remote == object.end()) return;
+    export_require(remote->is_string(), "Export refuses malformed synchronization routing metadata");
+    const auto &url = remote->get_ref<const std::string &>();
+    const auto query = url.find('?');
+    const auto fragment = url.find('#');
+    export_require((query == std::string::npos || query + 1 == url.size() || query + 1 == fragment) &&
+                   (fragment == std::string::npos || fragment + 1 == url.size()),
+                   "Export refuses credential-bearing synchronization URLs");
+    const auto scheme = url.find("://");
+    const auto start = scheme == std::string::npos ? 0 : scheme + 3;
+    const auto end = url.find_first_of("/?#", start);
+    const auto at = url.rfind('@', end == std::string::npos ? url.size() : end);
+    if (at == std::string::npos || at < start) return;
+    for (size_t i = start; i < at; ++i) {
+      unsigned char c = static_cast<unsigned char>(url[i]);
+      if (c == '%' && i + 2 < at) {
+        const auto digit = [](char value) -> int {
+          if (value >= '0' && value <= '9') return value - '0';
+          if (value >= 'a' && value <= 'f') return value - 'a' + 10;
+          if (value >= 'A' && value <= 'F') return value - 'A' + 10;
+          return -1;
+        };
+        const int hi = digit(url[i + 1]), lo = digit(url[i + 2]);
+        if (hi >= 0 && lo >= 0) { c = static_cast<unsigned char>(hi * 16 + lo); i += 2; }
+      }
+      export_require(c != ':', "Export refuses password-bearing synchronization URLs");
+    }
+  };
+  inspect(config);
+  const auto metadata = config.find("metadata");
+  if (metadata != config.end()) inspect(*metadata);
+}
+const char *export_redacted(int32_t code) {
+  switch (code) {
+    case VXCORE_OK: return "Notebook snapshot completed";
+    case VXCORE_ERR_CANCELLED: return "Notebook export was cancelled; the original notebook was not changed";
+    case VXCORE_ERR_FILE_CHANGED_OUTSIDE: return "Notebook export stopped because source files changed; retry after other writers stop";
+    case VXCORE_ERR_UNSUPPORTED: return "Notebook export refused an unsafe link, filename, or unsupported layout";
+    case VXCORE_ERR_JSON_PARSE: return "Notebook export refused malformed notebook configuration";
+    case VXCORE_ERR_IO: return "Notebook export could not read source or write staging storage";
+    default: return "Notebook export failed; the original notebook was not changed";
+  }
+}
+
 template <size_t N> void copy_field(char (&target)[N], const std::string &value) {
   require(value.size() < N && value.find('\0') == std::string::npos &&
           utf8(reinterpret_cast<const uint8_t *>(value.data()), value.size()), VXCORE_ERR_INVALID_STATE);
@@ -373,6 +704,7 @@ struct Request {
   std::string node, name, destination;
   int32_t operation = 0;
   size_t input_cost = 0;
+  uint64_t staging_budget = 0;
   bool cancelled = false;
 };
 std::atomic<uint64_t> next_generation{1};
@@ -397,8 +729,8 @@ struct VxmHost {
   std::shared_ptr<Capacity> capacity = std::make_shared<Capacity>();
   std::unique_ptr<EventStorage> closed = std::make_unique<EventStorage>();
   bool stopping = false;
-  uint64_t active_search = 0; // Protected by mutex, including completion handoff.
-  std::atomic<bool> search_cancelled{false};
+  uint64_t active_read_only = 0; // Protected by mutex, including completion handoff.
+  std::atomic<bool> read_cancelled{false};
   uint64_t generation = new_generation();
   uint64_t last_request = 0;
   VxmNotify notify = nullptr;
@@ -408,6 +740,7 @@ struct VxmHost {
   std::string expected_notebook_id;
   int32_t mode = 0;
   bool create_notebook = false;
+  bool export_only = false;
   int32_t editor_type = 0;
   std::string assets = "vx_assets", recycle = "vx_notebook/recycle_bin";
   fs::path owned_root;
@@ -823,8 +1156,8 @@ struct VxmHost {
       check(vxcore_node_delete(context, notebook_id.c_str(), target.path.c_str()));
     }
   }
-  void check_search_cancelled() const {
-    require(!search_cancelled.load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
+  void check_read_cancelled() const {
+    require(!read_cancelled.load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
   }
   void append_query(EventStorage &out, const std::string &text) {
     require(text.size() <= kCatalog - out.event.size, VXCORE_ERR_UNSUPPORTED);
@@ -870,7 +1203,7 @@ struct VxmHost {
            code == VXCORE_ERR_ENCRYPTION_RECOVERY_REQUIRED;
   }
   void search_catalog(Request &request, const Json &query) {
-    check_search_cancelled();
+    check_read_cancelled();
     auto &out = *request.result;
     const auto &text = query.at("text").get_ref<const std::string &>();
     Json scope = {{"recursive", false}, {"filePatterns", Json::array({"*"})}};
@@ -886,7 +1219,7 @@ struct VxmHost {
     std::set<std::string> seen;
     seen.insert(root_id);
     while (!folders.empty() && !limited) {
-      check_search_cancelled();
+      check_read_cancelled();
       auto path = std::move(folders.back());
       folders.pop_back();
       queued_bytes -= path.size();
@@ -899,7 +1232,7 @@ struct VxmHost {
         const auto &entries = children.at(folder ? vxcore::kJsonKeyFolders : vxcore::kJsonKeyFiles);
         require(entries.is_array(), VXCORE_ERR_JSON_PARSE);
         for (const auto &child : entries) {
-          check_search_cancelled();
+          check_read_cancelled();
           if (inspected == 100000) { limited = true; break; }
           ++inspected;
           const auto id = identity(child);
@@ -936,7 +1269,7 @@ struct VxmHost {
             folders.push_back(std::move(next));
             continue;
           }
-          check_search_cancelled();
+          check_read_cancelled();
           // Never send an empty input list: core treats that as whole-tree search.
           const auto inputs = Json{{"files", Json::array({next})}}.dump();
           SearchMatch match{id};
@@ -955,7 +1288,7 @@ struct VxmHost {
                                                   inputs.c_str(), 1, SearchMatch::collect, &match, nullptr));
             require(match.error == VXCORE_OK, match.error);
           }
-          check_search_cancelled();
+          check_read_cancelled();
           if (!match.matched) continue;
           const auto row = Json{{"id", id}, {"path", next}, {"line", match.line}, {"snippet", match.snippet}}.dump();
           // Leave ample space for the fixed trailer and bounded skipped count.
@@ -970,7 +1303,7 @@ struct VxmHost {
         if (limited) break;
       }
     }
-    check_search_cancelled();
+    check_read_cancelled();
     append_query(out, std::string("],\"limited\":") + (limited ? "true" : "false") +
                      ",\"skipped\":" + std::to_string(skipped) + "}");
   }
@@ -1009,8 +1342,8 @@ struct VxmHost {
   }
   void query_catalog(Request &request) {
     require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
-    if (request.operation == kSearch) check_search_cancelled();
-    layout(request.operation == kSearch ? &search_cancelled : nullptr);
+    if (request.operation == kSearch) check_read_cancelled();
+    layout(request.operation == kSearch ? &read_cancelled : nullptr);
     load_node(".", root_id);
     const auto query = Json::parse(request.input.begin(), request.input.end());
     auto &out = *request.result;
@@ -1037,6 +1370,150 @@ struct VxmHost {
       // Do not tighten that validator, mutate disk directly, or refresh here.
       check(vxcore_file_update_tags(context, notebook_id.c_str(), node.path.c_str(), tags.c_str()));
     }
+  }
+  void export_catalog(Request &request) {
+    require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
+    check_read_cancelled();
+    const auto source = fs::u8path(notebook_path);
+    confined(source, ".");
+    const auto source_identity = export_identity(source);
+    export_require(source_identity.directory, "Export requires an existing notebook directory");
+    const auto destination = fs::u8path(request.destination);
+    export_require(destination.is_absolute() && !destination.filename().empty(),
+                   "Export requires an absolute new staging directory", VXCORE_ERR_INVALID_PARAM);
+    for (const auto &part : destination.relative_path())
+      export_require(part != "." && part != "..", "Export refuses an ambiguous staging path");
+    confined(destination.parent_path(), ".");
+    export_require(fs::is_directory(destination.parent_path()), "Export staging parent is missing", VXCORE_ERR_IO);
+    const auto canonical = fs::canonical(destination.parent_path()) / destination.filename();
+    for (const auto *protected_path : {&notebook_path, &app_path, &local_path}) {
+      const auto protected_root = fs::weakly_canonical(fs::u8path(*protected_path));
+      export_require(!export_within(canonical, protected_root) && !export_within(protected_root, canonical),
+                     "Export staging must be separate from notebook and core storage");
+    }
+    export_require(!fs::exists(fs::symlink_status(destination)), "Export staging already exists", VXCORE_ERR_ALREADY_EXISTS);
+    export_journals(source, &read_cancelled);
+    struct Entry { std::string relative; ExportIdentity identity; };
+    std::vector<Entry> entries;
+    uint64_t bytes = 0, files = 0, directories = 0, archive_limit = 1024;
+    size_t runtime_entries = 0;
+    // Inspect runtime paths for unsafe links before the public sync guard reads
+    // them. Their bytes are never copied. There is no ignore/suffix filter.
+    for (auto it = fs::recursive_directory_iterator(source); it != fs::recursive_directory_iterator(); ++it) {
+      check_read_cancelled();
+      auto relative = it->path().lexically_relative(source).generic_u8string();
+      export_relative(relative);
+      export_reserved_spelling(source, relative);
+      export_confined(source, relative);
+      const auto info = export_identity(it->path());
+      if (relative == "vx_notebook/vx_import" || relative == "vx_notebook/vx_transfer") {
+        it.disable_recursion_pending(); // Already proved directory-only residue.
+        continue;
+      }
+      if (relative == "vx_notebook/vx_sync" || relative.compare(0, sizeof("vx_notebook/vx_sync/") - 1, "vx_notebook/vx_sync/") == 0) {
+        export_require(++runtime_entries <= kExportEntries, "Export synchronization inspection exceeds the entry limit");
+        continue;
+      }
+      export_require(lower_ascii(it->path().filename().u8string()) != ".git",
+                     "Export refuses unclassified Git working-copy data");
+      export_require(entries.size() < kExportEntries, "Export exceeds the 100000-entry limit");
+      if (info.directory) ++directories;
+      else {
+        export_require(info.size <= kExportSource - bytes, "Export exceeds the 1 GiB source limit");
+        bytes += info.size;
+        archive_limit += info.size + info.size / 64 + 4096;
+        ++files;
+      }
+      archive_limit += 2 * relative.size() + 256;
+      entries.push_back({std::move(relative), info});
+    }
+    const auto check_sync = [&] {
+      check_read_cancelled();
+      const auto code = vxcore_sync_check_reconfiguration(context, notebook_id.c_str());
+      export_require(code == VXCORE_OK, "Export requires synchronization conflicts and recovery to be resolved", code);
+    };
+    check_sync(); // Required before omitting the exact reserved runtime tree.
+    export_require(bytes + archive_limit <= request.staging_budget,
+                   "Export snapshot and ZIP exceed the staging budget");
+    std::array<uint8_t, kExportChunk> buffer;
+    bool found_config = false;
+    for (const auto &entry : entries) {
+      if (entry.relative != "vx_notebook/config.json") continue;
+      found_config = true;
+      export_require(!entry.identity.directory && entry.identity.size <= kJson,
+                     "Export notebook configuration is oversized or invalid");
+      const auto path = source / fs::u8path(entry.relative);
+      export_confined(source, entry.relative);
+      auto config = export_json(path, entry.identity, &read_cancelled);
+      require(identity(config) == notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      export_credentials(config);
+      notebook_name = json_string(config.at(vxcore::kJsonKeyName));
+      export_resources(source, config);
+      break;
+    }
+    export_require(found_config, "Export notebook configuration is missing");
+    const auto space = [&](uint64_t remaining) {
+      check_read_cancelled();
+      const auto available = fs::space(destination.parent_path()).available;
+      export_require(available != static_cast<uintmax_t>(-1) && available >= remaining + archive_limit + kExportHeadroom,
+                     "Export requires more free staging space including its safety headroom", VXCORE_ERR_IO);
+    };
+    space(bytes);
+    confined(destination.parent_path(), ".");
+    export_require(fs::create_directory(destination), "Export staging already exists", VXCORE_ERR_ALREADY_EXISTS);
+    const auto destination_identity = export_identity(destination);
+    uint64_t copied = 0;
+    for (const auto &entry : entries) {
+      check_read_cancelled();
+      export_confined(source, entry.relative);
+      export_confined(destination, entry.relative);
+      require(export_identity(destination).same_object(destination_identity), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      const auto output_path = destination / fs::u8path(entry.relative);
+      if (entry.identity.directory) {
+        require(export_identity(source / fs::u8path(entry.relative)) == entry.identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        export_require(fs::create_directory(output_path), "Export staging entry already exists", VXCORE_ERR_ALREADY_EXISTS);
+        continue;
+      }
+      space(bytes - copied);
+      ExportFile input(source / fs::u8path(entry.relative));
+      require(input.identity() == entry.identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      ExportFile output(output_path, true);
+      uint64_t remaining = entry.identity.size;
+      while (remaining) {
+        check_read_cancelled();
+        const auto count = input.read(buffer.data(), static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size())));
+        require(count != 0, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        output.write(buffer.data(), count);
+        remaining -= count;
+        copied += count;
+      }
+      require(input.read(buffer.data(), 1) == 0 && input.identity() == entry.identity,
+              VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      output.finish();
+      export_confined(source, entry.relative);
+      require(export_identity(source / fs::u8path(entry.relative)) == entry.identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    }
+    // Directory mtimes detect additions/removals too, not just changed files.
+    for (const auto &entry : entries) {
+      check_read_cancelled();
+      export_confined(source, entry.relative);
+      require(export_identity(source / fs::u8path(entry.relative)) == entry.identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    }
+    confined(source, ".");
+    require(export_identity(source) == source_identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    export_journals(source, &read_cancelled);
+    check_sync();
+    space(0);
+    auto &out = *request.result;
+    copy_field(out.notebook, notebook_id);
+    copy_field(out.title, notebook_name);
+    const auto summary = Json{{"bytes", bytes}, {"files", files}, {"directories", directories},
+                              {"archiveLimit", archive_limit}}.dump();
+    require(summary.size() <= kExportSummary, VXCORE_ERR_INVALID_STATE);
+    std::memcpy(out.body.get(), summary.data(), summary.size());
+    out.event.data = out.body.get();
+    out.event.size = summary.size();
+    // Keep the actual 1 KiB allocation charged until terminal release.
   }
   void note_metadata() {
     const auto node = resolve(node_id);
@@ -1088,6 +1565,76 @@ struct VxmHost {
     out.event.data = out.body.get();
     out.event.size = size;
   }
+  void preflight_export_open(const fs::path &root) {
+    const auto canonical = fs::canonical(root);
+    for (const auto *storage : {&app_path, &local_path}) {
+      const auto path = fs::u8path(*storage);
+      export_require(path.is_absolute(), "Export requires absolute core storage roots");
+      confined(path, ".");
+      const auto core_root = fs::weakly_canonical(path);
+      export_require(!export_within(canonical, core_root) && !export_within(core_root, canonical),
+                     "Export requires separate notebook and core storage roots");
+    }
+    // InitializeContext constructs NotebookManager/BufferManager/WorkspaceManager
+    // from persisted session records BEFORE explicit notebook_open. Refuse restore
+    // work rather than letting an export owner recover this or another notebook.
+    constexpr const char *restore_reason = "Export requires normal notebook open and recovery for persisted session state";
+    try {
+      const auto session_path = fs::u8path(local_path) / "vxsession.json";
+      confined(fs::u8path(local_path), "vxsession.json");
+      if (fs::exists(fs::symlink_status(session_path))) {
+        const auto session = export_json(session_path, export_identity(session_path));
+        for (const auto *key : {"notebooks", "buffers", "workspaces"}) {
+          const auto entries = session.find(key);
+          export_require(entries == session.end() || (entries->is_array() && entries->empty()), restore_reason);
+        }
+      }
+    } catch (const Failure &failure) { throw Failure{failure.code, restore_reason}; }
+    catch (const fs::filesystem_error &) { throw Failure{VXCORE_ERR_IO, restore_reason}; }
+    size_t metadata_entries = 0;
+    export_require(export_identity(root / "vx_notebook").directory, "Export requires existing notebook metadata");
+    for (const auto &entry : fs::recursive_directory_iterator(root / "vx_notebook")) {
+      export_require(++metadata_entries <= 2 * kExportEntries,
+                     "Export metadata and runtime inspection exceeds the entry limit");
+      const auto relative = entry.path().lexically_relative(root).generic_u8string();
+      export_relative(relative);
+      export_reserved_spelling(root, relative);
+      confined(root, relative);
+      export_identity(entry.path());
+    }
+    export_journals(root);
+    const auto transfer = root / "vx_notebook/vx_transfer";
+    if (fs::exists(fs::symlink_status(transfer))) {
+      for (const auto &entry : fs::directory_iterator(transfer)) {
+        // NodeTransfer removes even journal-less child directories; encryption
+        // recovery likewise removes empty transaction children. The empty parent
+        // named encryption is the only safe child to pass to core unchanged.
+        export_require(entry.path().filename() == "encryption" && fs::is_empty(entry.path()),
+                       "Export requires normal notebook recovery to clear transfer residue");
+      }
+    }
+    const auto config_path = root / "vx_notebook/config.json";
+    const auto config = export_json(config_path, export_identity(config_path));
+    require(identity(config) == expected_notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    json_string(config.at(vxcore::kJsonKeyName));
+    export_credentials(config);
+    export_resources(root, config);
+    const auto tags = config.find(vxcore::kJsonKeyTags);
+    if (tags != config.end()) {
+      require(tags->is_array(), VXCORE_ERR_JSON_PARSE);
+      const auto timestamp = config.find(vxcore::kJsonKeyTagsModifiedUtc);
+      export_require(tags->empty() || (timestamp != config.end() && timestamp->is_number_integer() &&
+                                     timestamp->get<int64_t>() != 0),
+                     "Export requires normal notebook open to finish legacy tag migration");
+    }
+    confined(root, "vx_notebook/contents/vx.json");
+    const auto root_path = root / "vx_notebook/contents/vx.json";
+    const auto metadata = export_json(root_path, export_identity(root_path));
+    identity(metadata);
+    require(metadata.contains(vxcore::kJsonKeyFiles) && metadata.at(vxcore::kJsonKeyFiles).is_array() &&
+            metadata.contains(vxcore::kJsonKeyFolders) && metadata.at(vxcore::kJsonKeyFolders).is_array(),
+            VXCORE_ERR_JSON_PARSE);
+  }
   void initialize(Request &request) {
     check(vxcore_log_set_level(VXCORE_LOG_LEVEL_OFF));
     check(vxcore_log_enable_console(0));
@@ -1101,7 +1648,8 @@ struct VxmHost {
             create_notebook ? VXCORE_ERR_ALREADY_EXISTS : VXCORE_ERR_NOT_FOUND);
     confined(root, ".");
     confined(root, "vx_notebook/config.json");
-    safe_tree(root / "vx_notebook");
+    if (export_only) preflight_export_open(root);
+    else safe_tree(root / "vx_notebook");
     const auto canonical = fs::weakly_canonical(root);
     for (const auto &active : owned_notebooks) {
       std::error_code error;
@@ -1122,6 +1670,10 @@ struct VxmHost {
     }
     notebook_id = notebook.take();
     require(expected_notebook_id.empty() || notebook_id == expected_notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    if (export_only) {
+      const auto code = vxcore_sync_check_reconfiguration(context, notebook_id.c_str());
+      export_require(code == VXCORE_OK, "Export requires synchronization conflicts and recovery to be resolved", code);
+    }
     if (mode == VXM_MODE_NOTE) notebook_config();
     root_id = load_node(".").id;
     if (mode == VXM_MODE_CATALOG) {
@@ -1224,12 +1776,14 @@ struct VxmHost {
         pending_start = (pending_start + 1) % pending.size();
         --pending_size;
         request->cancelled |= stopping;
-        if (request->result->event.kind == VXM_EVENT_QUERY && request->operation == kSearch) {
-          active_search = request->result->event.request_id;
-          search_cancelled.store(request->cancelled, std::memory_order_relaxed);
+        if ((request->result->event.kind == VXM_EVENT_QUERY && request->operation == kSearch) ||
+            request->result->event.kind == VXM_EVENT_EXPORT) {
+          active_read_only = request->result->event.request_id;
+          read_cancelled.store(request->cancelled, std::memory_order_relaxed);
         }
       }
       auto &event = request->result->event;
+      const char *failure_message = nullptr;
       try {
         require(!request->cancelled, VXCORE_ERR_CANCELLED);
         std::lock_guard<std::mutex> core_lock(core_owner_gate);
@@ -1242,30 +1796,32 @@ struct VxmHost {
           else if (event.kind == VXM_EVENT_MUTATE) mutate_catalog(*request);
           else if (event.kind == VXM_EVENT_QUERY) query_catalog(*request);
           else if (event.kind == VXM_EVENT_TAG) tag_catalog(*request);
+          else if (event.kind == VXM_EVENT_EXPORT) export_catalog(*request);
           else throw Failure{VXCORE_ERR_INVALID_STATE};
         }
-      } catch (const Failure &failure) { event.code = failure.code; }
+      } catch (const Failure &failure) { event.code = failure.code; failure_message = failure.message; }
       catch (const std::bad_alloc &) { event.code = VXCORE_ERR_OUT_OF_MEMORY; }
       catch (const Json::exception &) { event.code = VXCORE_ERR_JSON_PARSE; }
       catch (const fs::filesystem_error &) { event.code = VXCORE_ERR_IO; }
       catch (...) { event.code = VXCORE_ERR_UNKNOWN; }
       {
         std::lock_guard<std::mutex> lock(mutex);
-        if (active_search == event.request_id) {
+        if (active_read_only == event.request_id) {
           // Cancel's accepted result and the terminal outcome linearize under
           // the same mutex: no accepted cancellation can turn into late success.
-          if (search_cancelled.load(std::memory_order_relaxed)) event.code = VXCORE_ERR_CANCELLED;
-          active_search = 0;
-          search_cancelled.store(false, std::memory_order_relaxed);
+          if (read_cancelled.load(std::memory_order_relaxed)) event.code = VXCORE_ERR_CANCELLED;
+          active_read_only = 0;
+          read_cancelled.store(false, std::memory_order_relaxed);
         }
       }
       if (event.kind == VXM_EVENT_OPEN || event.kind == VXM_EVENT_CATALOG_OPEN) init_error = event.code;
-      event.message = redacted(event.code);
+      event.message = event.code != VXCORE_ERR_CANCELLED && failure_message ? failure_message :
+          event.kind == VXM_EVENT_EXPORT ? export_redacted(event.code) : redacted(event.code);
       if (event.code != VXCORE_OK) {
         event.size = 0;
         event.data = nullptr;
-        if (event.kind == VXM_EVENT_QUERY) request->result->body.reset();
-        if (event.kind == VXM_EVENT_CATALOG_OPEN || event.kind == VXM_EVENT_LIST || event.kind == VXM_EVENT_QUERY)
+        if (event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT) request->result->body.reset();
+        if (event.kind == VXM_EVENT_CATALOG_OPEN || event.kind == VXM_EVENT_LIST || event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT)
           request->result->shrink(0);
       }
       auto result = std::move(request->result);
@@ -1289,20 +1845,26 @@ namespace {
 int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
               uint64_t revision, const char *hash, const uint8_t *data, uint64_t size,
               size_t metadata_cost = 0, int32_t operation = 0,
-              const char *node = nullptr, const char *name = nullptr, const char *destination = nullptr) {
+              const char *node = nullptr, const char *name = nullptr, const char *destination = nullptr,
+              uint64_t staging_budget = 0) {
   try {
     require(revision <= kMaxRevision);
     source_valid(data, size);
     if (kind == VXM_EVENT_WRITE) require(valid_hash(hash));
+    const bool exporting = kind == VXM_EVENT_EXPORT;
+    require(!exporting || host.export_only, VXCORE_ERR_INVALID_STATE);
+    require(!host.export_only || (kind != VXM_EVENT_MUTATE && kind != VXM_EVENT_TAG && kind != VXM_EVENT_WRITE),
+            VXCORE_ERR_INVALID_STATE);
     const bool query = kind == VXM_EVENT_QUERY;
     const bool catalog = kind == VXM_EVENT_CATALOG_OPEN || kind == VXM_EVENT_LIST || query;
     const bool source = kind == VXM_EVENT_OPEN || kind == VXM_EVENT_READ;
-    require((catalog || kind == VXM_EVENT_MUTATE || kind == VXM_EVENT_TAG) ? host.mode == VXM_MODE_CATALOG : host.mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
+    require((catalog || exporting || kind == VXM_EVENT_MUTATE || kind == VXM_EVENT_TAG) ? host.mode == VXM_MODE_CATALOG : host.mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
     if (query || kind == VXM_EVENT_TAG) operation = catalog_operation(data, static_cast<size_t>(size), kind);
     auto node_value = optional_string(node);
     auto name_value = optional_string(name);
     auto destination_value = optional_string(destination);
-    require(node_value.size() < 128 && destination_value.size() < 128);
+    require(node_value.size() < 128 && (exporting || destination_value.size() < 128));
+    if (exporting) require(!destination_value.empty() && staging_budget > 0 && staging_budget <= kExportStaging);
     if (kind == VXM_EVENT_MUTATE) {
       require(operation >= VXM_CREATE_NOTE && operation <= VXM_RENAME_NOTEBOOK && !node_value.empty());
       const bool named = operation == VXM_CREATE_NOTE || operation == VXM_CREATE_FOLDER || operation == VXM_RENAME || operation == VXM_RENAME_NOTEBOOK;
@@ -1313,13 +1875,13 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     require(!host.stopping && generation == host.generation && id > host.last_request && id <= kMaxRevision, VXCORE_ERR_INVALID_STATE);
     std::lock_guard<std::mutex> capacity_lock(host.capacity->mutex);
     const size_t input_cost = static_cast<size_t>(size) + metadata_cost + node_value.size() + name_value.size() + destination_value.size() + (hash ? 64 : 0);
-    const size_t output_cost = kMetadata + (catalog ? kCatalog : source ? kSource : 0);
+    const size_t output_cost = kMetadata + (exporting ? kExportSummary : catalog ? kCatalog : source ? kSource : 0);
     auto &capacity = *host.capacity;
     require(capacity.operations < VXM_MAX_OPERATIONS && input_cost <= VXM_MAX_INPUT_BYTES - capacity.input && output_cost <= VXM_MAX_OUTPUT_BYTES - capacity.output, VXCORE_ERR_OUT_OF_MEMORY);
     auto request = std::make_unique<Request>();
     request->result = std::make_unique<EventStorage>();
     auto &result = *request->result;
-    if (source || query) result.body.reset(new uint8_t[query ? kCatalog : kSource]);
+    if (source || query || exporting) result.body.reset(new uint8_t[exporting ? kExportSummary : query ? kCatalog : kSource]);
     if (size) request->input.assign(data, data + static_cast<size_t>(size));
     if (hash) request->expected_hash = hash;
     request->node = std::move(node_value);
@@ -1327,6 +1889,7 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     request->destination = std::move(destination_value);
     request->operation = operation;
     request->input_cost = input_cost;
+    request->staging_budget = staging_budget;
     result.capacity = host.capacity;
     result.reserved_output = output_cost;
     result.event.request_id = id;
@@ -1367,6 +1930,7 @@ int32_t vxm_host_create(const VxmOpenOptions *options, VxmNotify notify, int64_t
   try {
     require(options->mode == VXM_MODE_NOTE || options->mode == VXM_MODE_CATALOG);
     require(options->create_notebook == 0 || options->create_notebook == 1);
+    require(options->export_only == 0 || options->export_only == 1);
     host = std::make_unique<VxmHost>();
     host->notify = notify;
     host->token = token;
@@ -1375,10 +1939,13 @@ int32_t vxm_host_create(const VxmOpenOptions *options, VxmNotify notify, int64_t
     host->notebook_path = input_string(options->notebook_path);
     host->mode = options->mode;
     host->create_notebook = options->create_notebook == 1;
+    host->export_only = options->export_only == 1;
     host->notebook_name = optional_string(options->notebook_name);
     host->expected_notebook_id = optional_string(options->expected_notebook_id);
     host->node_id = optional_string(options->node_id);
     require(host->expected_notebook_id.size() < 128 && host->node_id.size() < 128);
+    if (host->export_only)
+      require(host->mode == VXM_MODE_CATALOG && !host->create_notebook && !host->expected_notebook_id.empty());
     if (host->create_notebook) {
       require(host->mode == VXM_MODE_CATALOG && host->expected_notebook_id.empty());
       display_name(host->notebook_name);
@@ -1417,12 +1984,17 @@ int32_t vxm_host_catalog_query(VxmHost *host, uint64_t id, uint64_t generation, 
 int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t id, uint64_t generation, const char *json) {
   return admit_catalog_json(host, VXM_EVENT_TAG, id, generation, json);
 }
+int32_t vxm_host_catalog_export(VxmHost *host, uint64_t id, uint64_t generation,
+                                const char *destination, uint64_t staging_budget_bytes) {
+  return host ? admit(*host, VXM_EVENT_EXPORT, id, generation, 0, nullptr, nullptr, 0,
+                       0, 0, nullptr, nullptr, destination, staging_budget_bytes) : VXCORE_ERR_NULL_POINTER;
+}
 int32_t vxm_host_cancel(VxmHost *host, uint64_t id, uint64_t generation) {
   if (!host) return VXCORE_ERR_NULL_POINTER;
   std::lock_guard<std::mutex> lock(host->mutex);
   if (generation != host->generation) return VXCORE_ERR_INVALID_STATE;
-  if (id && host->active_search == id) {
-    host->search_cancelled.store(true, std::memory_order_relaxed);
+  if (id && host->active_read_only == id) {
+    host->read_cancelled.store(true, std::memory_order_relaxed);
     return VXCORE_OK;
   }
   for (size_t i = 0; i < host->pending_size; ++i) {
@@ -1438,7 +2010,7 @@ void vxm_host_request_close(VxmHost *host) {
   if (!host) return;
   std::lock_guard<std::mutex> lock(host->mutex);
   host->stopping = true;
-  if (host->active_search) host->search_cancelled.store(true, std::memory_order_relaxed);
+  if (host->active_read_only) host->read_cancelled.store(true, std::memory_order_relaxed);
   host->wake.notify_one();
 }
 VxmEvent *vxm_host_take_event(VxmHost *host) {

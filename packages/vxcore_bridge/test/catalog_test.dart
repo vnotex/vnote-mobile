@@ -35,6 +35,17 @@ final class _Fixture {
     return core;
   }
 
+  Future<CoreNotebook> exportCatalog() async {
+    final core = await CoreNotebook.openExportCatalog(
+      appDataPath: path('app'),
+      localDataPath: path('local'),
+      notebookPath: path('book'),
+      expectedNotebookId: notebookId!,
+    );
+    hosts.add(core);
+    return core;
+  }
+
   Future<CoreNotebook> create({String name = 'Personal'}) async {
     final core = await CoreNotebook.createCatalog(
       appDataPath: path('app'),
@@ -117,6 +128,8 @@ final class _Fixture {
   }
 }
 
+const _exportBudget = 4 * 1024 * 1024 * 1024 - 128 * 1024;
+
 Matcher get _failure =>
     isA<CoreException>().having((e) => e.code, 'core error', isNot(0));
 Matcher _code(int value) =>
@@ -172,6 +185,362 @@ void main() {
     fixture = _Fixture(await Directory.systemTemp.createTemp('vnote-catalog-'));
   });
   tearDown(() => fixture.dispose());
+
+  test(
+    'export snapshot preserves raw portable bytes and exact runtime exclusions',
+    () async {
+      await fixture.desktop();
+      final config = await fixture.json('vx_notebook/config.json');
+      config['syncRemoteUrl'] = 'https://contributor@gitee.com/team/notes.git';
+      config['futureField'] = {'password': 'unrelated unknown metadata'};
+      config['metadata'] = {
+        'custom': {'password': 'not a recognized direct field'},
+      };
+      config['assetsFolder'] = 'resources/assets';
+      config['recycleBinFolder'] = 'custom/recycle';
+      config['ignored'] = ['*.private', '.hidden'];
+      final rawConfig =
+          '${const JsonEncoder.withIndent('   ').convert(config)}\n';
+      await fixture.file('vx_notebook/config.json').writeAsString(rawConfig);
+      for (final path in [
+        '.hidden/opaque.private',
+        'resources/assets/asset.bin',
+        'custom/recycle/old.bin',
+        'nested/vx_sync/user.data',
+        '.gitignore',
+        '.gitattributes',
+        'scratch.tmp',
+        'scratch.vswp',
+        'vx_notebook/encryption.vne',
+      ]) {
+        final file = fixture.file(path);
+        await file.parent.create(recursive: true);
+        await file.writeAsBytes([0, 255, 254, 13, 10]);
+      }
+      await Directory(fixture.file('.hidden/empty').path)
+          .create(recursive: true);
+      final runtime = fixture.file('vx_notebook/vx_sync/webdav/state.json');
+      await runtime.parent.create(recursive: true);
+      await runtime.writeAsString(
+        jsonEncode({
+          'version': 1,
+          'notebookId': fixture.notebookId,
+          'remoteUrl': 'https://example.invalid/notes',
+          'usernameHash': '0' * 64,
+          'entries': {},
+          'conflicts': {},
+        }),
+      );
+      final before = await _snapshot(fixture.path('book'));
+      final catalog = await fixture.exportCatalog();
+      expect(await _snapshot(fixture.path('book')), before);
+      final destination = fixture.path('snapshot');
+      final summary = await catalog.exportSnapshot(
+        destination,
+        stagingBudgetBytes: _exportBudget,
+      );
+      expect(summary.notebookId, fixture.notebookId);
+      expect(summary.notebookName, config['name']);
+      final expected = Map<String, Object>.from(before)
+        ..removeWhere(
+          (path, value) =>
+              path == 'vx_notebook/vx_sync' ||
+              path.startsWith('vx_notebook/vx_sync/'),
+        );
+      expect(await _snapshot(destination), expected);
+      expect(
+        await File('$destination/vx_notebook/config.json').readAsString(),
+        rawConfig,
+      );
+      final fileBytes = expected.values.whereType<List<int>>();
+      expect(summary.files, fileBytes.length);
+      expect(
+        summary.bytes,
+        fileBytes.fold<int>(0, (total, bytes) => total + bytes.length),
+      );
+      expect(
+        summary.directories,
+        expected.values.where((value) => value == 'directory').length - 1,
+      );
+      expect(summary.archiveLimit, greaterThan(summary.bytes));
+      expect(
+        summary.archiveLimit + summary.bytes,
+        lessThanOrEqualTo(_exportBudget),
+      );
+      await expectLater(
+        catalog.renameNotebook('must not change'),
+        throwsA(_failure),
+      );
+      await expectLater(
+        catalog.createTag('must not change'),
+        throwsA(_failure),
+      );
+      await expectLater(
+        catalog.exportSnapshot(destination, stagingBudgetBytes: _exportBudget),
+        throwsA(_failure),
+      );
+      expect(await _snapshot(destination), expected);
+      await catalog.close();
+      expect(await _snapshot(fixture.path('book')), before);
+    },
+  );
+
+  test('export admission refuses bad budgets and destinations without source writes', () async {
+    final created = await fixture.catalog();
+    await created.createNote(created.initialDirectory.folderId, 'kept.md');
+    await created.close();
+    final before = await _snapshot(fixture.path('book'));
+    final catalog = await fixture.exportCatalog();
+    for (final budget in [0, -1, _exportBudget + 1, 1024]) {
+      await expectLater(
+        catalog.exportSnapshot(
+          fixture.path('budget'),
+          stagingBudgetBytes: budget,
+        ),
+        throwsA(_failure),
+      );
+      expect(await Directory(fixture.path('budget')).exists(), isFalse);
+    }
+    for (final path in [
+      fixture.path('book/inside'),
+      fixture.path('app/inside'),
+      fixture.path('local/inside'),
+      fixture.root.path,
+      'relative',
+    ]) {
+      await expectLater(
+        catalog.exportSnapshot(path, stagingBudgetBytes: _exportBudget),
+        throwsA(_failure),
+      );
+    }
+    expect(await _snapshot(fixture.path('book')), before);
+  });
+
+  test(
+    'export owner refuses recovery and tag migration before opening source',
+    () async {
+      final created = await fixture.catalog();
+      await created.close();
+      for (final kind in ['vx_import', 'vx_transfer']) {
+        final journal = fixture.file(
+          'vx_notebook/$kind/unresolved/journal.json',
+        );
+        await journal.parent.create(recursive: true);
+        await journal.writeAsString('not-json');
+        final before = await _snapshot(fixture.path('book'));
+        await expectLater(fixture.exportCatalog(), throwsA(_failure));
+        expect(await _snapshot(fixture.path('book')), before);
+        await journal.parent.parent.delete(recursive: true);
+      }
+      final original = await fixture.json('vx_notebook/config.json');
+      await fixture.putJson('vx_notebook/config.json', {
+        ...original,
+        'tagsModifiedUtc': 0,
+        'tags': [
+          {'name': 'legacy', 'parent': ''},
+        ],
+      });
+      final before = await _snapshot(fixture.path('book'));
+      await expectLater(fixture.exportCatalog(), throwsA(_failure));
+      expect(await _snapshot(fixture.path('book')), before);
+      await fixture.putJson('vx_notebook/config.json', original);
+      final residue = Directory(
+        fixture.file('vx_notebook/vx_transfer/empty').path,
+      );
+      await residue.create(recursive: true);
+      final withResidue = await _snapshot(fixture.path('book'));
+      await expectLater(fixture.exportCatalog(), throwsA(_failure));
+      expect(await _snapshot(fixture.path('book')), withResidue);
+      await residue.parent.delete(recursive: true);
+      final rootConfig = fixture.file('vx_notebook/contents/vx.json');
+      await rootConfig.delete();
+      final missing = await _snapshot(fixture.path('book'));
+      await expectLater(fixture.exportCatalog(), throwsA(_failure));
+      expect(await _snapshot(fixture.path('book')), missing);
+    },
+  );
+
+  test(
+    'export refuses recognized credentials but never rewrites configuration',
+    () async {
+      final created = await fixture.catalog();
+      await created.close();
+      final original = await fixture.json('vx_notebook/config.json');
+      for (final metadata in [false, true]) {
+        for (final key in [
+          'credentials',
+          'syncCredentials',
+          'personalAccessToken',
+          'pat',
+          'password',
+        ]) {
+          final config = <String, dynamic>{...original};
+          if (metadata) {
+            config['metadata'] = {key: 'must-not-be-logged'};
+          } else {
+            config[key] = 'must-not-be-logged';
+          }
+          await fixture.putJson('vx_notebook/config.json', config);
+          final before = await _snapshot(fixture.path('book'));
+          CoreNotebook? catalog;
+          try {
+            catalog = await fixture.exportCatalog();
+            await expectLater(
+              catalog.exportSnapshot(
+                fixture.path('refused'),
+                stagingBudgetBytes: _exportBudget,
+              ),
+              throwsA(_failure),
+            );
+          } on CoreException catch (error) {
+            expect(error.message, isNot(contains('must-not-be-logged')));
+          } finally {
+            await catalog?.close();
+          }
+          expect(await _snapshot(fixture.path('book')), before);
+          expect(await Directory(fixture.path('refused')).exists(), isFalse);
+        }
+      }
+    },
+  );
+
+  test(
+    'export refuses junctions or symlinks and retains their external target',
+    () async {
+      final created = await fixture.catalog();
+      await created.close();
+      final outside = Directory(fixture.path('outside'));
+      await outside.create();
+      await File('${outside.path}/sentinel').writeAsString('outside unchanged');
+      await _directoryLink(fixture.file('linked').path, outside.path);
+      final before = await _snapshot(fixture.path('book'));
+      CoreNotebook? catalog;
+      try {
+        catalog = await fixture.exportCatalog();
+        await expectLater(
+          catalog.exportSnapshot(
+            fixture.path('linked-export'),
+            stagingBudgetBytes: _exportBudget,
+          ),
+          throwsA(_failure),
+        );
+      } on CoreException {
+        // The export-only pre-open guard may reject earlier than capture.
+      } finally {
+        await catalog?.close();
+      }
+      expect(
+        await File('${outside.path}/sentinel').readAsString(),
+        'outside unchanged',
+      );
+      expect(await _snapshot(fixture.path('book')), before);
+      expect(await Directory(fixture.path('linked-export')).exists(), isFalse);
+    },
+  );
+
+  test(
+    'export owner refuses persisted restore before touching a foreign notebook',
+    () async {
+      final selected = await fixture.catalog();
+      await selected.close();
+      final foreign = _Fixture(
+        await Directory.systemTemp.createTemp('vnote-export-foreign-'),
+      );
+      try {
+        final opened = await foreign.catalog();
+        await opened.close();
+        final journal = foreign.file(
+          'vx_notebook/vx_import/unresolved/journal.json',
+        );
+        await journal.parent.create(recursive: true);
+        await journal.writeAsString('not-json');
+        final session = File(fixture.path('local/vxsession.json'));
+        final clean = await session.readAsString();
+        final config = jsonDecode(clean) as Map<String, dynamic>;
+        config['notebooks'] = [
+          {
+            'id': foreign.notebookId,
+            'rootFolder': foreign.path('book'),
+            'type': 'bundled',
+            'readOnly': false,
+          },
+        ];
+        final restored = jsonEncode(config);
+        await session.writeAsString(restored);
+        final before = await _snapshot(fixture.path('book'));
+        final foreignBefore = await _snapshot(foreign.path('book'));
+        await expectLater(
+          fixture.exportCatalog(),
+          throwsA(
+            isA<CoreException>().having(
+              (error) => error.message,
+              'redacted recovery reason',
+              contains('normal notebook open and recovery'),
+            ),
+          ),
+        );
+        expect(await session.readAsString(), restored);
+        expect(await _snapshot(fixture.path('book')), before);
+        expect(await _snapshot(foreign.path('book')), foreignBefore);
+        await session.writeAsString(clean);
+      } finally {
+        await foreign.dispose();
+      }
+    },
+  );
+
+  test('export cancellation and close settle before caller cleans staging', () async {
+    final created = await fixture.catalog();
+    await created.close();
+    final blob = fixture.file('opaque.bin');
+    final output = await blob.open(mode: FileMode.write);
+    final chunk = List<int>.filled(256 * 1024, 97);
+    for (var i = 0; i < 32; i++) {
+      await output.writeFrom(chunk);
+    }
+    await output.close();
+    final before = await _snapshot(fixture.path('book'));
+    final catalog = await fixture.exportCatalog();
+    final capture = catalog.exportSnapshot(
+      fixture.path('cancelled'),
+      stagingBudgetBytes: _exportBudget,
+    );
+    final cancelled = capture.then<Object>(
+      (value) => value,
+      onError: (Object error) => error,
+    );
+    final duplicate = expectLater(
+      catalog.exportSnapshot(
+        fixture.path('duplicate'),
+        stagingBudgetBytes: _exportBudget,
+      ),
+      throwsA(_code(10)),
+    );
+    catalog.cancelExport();
+    await duplicate;
+    // If native completion won the cancellation race, its success is immutable.
+    expect(await cancelled, anyOf(isA<CoreExportSnapshot>(), _code(20)));
+    final retry = await catalog.exportSnapshot(
+      fixture.path('retry'),
+      stagingBudgetBytes: _exportBudget,
+    );
+    expect(retry.bytes, greaterThanOrEqualTo(8 * 1024 * 1024));
+    final closing = catalog.exportSnapshot(
+      fixture.path('closing'),
+      stagingBudgetBytes: _exportBudget,
+    );
+    final settled = closing.then<Object>(
+      (value) => value,
+      onError: (Object error) => error,
+    );
+    await catalog.close();
+    expect(await settled, anyOf(isA<CoreExportSnapshot>(), _code(20)));
+    expect(await _snapshot(fixture.path('book')), before);
+    for (final path in ['cancelled', 'closing']) {
+      final directory = Directory(fixture.path(path));
+      if (await directory.exists()) await directory.delete(recursive: true);
+    }
+  });
 
   test(
     'catalog open never creates an absent notebook, with or without an ID',
