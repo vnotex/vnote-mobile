@@ -4,3 +4,4 @@ environment:
   sdk: '>=3.13.7 <4.0.0'
 workspace:
   - apps/vnote_mobile
+  - packages/vxcore_bridge

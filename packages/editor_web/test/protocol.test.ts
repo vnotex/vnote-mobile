@@ -10,11 +10,13 @@ import {
 } from '../src/protocol';
 
 const generation = '0123456789abcdef0123456789abcdef';
+const documentId = 'bookA:nodeA';
+const baseVersion = 'a'.repeat(64);
 const envelope = (type: string, extra: Record<string, unknown> = {}) => ({
-  v: 1, type, documentId: 'diagnostic:editor', generation, revision: 0, requestId: 'host-1', ...extra,
+  v: 1, type, documentId, generation, revision: 0, requestId: 'host-1', ...extra,
 });
 const load = (text: string) => envelope('load', {
-  text, baseVersion: 'volatile', lineEndingPolicy: 'preserve', reason: 'open', selection: { anchor: 0, head: 0 },
+  text, baseVersion, lineEndingPolicy: 'preserve', reason: 'open', selection: { anchor: 0, head: 0 },
 });
 
 test('exact source survives edits with BOM, mixed separators, combining marks, emoji and RTL', () => {
@@ -97,7 +99,7 @@ test('incremental byte accounting matches actual valid mutation output', () => {
 
 test('strict envelopes reject malformed shapes, unsupported durability and unsafe counters', () => {
   for (const value of [null, [], 1, 'text', { ...load('ok'), v: 2 }, { ...load('ok'), revision: -1 },
-    { ...load('ok'), generation: 'old' }, { ...load('ok'), documentId: 'notebook:pretend' },
+    { ...load('ok'), generation: 'old' }, { ...load('ok'), documentId: 'notebook/path' },
     { ...load('ok'), revision: Number.MAX_SAFE_INTEGER + 1 }, { ...load('ok'), unexpected: true },
     { ...load('ok'), selection: { anchor: 0, head: 0, ranges: [] } },
     { ...load('ok'), requestId: 'host-0' }, { ...load('ok'), requestId: 'editor-1' },
@@ -105,6 +107,12 @@ test('strict envelopes reject malformed shapes, unsupported durability and unsaf
     envelope('ack', { stage: 'draftDurable', throughRevision: 0 }),
     envelope('ack', { stage: 'rejected', throughRevision: 0 }),
     envelope('close', { mode: 'request', disposition: 'save' }),
+    { ...load('ok'), documentId: '' }, { ...load('ok'), documentId: 'x'.repeat(257) },
+    { ...load('ok'), baseVersion: 'old-mtime' },
+    { ...load('ok'), baseVersion: baseVersion + '\n' },
+    { ...load('ok'), documentId: documentId + '\n' },
+    { ...load('ok'), generation: generation + '\n' },
+    envelope('save', { mode: 'request' }),
     envelope('command', { command: 'executeScript' }),
   ]) assert.throws(() => validateHostMessage(value));
   assert.throws(() => decodeHostMessage('{broken json'));
@@ -122,11 +130,40 @@ test('encoded limits include JSON escaping and multibyte data', () => {
 
 test('session checks reject unknown generation, future controls and stale exact-revision data', () => {
   const control = validateHostMessage(envelope('theme', { theme: 'dark', revision: 2 }));
-  validateSession(control, generation, 3);
-  assert.throws(() => validateSession(control, 'f'.repeat(32), 3), ProtocolError);
-  assert.throws(() => validateSession(control, generation, 1), ProtocolError);
-  assert.throws(() => validateSession(control, generation, 3, true), ProtocolError);
-  validateSession(control, generation, 2, true);
+  validateSession(control, documentId, generation, 3);
+  assert.throws(() => validateSession(control, documentId, 'f'.repeat(32), 3), ProtocolError);
+  assert.throws(() => validateSession(control, documentId, generation, 1), ProtocolError);
+  assert.throws(() => validateSession(control, documentId, generation, 3, true), ProtocolError);
+  validateSession(control, documentId, generation, 2, true);
+});
+
+test('stable document binding is independent of generation and snapshot revision is a lower bound', () => {
+  const snapshot = validateHostMessage(envelope('save', { mode: 'snapshotRequest', revision: 2 }));
+  validateSession(snapshot, documentId, generation, 3);
+  assert.throws(() => validateSession(snapshot, 'other:node', generation, 3), ProtocolError);
+  assert.throws(() => validateSession(snapshot, documentId, generation, 1), ProtocolError);
+  const written = validateHostMessage(envelope('close', { mode: 'request', disposition: 'written', revision: 2 }));
+  assert.throws(() => validateSession(written, documentId, generation, 3, true), ProtocolError);
+});
+
+test('receipt releases large transfer payloads while repeated snapshots retain bounded replay', () => {
+  const cache = new RequestCache();
+  const initial = validateHostMessage(load('x'.repeat(10000)));
+  cache.begin(initial, encodeMessage(initial));
+  cache.complete(initial, 'ready');
+  cache.release('load', initial.requestId);
+  assert.equal(cache.begin(initial, encodeMessage(initial))?.fingerprint, null);
+  assert.equal(cache.begin(initial, encodeMessage(initial))?.response, null);
+  for (let i = 2; i <= 100; i++) {
+    const request = validateHostMessage(envelope('save', { mode: 'snapshotRequest', requestId: `host-${i}` }));
+    const fingerprint = encodeMessage(request);
+    assert.equal(cache.begin(request, fingerprint), undefined);
+    cache.complete(request, 'large snapshot');
+    assert.equal(cache.begin(request, fingerprint)?.response, 'large snapshot');
+    cache.release('save', request.requestId);
+    assert.equal(cache.begin(request, fingerprint)?.response, null);
+    assert.throws(() => cache.begin(request, fingerprint + ' '), ProtocolError);
+  }
 });
 
 test('exact request replay is bounded; changed and evicted requests cannot be reapplied', () => {

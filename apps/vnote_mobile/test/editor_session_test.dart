@@ -5,10 +5,14 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vnote_mobile/services/editor_session.dart';
 
 const generation = '0123456789abcdef0123456789abcdef';
+const documentId = 'notebookA:nodeA';
+final baseHash = 'a' * 64;
 
 EditorSession sessionWith(String text) {
   final session = EditorSession(
     initialText: text,
+    documentId: documentId,
+    baseVersion: baseHash,
     generationFactory: () => generation,
   );
   addTearDown(session.dispose);
@@ -23,7 +27,7 @@ Map<String, Object?> message(
 ) => {
   'v': 1,
   'type': type,
-  'documentId': EditorSession.documentId,
+  'documentId': documentId,
   'generation': generation,
   'revision': revision,
   'requestId': requestId,
@@ -82,13 +86,18 @@ void main() {
   group('session and handshake', () {
     test('injected generation is validated as a 128-bit session token', () {
       expect(
-        () => EditorSession(generationFactory: () => 'invalid'),
+        () => EditorSession(
+          initialText: '',
+          documentId: documentId,
+          baseVersion: baseHash,
+          generationFactory: () => 'invalid',
+        ),
         throwsArgumentError,
       );
     });
 
     test(
-      'load is diagnostic and only matching ready grants volatile receipt',
+      'only the dynamically bound ready grants received acknowledgement',
       () {
         final session = sessionWith('hello');
         final load = session.beginLoad()!;
@@ -101,6 +110,30 @@ void main() {
         expect(ack?['requestId'], load['requestId']);
         expect(session.value.ready, isTrue);
         expect(deliver(session, ready), ack);
+      },
+    );
+
+    test(
+      'opaque identity and disk hash reject unbounded or invalid values',
+      () {
+        for (final id in ['', 'a' * 257, 'path/escape', 'identity\n']) {
+          expect(
+            () => EditorSession(
+              initialText: '',
+              documentId: id,
+              baseVersion: baseHash,
+            ),
+            throwsArgumentError,
+          );
+        }
+        expect(
+          () => EditorSession(
+            initialText: '',
+            documentId: documentId,
+            baseVersion: 'invalid',
+          ),
+          throwsArgumentError,
+        );
       },
     );
 
@@ -337,6 +370,8 @@ void main() {
       expect(
         () => EditorSession(
           initialText: String.fromCharCode(0xd800),
+          documentId: documentId,
+          baseVersion: baseHash,
           generationFactory: () => generation,
         ),
         throwsFormatException,
@@ -417,7 +452,7 @@ void main() {
   });
 
   group('controls never imply persistence', () {
-    test('diagnostic snapshot is exact, single-use, and received only', () {
+    test('snapshot is exact with one transfer pending and repeatable after receipt', () {
       final session = sessionWith('prior\r\n🌍');
       open(session);
       final request = session.requestSnapshot()!;
@@ -432,7 +467,19 @@ void main() {
       expect(ack?['stage'], 'received');
       expect(session.value.snapshotRevision, 0);
       expect(session.value.text, 'prior\r\n🌍');
-      expect(session.canRequestSnapshot, isFalse);
+      expect(session.canRequestSnapshot, isTrue);
+      final next = session.requestSnapshot()!;
+      expect(next['requestId'], isNot(request['requestId']));
+      expect(
+        deliver(
+          session,
+          message('save', 0, next['requestId']! as String, {
+            'mode': 'snapshot',
+            'text': session.value.text,
+          }),
+        )?['stage'],
+        'received',
+      );
     });
 
     test('snapshot mismatch cannot overwrite the mirror', () {
@@ -449,7 +496,48 @@ void main() {
     });
 
     test(
-      'snapshot must match its requested revision, not just current text',
+      'snapshot revision may advance past the requested lower bound',
+      () async {
+        final session = sessionWith('prior');
+        open(session);
+        late Map<String, Object?> request;
+        final capture = session.captureSnapshot((message) => request = message);
+        deliver(session, edit());
+        expect(
+          deliver(
+            session,
+            message('save', 1, request['requestId']! as String, {
+              'mode': 'snapshot',
+              'text': session.value.text,
+            }),
+          )?['stage'],
+          'received',
+        );
+        final snapshot = await capture;
+        expect(snapshot.revision, 1);
+        expect(snapshot.text, 'xprior');
+        expect(session.canRequestSnapshot, isTrue);
+      },
+    );
+
+    test('retired full snapshots cannot mutate or replay large source', () {
+      final session = sessionWith('prior');
+      open(session);
+      final request = session.requestSnapshot()!;
+      final response = message('save', 0, request['requestId']! as String, {
+        'mode': 'snapshot',
+        'text': 'prior',
+      });
+      deliver(session, response);
+      deliver(session, edit());
+      expect(deliver(session, response), isNull);
+      expect(deliver(session, {...response, 'text': 'changed'}), isNull);
+      expect(session.value.text, 'xprior');
+      expect(session.value.error, isNull);
+    });
+
+    test(
+      'a snapshot must equal the current mirror revision, not an old one',
       () {
         final session = sessionWith('prior');
         open(session);
@@ -457,28 +545,31 @@ void main() {
         deliver(session, edit());
         expectRejectedWithoutMutation(
           session,
-          message('save', 1, request['requestId']! as String, {
+          message('save', 0, request['requestId']! as String, {
             'mode': 'snapshot',
             'text': session.value.text,
           }),
         );
-        expect(session.value.snapshotRevision, isNull);
       },
     );
 
-    test('save request is rejected explicitly as unsupported persistence', () {
+    test('an unrequested snapshot is never a write request', () {
       final session = sessionWith('prior');
       open(session);
       expectRejectedWithoutMutation(
         session,
-        message('save', 0, 'editor-1', {'mode': 'request', 'reason': 'manual'}),
+        message('save', 0, 'editor-1', {'mode': 'snapshot', 'text': 'prior'}),
       );
     });
 
-    test('close needs discard consent and an exact final revision', () {
+    test('close needs discard consent and an exact final revision', () async {
       final session = sessionWith('prior');
       open(session);
-      final close = session.closeAfterDiscardConsent()!;
+      late Map<String, Object?> close;
+      final barrier = session.closeEditor(
+        (message) => close = message,
+        discard: true,
+      );
       expect(session.value.closing, isTrue);
       expect(session.value.closed, isFalse);
       // Final composition edits are still accepted before close-ready.
@@ -495,6 +586,7 @@ void main() {
       );
       expect(session.value.closed, isTrue);
       expect(session.value.text, 'xprior');
+      await barrier;
     });
 
     test('unsolicited close cannot retire the current session', () {
@@ -509,6 +601,94 @@ void main() {
       );
       expect(session.value.closed, isFalse);
     });
+
+    test(
+      'written close refusal preserves an editable session for newer input',
+      () async {
+        final session = sessionWith('prior');
+        open(session);
+        late Map<String, Object?> close;
+        final barrier = session.closeEditor(
+          (message) => close = message,
+          discard: false,
+        );
+        final failure = expectLater(barrier, throwsStateError);
+        deliver(session, edit());
+        deliver(
+          session,
+          message('ack', 1, close['requestId']! as String, {
+            'stage': 'rejected',
+            'throughRevision': 1,
+            'error': 'Newer pending input',
+          }),
+        );
+        await failure;
+        expect(session.value.closed, isFalse);
+        expect(session.value.closing, isFalse);
+        expect(session.value.ready, isTrue);
+        expect(session.canRequestSnapshot, isTrue);
+      },
+    );
+
+    test('written close cannot advance beyond the approved revision', () async {
+      final session = sessionWith('prior');
+      open(session);
+      late Map<String, Object?> close;
+      final barrier = session.closeEditor(
+        (message) => close = message,
+        discard: false,
+      );
+      final failure = expectLater(barrier, throwsStateError);
+      deliver(session, edit());
+      expectRejectedWithoutMutation(
+        session,
+        message('close', 1, close['requestId']! as String, {
+          'mode': 'ready',
+          'disposition': 'written',
+        }),
+      );
+      await failure;
+      expect(session.value.closed, isFalse);
+    });
+
+    test(
+      'composition snapshot refusal is recoverable without changing source',
+      () async {
+        final session = sessionWith('prior');
+        open(session);
+        late Map<String, Object?> request;
+        final snapshot = session.captureSnapshot(
+          (message) => request = message,
+        );
+        final failure = expectLater(snapshot, throwsStateError);
+        deliver(
+          session,
+          message('ack', 0, request['requestId']! as String, {
+            'stage': 'rejected',
+            'throughRevision': 0,
+            'error': 'Uncommitted composition',
+          }),
+        );
+        await failure;
+        expect(session.value.text, 'prior');
+        expect(session.value.ready, isTrue);
+        expect(session.canRequestSnapshot, isTrue);
+      },
+    );
+
+    test(
+      'transport failure completes a pending snapshot without dropping source',
+      () async {
+        final session = sessionWith('prior');
+        open(session);
+        final capture = session.captureSnapshot((_) {});
+        final failure = expectLater(capture, throwsStateError);
+        session.reportTransportError('Channel unavailable');
+        await failure;
+        expect(session.value.text, 'prior');
+        expect(session.value.ready, isFalse);
+      },
+    );
 
     test('editor rejection is never acknowledged or marked saved', () {
       final session = sessionWith('prior');

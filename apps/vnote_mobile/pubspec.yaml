@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: LGPL-3.0-only
 name: vnote_mobile
-description: "Memory-only VNote editor validation; notebook storage is unavailable."
+description: "VNote managed notebooks with a native core and Markdown editor."
 publish_to: 'none'
 version: 0.1.0+1
 resolution: workspace
@@ -13,6 +13,9 @@ dependencies:
     sdk: flutter
   flutter_riverpod: 3.4.3
   webview_flutter: 4.14.1
+  path_provider: 2.1.6
+  vxcore_bridge:
+    path: ../../packages/vxcore_bridge
 
 dev_dependencies:
   flutter_test:

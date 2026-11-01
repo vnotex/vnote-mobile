@@ -1,4 +1,4 @@
-name: Verify mobile editor
+name: Verify mobile notebook
 on:
   push:
   pull_request:
@@ -18,13 +18,19 @@ jobs:
           node-version-file: .node-version
           cache: npm
           cache-dependency-path: packages/editor_web/package-lock.json
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12.10'
+      - run: python -m pip install --index-url https://pypi.org/simple cmake==3.29.2 ninja==1.12.0
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: 3.47.9
           channel: stable
+      - run: python -m pip install --index-url https://pypi.org/simple --target .tools/libclang --no-deps libclang==18.1.1
+      - run: sdkmanager 'ndk;28.2.13676358'
       - run: node scripts/verify.mjs verify
 
-  android-editor:
+  android-notebook:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -37,6 +43,10 @@ jobs:
         with:
           distribution: temurin
           java-version: '17.0.20+101'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12.10'
+      - run: python -m pip install --index-url https://pypi.org/simple cmake==3.29.2 ninja==1.12.0
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: 3.47.9
@@ -44,7 +54,7 @@ jobs:
       - name: Build debug APK with bundled assets
         run: node scripts/verify.mjs android
 
-  ios-editor:
+  ios-notebook:
     runs-on: macos-26
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -56,6 +66,10 @@ jobs:
       - uses: maxim-lobanov/setup-xcode@1242409711ff5721add51979e9e11e23ebb7e5a4 # v1
         with:
           xcode-version: '26.6'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12.10'
+      - run: python -m pip install --index-url https://pypi.org/simple cmake==3.29.2 ninja==1.12.0
       - uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
         with:
           flutter-version: 3.47.9
@@ -70,8 +84,10 @@ jobs:
         with:
           submodules: recursive
       - run: python -m pip install cmake==3.29.2
-      - name: Configure unchanged core with MSVC
-        run: cmake -S third_party/vxcore -B build/core -G "Visual Studio 17 2022" -A x64 -DVXCORE_BUILD_SHARED=OFF -DVXCORE_BUILD_CLI=ON -DVXCORE_BUILD_TESTS=OFF -DVXCORE_BUILD_TOOLS=OFF -DVXCORE_INSTALL=OFF -DCMAKE_INSTALL_BINDIR=bin
-      - run: cmake --build build/core --config Release --target vxcore-cli --parallel 4
+      - name: Configure core regression tests with MSVC
+        run: cmake -S third_party/vxcore -B build/core -G "Visual Studio 17 2022" -A x64 -DVXCORE_BUILD_SHARED=OFF -DVXCORE_BUILD_CLI=ON -DVXCORE_BUILD_TESTS=ON -DVXCORE_BUILD_TOOLS=OFF -DVXCORE_INSTALL=OFF -DCMAKE_INSTALL_BINDIR=bin
+      - run: cmake --build build/core --config Release --target vxcore-cli test_context_paths test_atomic_buffer_save test_core test_buffer_save_read_only test_file_utils test_session_persistence --parallel 4
       - name: Exercise public version ABI without creating a context
         run: ./build/core/bin/Release/vxcli.exe version
+      - name: Verify core roots and atomic writes
+        run: ctest --test-dir build/core -C Release --output-on-failure --parallel 1 -R "^(test_context_paths|test_atomic_buffer_save|test_core|test_buffer_save_read_only|test_file_utils|test_session_persistence)$"

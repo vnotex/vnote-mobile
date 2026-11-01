@@ -127,19 +127,19 @@ export function applyChanges(text: string, changes: readonly Change[], selection
 export interface Envelope {
   v: 1;
   type: string;
-  documentId: 'diagnostic:editor';
+  documentId: string;
   generation: string;
   revision: number;
   requestId: string;
 }
 export type HostMessage = Envelope & (
-  | { type: 'load'; text: string; baseVersion: 'volatile'; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
+  | { type: 'load'; text: string; baseVersion: string; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
   | { type: 'ack'; stage: 'received' | 'rejected'; throughRevision: number; error?: string }
   | { type: 'selection'; anchor: number; head: number }
   | { type: 'command'; command: 'undo' | 'redo' }
   | { type: 'theme'; theme: 'light' | 'dark' }
-  | { type: 'save'; mode: 'snapshotRequest' | 'request'; reason?: 'manual' | 'autosave' | 'close' | 'resync' }
-  | { type: 'close'; mode: 'request'; disposition: 'discard' }
+  | { type: 'save'; mode: 'snapshotRequest'; reason?: 'manual' | 'close' }
+  | { type: 'close'; mode: 'request'; disposition: 'discard' | 'written' }
 );
 const HEADER = ['v', 'type', 'documentId', 'generation', 'revision', 'requestId'];
 export function encodeMessage(message: unknown, maximum = LIMITS.fullMessageBytes): string {
@@ -155,9 +155,10 @@ export function decodeHostMessage(raw: string): HostMessage {
 }
 export function validateHostMessage(value: unknown): HostMessage {
   requireThat(object(value), 'Message must be an object.');
-  requireThat(value.v === 1 && value.documentId === 'diagnostic:editor'
+  requireThat(value.v === 1 && typeof value.documentId === 'string'
+    && value.documentId.length > 0 && value.documentId.length <= 256 && !/[^A-Za-z0-9._:-]/.test(value.documentId)
     && typeof value.type === 'string' && typeof value.generation === 'string'
-    && /^[0-9a-f]{32}$/.test(value.generation) && integer(value.revision)
+    && value.generation.length === 32 && /^[0-9a-f]{32}$/.test(value.generation) && integer(value.revision)
     && typeof value.requestId === 'string' && /^(host|editor)-[1-9][0-9]{0,15}$/.test(value.requestId)
     && integer(Number(value.requestId.slice(value.requestId.indexOf('-') + 1))), 'Invalid protocol envelope.');
   requireThat(value.type === 'ack' || value.requestId.startsWith('host-'), 'Wrong request ID direction.');
@@ -165,7 +166,7 @@ export function validateHostMessage(value: unknown): HostMessage {
   switch (value.type) {
     case 'load':
       keys(value, [...HEADER, 'text', 'baseVersion', 'lineEndingPolicy', 'reason', 'selection']);
-      requireThat(value.revision === 0 && typeof value.text === 'string' && value.baseVersion === 'volatile'
+      requireThat(value.revision === 0 && typeof value.text === 'string' && typeof value.baseVersion === 'string' && value.baseVersion.length === 64 && /^[0-9a-f]{64}$/.test(value.baseVersion)
         && value.lineEndingPolicy === 'preserve' && value.reason === 'open', 'Invalid load policy.');
       selectionShape(value.selection);
       validateSource(value.text);
@@ -191,19 +192,19 @@ export function validateHostMessage(value: unknown): HostMessage {
       break;
     case 'save':
       keys(value, [...HEADER, 'mode', 'reason']);
-      requireThat(value.reason === undefined || ['manual', 'autosave', 'close', 'resync'].includes(String(value.reason)), 'Invalid snapshot reason.');
-      requireThat(value.mode === 'snapshotRequest' || value.mode === 'request', 'Unsupported snapshot mode.');
+      requireThat(value.reason === undefined || ['manual', 'close'].includes(String(value.reason)), 'Invalid snapshot reason.');
+      requireThat(value.mode === 'snapshotRequest', 'Unsupported snapshot mode.');
       break;
     case 'close':
       keys(value, [...HEADER, 'mode', 'disposition']);
-      requireThat(value.mode === 'request' && value.disposition === 'discard', 'Close requires explicit discard consent.');
+      requireThat(value.mode === 'request' && (value.disposition === 'discard' || value.disposition === 'written'), 'Invalid close barrier.');
       break;
     default: throw new ProtocolError('Unknown message type.');
   }
   return value as unknown as HostMessage;
 }
-export function validateSession(message: Envelope, generation: string, revision: number, exact = false): void {
-  requireThat(message.generation === generation, 'Stale or unknown session.');
+export function validateSession(message: Envelope, documentId: string, generation: string, revision: number, exact = false): void {
+  requireThat(message.documentId === documentId && message.generation === generation, 'Stale or unknown session.');
   requireThat(exact ? message.revision === revision : message.revision <= revision,
     exact ? 'Message does not match current revision.' : 'Message refers to a future revision.');
 }
@@ -212,7 +213,7 @@ export function assertCredits(count: number, bytes: number): void {
     'Waiting for the host to receive edits. Text is still only in memory.');
 }
 
-interface ReplayEntry { fingerprint: string; response: string | null }
+interface ReplayEntry { fingerprint: string | null; response: string | null }
 // Old requests cannot become new operations when the bounded replay window expires.
 export class RequestCache {
   private readonly entries = new Map<string, ReplayEntry>();
@@ -221,7 +222,7 @@ export class RequestCache {
     const key = `${message.type}:${message.requestId}`;
     const old = this.entries.get(key);
     if (old) {
-      requireThat(old.fingerprint === fingerprint, 'Request ID was reused with different content.');
+      requireThat(old.fingerprint === null || old.fingerprint === fingerprint, 'Request ID was reused with different content.');
       return old;
     }
     if (message.type !== 'ack') {
@@ -232,6 +233,15 @@ export class RequestCache {
     this.entries.set(key, { fingerprint, response: null });
     if (this.entries.size > LIMITS.replayEntries) this.entries.delete(this.entries.keys().next().value!);
     return undefined;
+  }
+  // Receipt retires full snapshot responses and the initial load source. Retain
+  // a bounded tombstone so an old transfer cannot install or capture text again.
+  release(type: 'load' | 'save', requestId: string): void {
+    const entry = this.entries.get(`${type}:${requestId}`);
+    if (entry) {
+      entry.response = null;
+      if (type === 'load') entry.fingerprint = null;
+    }
   }
   complete(message: HostMessage, response: string): void {
     const entry = this.entries.get(`${message.type}:${message.requestId}`);

@@ -28,6 +28,7 @@ const undoHistory = new Compartment();
 let retainedHistoryBytes = 0;
 let lineEnding = '\n';
 let generation: string | null = null;
+let documentId: string | null = null;
 let revision = 0, receivedRevision = 0, documentBytes = 0, nextRequest = 1;
 let readyRequest = '', ready = false, closed = false, frozen = false;
 let snapshot: { requestId: string; revision: number } | null = null;
@@ -64,15 +65,15 @@ function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : 'Editor protocol operation refused.').slice(0, 1024);
 }
 function memoryStatus(): void {
-  if (closed) show('Closed after explicit discard. Nothing was saved.');
+  if (closed) show('Editor closed after the requested barrier.');
   else if (frozen) show('Transport rejected an edit. Text is retained here; copy it before discarding.', true);
-  else if (composing) show('Composition is provisional. Finish composing; nothing is saved.');
-  else if (pending || inFlight.size) show('Edits are in memory; waiting for the host to receive them. Nothing is saved.');
-  else show(`Revision ${revision} received in host memory only. Nothing is saved or synced.`);
+  else if (composing) show('Composition is provisional. Finish composing before Write.');
+  else if (pending || inFlight.size) show('Waiting for the host to receive edits. Use Write to put them on disk.');
+  else show(`Received revision ${revision}. On-disk write status is shown above.`);
 }
 function header(type: string, requestId: string, at = revision): Envelope {
-  requireThat(generation !== null, 'Waiting for a host session.');
-  return { v: 1, type, documentId: 'diagnostic:editor', generation, revision: at, requestId };
+  requireThat(generation !== null && documentId !== null, 'Waiting for a host session.');
+  return { v: 1, type, documentId, generation, revision: at, requestId };
 }
 function requestId(): string {
   requireThat(Number.isSafeInteger(nextRequest + 1), 'Request counter exhausted; preserve this session.');
@@ -161,7 +162,7 @@ function armTransportTimeout(): void {
   retry.hidden = inFlight.size === 0;
   if (inFlight.size) transportTimer = setTimeout(() => {
     transportTimer = undefined;
-    show('The host has not received edits for five seconds. Retry sending or copy text before discarding. Nothing is saved.', true);
+    show('The host has not received edits for five seconds. Retry sending or copy text before discarding. Receipt is not a disk write.', true);
     retry.hidden = false;
   }, 5000);
 }
@@ -262,7 +263,7 @@ function startComposition(): void {
   composing = { base: view.state, baseBytes: documentBytes,
     changes: ChangeSet.empty(view.state.doc.length), failed: failure, reserved: failure === null };
   compositionTimer = setTimeout(() => {
-    show('Finish the active composition before snapshot or close. Text is provisional and nothing is saved.', true);
+    show('Finish the active composition before snapshot or close. Text is provisional and has not been written.', true);
   }, 5000);
   if (failure) show(failure, true); else memoryStatus();
 }
@@ -382,19 +383,22 @@ function receiveAck(message: Extract<HostMessage, { type: 'ack' }>): void {
     requireThat(inFlight.has(message.requestId) || message.requestId === readyRequest
       || message.requestId === snapshot?.requestId, 'Rejected acknowledgement has no matching request.');
     frozen = true;
-    show(`Host rejected volatile data: ${message.error}`, true);
+    show(`Host rejected editor data: ${message.error}`, true);
     return;
   }
   if (message.requestId === readyRequest) {
     requireThat(message.revision === 0 && message.throughRevision === 0, 'Invalid ready acknowledgement.');
     if (ready) return;
     ready = true;
+    cache.release('load', readyRequest);
     view.dispatch({ effects: writable.reconfigure([EditorState.readOnly.of(false), EditorView.editable.of(true)]) });
     memoryStatus();
     return;
   }
   if (message.requestId === snapshot?.requestId) {
-    requireThat(message.throughRevision === snapshot.revision, 'Snapshot acknowledgement revision mismatch.');
+    requireThat(message.throughRevision === snapshot.revision && message.revision === snapshot.revision, 'Snapshot acknowledgement revision mismatch.');
+    cache.release('save', snapshot.requestId);
+    snapshot = null;
     return;
   }
   const entry = inFlight.get(message.requestId);
@@ -413,6 +417,7 @@ function handle(message: HostMessage): void {
     const state = createState(message.text, message.selection);
     documentBytes = validateSource(message.text);
     lineEnding = preferredLineEnding(state.doc);
+    documentId = message.documentId;
     generation = message.generation;
     readyRequest = message.requestId;
     view.setState(state);
@@ -420,8 +425,8 @@ function handle(message: HostMessage): void {
     reply(message, { type: 'ready', textLength: state.doc.length });
     return;
   }
-  requireThat(generation !== null, 'Load a host session before sending controls.');
-  validateSession(message, generation, revision);
+  requireThat(generation !== null && documentId !== null, 'Load a host session before sending controls.');
+  validateSession(message, documentId!, generation, revision);
   if (message.type === 'ack') { receiveAck(message); return; }
   requireThat(ready && !closed, 'Editor session is not writable.');
   if (composing) {
@@ -432,7 +437,7 @@ function handle(message: HostMessage): void {
   switch (message.type) {
     case 'selection':
       flush();
-      validateSession(message, generation, revision, true);
+      validateSession(message, documentId!, generation, revision, true);
       validateSelection(view.state.doc, message);
       suppressSelection = true;
       try { view.dispatch({ selection: { anchor: message.anchor, head: message.head } }); }
@@ -447,16 +452,22 @@ function handle(message: HostMessage): void {
       view.dispatch({ effects: theme.reconfigure(editorTheme(message.theme === 'dark')) });
       break;
     case 'save':
-      requireThat(message.mode === 'snapshotRequest', 'Persistence is unavailable; no save or durable acknowledgement can be produced.');
-      requireThat(snapshot === null, 'One diagnostic snapshot is allowed per session; existing text is retained.');
+      requireThat(snapshot === null, 'A snapshot transfer is already awaiting receipt.');
+      requireThat(!frozen, 'Rejected text cannot be written; copy it before discarding.');
+      requireThat(refusal.hidden, 'Copy or dismiss the uncommitted composition before Write.');
       flush();
-      validateSession(message, generation, revision, true);
+      // The host revision is a lower bound; flush may have advanced it.
+      validateSession(message, documentId!, generation, revision);
       snapshot = { requestId: message.requestId, revision };
       reply(message, { type: 'save', mode: 'snapshot', text: view.state.doc.toString() });
       break;
     case 'close':
       // The host is responsible for obtaining explicit user consent before this request.
       flush();
+      if (message.disposition === 'written') {
+        requireThat(!frozen && !snapshot && refusal.hidden, 'Finish the active write and resolve uncommitted composition before closing.');
+        validateSession(message, documentId!, generation, revision, true);
+      }
       closed = true;
       view.dispatch({ effects: writable.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
       clearTimeout(transportTimer);
@@ -464,7 +475,7 @@ function handle(message: HostMessage): void {
       transportTimer = selectionTimer = undefined;
       retry.hidden = true;
       memoryStatus();
-      reply(message, { type: 'close', mode: 'ready', disposition: 'discard' });
+      reply(message, { type: 'close', mode: 'ready', disposition: message.disposition });
       break;
   }
 }
@@ -472,7 +483,7 @@ function receive(input: unknown): void {
   let message: HostMessage;
   try {
     message = validateHostMessage(input);
-    if (generation !== null) validateSession(message, generation, revision);
+    if (generation !== null) validateSession(message, documentId!, generation, revision);
     const previous = cache.begin(message, encodeMessage(message));
     if (previous) { if (previous.response !== null) post(previous.response); return; }
   } catch (error) { show(errorText(error), true); return; }

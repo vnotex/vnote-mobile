@@ -22,6 +22,9 @@ const pathKey = Object.keys(env).find(key => key.toLowerCase() === 'path') ?? 'P
 env[pathKey] = `${dirname(process.execPath)}${delimiter}${env[pathKey] ?? ''}`;
 const localFlutter = join(root, '.tools', 'flutter', 'bin', win ? 'flutter.bat' : 'flutter');
 const flutter = process.env.FLUTTER ?? (existsSync(localFlutter) ? localFlutter : 'flutter');
+const localDart = join(root, '.tools', 'flutter', 'bin', win ? 'dart.bat' : 'dart');
+const dart = process.env.DART ?? (existsSync(localDart) ? localDart : 'dart');
+const bridge = join(root, 'packages', 'vxcore_bridge');
 const npm = win ? join(dirname(process.execPath), 'npm.cmd') : 'npm';
 const editor = join(root, 'packages', 'editor_web');
 const app = join(root, 'apps', 'vnote_mobile');
@@ -30,7 +33,7 @@ function run(command, args, cwd = root, capture = false) {
   console.log(`> ${command} ${args.join(' ')}`);
   // PowerShell literal arguments avoid cmd.exe argument concatenation/expansion.
   // Native executables use direct process arguments on every platform.
-  const batch = win && (command === flutter || command.endsWith('.cmd'));
+  const batch = win && (command === flutter || command === dart || command.endsWith('.cmd'));
   const literal = value => "'" + value.replaceAll("'", "''") + "'";
   const invocation = batch
     ? ['-NoProfile', '-Command', `& ${[command, ...args].map(literal).join(' ')}; exit $LASTEXITCODE`]
@@ -66,15 +69,18 @@ if (mode === 'check') {
     if (mode === 'verify') {
       run(npm, ['run', 'typecheck'], editor);
       run(npm, ['test'], editor);
+      run(dart, ['run', 'scripts/generate_bindings.dart', '--check']);
+      run(dart, ['analyze'], bridge);
+      run(dart, ['test'], bridge);
       run(flutter, ['analyze', '--no-pub'], app);
       run(flutter, ['test', '--no-pub'], app);
     } else if (mode === 'android') {
-      run(flutter, ['build', 'apk', '--debug', '--no-pub'], app);
+      run(flutter, ['build', 'apk', '--debug', '--no-pub', '--target-platform', 'android-arm64,android-x64'], app);
     } else if (mode === 'ios') {
       if (process.platform !== 'darwin') throw new Error('iOS requires macOS and pinned Xcode');
       const xcode = run('xcodebuild', ['-version'], root, true);
-      if (!xcode.startsWith(`Xcode ${pins.iosEditorBuild.xcode}\n`)) {
-        throw new Error(`Select Xcode ${pins.iosEditorBuild.xcode} before packaging`);
+      if (!xcode.startsWith(`Xcode ${pins.ios.xcode}\n`)) {
+        throw new Error(`Select Xcode ${pins.ios.xcode} before packaging`);
       }
       run(flutter, ['build', 'ios', '--no-codesign', '--no-pub'], app);
       run(flutter, ['build', 'ios', '--simulator', '--debug', '--no-pub'], app);

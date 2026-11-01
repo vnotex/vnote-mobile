@@ -1,4 +1,5 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
@@ -55,21 +56,32 @@ class EditorSessionState {
 /// Constructor-injected protocol consumer, independent of WebView/native APIs.
 ///
 /// The mirror is updated once per validated batch. Exact wire fingerprints and
-/// their responses are retained for only the last 64 requests; evicted editor
-/// request numbers cannot be applied again. Nothing writes a notebook or draft.
+/// their responses are retained for only the last 64 requests (not full snapshots);
+/// evicted editor requests cannot be applied again. NotebookSession owns writes.
 class EditorSession extends ValueNotifier<EditorSessionState> {
   EditorSession({
-    String initialText = diagnosticText,
+    required String initialText,
+    required this.documentId,
+    required this.baseVersion,
     String Function()? generationFactory,
   }) : generation = (generationFactory ?? _randomGeneration)(),
        super(EditorSessionState(text: initialText)) {
-    if (!RegExp(r'^[0-9a-f]{32}$').hasMatch(generation)) {
+    if (generation.length != 32 ||
+        !RegExp(r'^[0-9a-f]{32}$').hasMatch(generation)) {
       throw ArgumentError('A generation must be 128 bits of lowercase hex.');
+    }
+    if (documentId.isEmpty ||
+        documentId.length > 256 ||
+        RegExp(r'[^A-Za-z0-9._:-]').hasMatch(documentId) ||
+        baseVersion.length != 64 ||
+        !RegExp(r'^[0-9a-f]{64}$').hasMatch(baseVersion)) {
+      throw ArgumentError('Invalid document identity or disk base hash.');
     }
     _sourceBytes = _sourceSize(initialText);
   }
 
-  static const documentId = 'diagnostic:editor';
+  final String documentId;
+  final String baseVersion;
   static const maxSourceUnits = 4 * 1024 * 1024;
   static const maxSourceBytes = 4 * 1024 * 1024;
   static const maxEnvelopeBytes = 32 * 1024 * 1024;
@@ -78,19 +90,6 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
   static const maxChanges = 256;
   static const maxInsertedUnits = 65536;
   static const maxRevision = 9007199254740991;
-  static const diagnosticText = '''# Editor validation
-
-This document exists only in memory. It is not saved, synced, or connected to a notebook.
-
-Try typing Markdown, selecting text, Undo / Redo, and changing the theme.
-
-- Exact source text stays in the editor and the volatile host mirror.
-- Check snapshot compares the two at a diagnostic boundary; it does not save.
-- Closing or terminating the app loses this text.
-
-Unicode: 中文 · 日本語 · العربية · é · 🌍
-''';
-
   final String generation;
   final _completed = <String, _CompletedRequest>{};
   final _pending = <String, String>{};
@@ -99,8 +98,11 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
   int _sourceBytes = 0;
   String? _loadRequest;
   bool _faulted = false;
-  bool _snapshotRequested = false;
   int? _snapshotTarget;
+  Completer<EditorSnapshot>? _snapshotCompletion;
+  Completer<void>? _closeCompletion;
+  String? _closeDisposition;
+  int? _closeTarget;
 
   static String _randomGeneration() {
     final random = Random.secure();
@@ -121,7 +123,7 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
     }
     final message = _request('load', {
       'text': value.text,
-      'baseVersion': 'volatile',
+      'baseVersion': baseVersion,
       'lineEndingPolicy': 'preserve',
       'reason': 'open',
       'selection': {'anchor': 0, 'head': 0},
@@ -144,10 +146,9 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
     return _request('theme', {'theme': dark ? 'dark' : 'light'});
   }
 
-  /// A single optional full-text diagnostic transfer, never a save operation.
+  /// Flushes one correlated current snapshot; receipt alone is not a write.
   Map<String, Object?>? requestSnapshot() {
-    if (!_canControl || _snapshotRequested) return null;
-    _snapshotRequested = true;
+    if (!canRequestSnapshot) return null;
     _snapshotTarget = value.revision;
     final message = _request('save', {
       'mode': 'snapshotRequest',
@@ -157,18 +158,55 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
     return message;
   }
 
-  bool get canRequestSnapshot => _canControl && !_snapshotRequested;
+  bool get canRequestSnapshot => _canControl && _snapshotTarget == null;
+
+  Future<EditorSnapshot> captureSnapshot(EditorSend send) {
+    final request = requestSnapshot();
+    if (request == null) {
+      return Future.error(StateError('Snapshot is unavailable.'));
+    }
+    final completion = Completer<EditorSnapshot>();
+    _snapshotCompletion = completion;
+    try {
+      send(request);
+    } on Object catch (_) {
+      reportTransportError(
+        'Unable to send the snapshot request. Text is retained.',
+      );
+    }
+    return completion.future;
+  }
+
+  Future<void> closeEditor(EditorSend send, {required bool discard}) {
+    if (value.closed || _loadRequest == null) return Future.value();
+    if (_closeCompletion != null) return _closeCompletion!.future;
+    final completion = Completer<void>();
+    _closeCompletion = completion;
+    final message = _requestClose(discard ? 'discard' : 'written');
+    if (message == null) {
+      _closeCompletion = null;
+      return Future.error(StateError('Editor close is unavailable.'));
+    }
+    try {
+      send(message);
+    } on Object catch (_) {
+      reportTransportError(
+        'Unable to send the close request. Text is retained.',
+      );
+    }
+    return completion.future;
+  }
+
   bool get _canControl => value.ready && !value.closing && !_faulted;
 
-  /// The UI must obtain explicit discard consent before calling this method.
-  /// It must retain the view until close-ready, or obtain separate force-discard
-  /// consent if composition/transport prevents that barrier from completing.
-  Map<String, Object?>? closeAfterDiscardConsent() {
+  Map<String, Object?>? _requestClose(String disposition) {
     if (value.closed || value.closing || _loadRequest == null) return null;
     final message = _request('close', {
       'mode': 'request',
-      'disposition': 'discard',
+      'disposition': disposition,
     });
+    _closeDisposition = disposition;
+    _closeTarget = value.revision;
     _pending[message['requestId']! as String] = 'close';
     value = value._with(closing: true);
     return message;
@@ -176,6 +214,10 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
 
   void reportTransportError(String error) {
     _faulted = true;
+    _snapshotCompletion?.completeError(StateError(error));
+    _snapshotCompletion = null;
+    _closeCompletion?.completeError(StateError(error));
+    _closeCompletion = null;
     value = value._with(ready: false, error: error);
   }
 
@@ -237,14 +279,15 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
                 : maxControlBytes),
         'Message exceeds its encoded size limit.',
       );
-      // Only the single validated snapshot may occupy a full-transfer cache
-      // slot; oversized or unsolicited payloads cannot inflate replay memory.
+      // Full snapshots are never retained in the replay cache.
       rememberWire = type != 'save' || bytes <= maxControlBytes;
       if (value.closed) return null;
       // Stale selection is intentionally dropped, even outside the replay window.
       if (type == 'selection' && revision < value.revision) return null;
       final completed = _completed[requestId];
       if (completed != null) {
+        // Retired full transfers are tombstones, not repeatable mutations.
+        if (completed.wire == null) return null;
         _require(
           completed.wire == wire,
           'Request ID reused with changed payload.',
@@ -319,27 +362,8 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
         case 'save':
           if (message.containsKey('reason')) {
             _require(
-              const {
-                'manual',
-                'autosave',
-                'close',
-                'resync',
-              }.contains(message['reason']),
+              const {'manual', 'close'}.contains(message['reason']),
               'Invalid snapshot/save reason.',
-            );
-          }
-          if (message['mode'] == 'request') {
-            _keys(message, {'mode', 'reason'});
-            _require(
-              bytes <= maxControlBytes,
-              'Control message exceeds its encoded size limit.',
-            );
-            _require(
-              revision == value.revision,
-              'Save request revision mismatch.',
-            );
-            throw const FormatException(
-              'Persistence is unavailable. This editor is memory only; nothing was saved.',
             );
           }
           _keys(message, {'mode', 'text', 'reason'}, optional: {'reason'});
@@ -348,7 +372,9 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
             'Unrequested snapshot.',
           );
           _require(
-            revision == _snapshotTarget && revision == value.revision,
+            _snapshotTarget != null &&
+                revision >= _snapshotTarget! &&
+                revision == value.revision,
             'Snapshot revision mismatch; both texts are retained.',
           );
           _require(
@@ -358,28 +384,35 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
           _sourceSize(message['text'] as String);
           _require(
             message['text'] == value.text,
-            'Snapshot differs from the volatile mirror; both texts are retained.',
+            'Snapshot differs from the validated mirror; both texts are retained.',
           );
           _pending.remove(requestId);
+          _snapshotTarget = null;
+          final completion = _snapshotCompletion;
+          _snapshotCompletion = null;
           value = value._with(snapshotRevision: revision);
-          rememberWire = true;
+          completion?.complete(EditorSnapshot(value.text, revision));
           response = _ack(requestId, 'received');
         case 'close':
           _keys(message, {'mode', 'disposition'});
           _require(
-            message['mode'] == 'ready' && message['disposition'] == 'discard',
+            message['mode'] == 'ready' &&
+                message['disposition'] == _closeDisposition,
             'Invalid close response.',
           );
           _require(
             _pending[requestId] == 'close' && value.closing,
-            'Close requires explicit discard consent.',
+            'Close requires an approved barrier.',
           );
           _require(
-            revision == value.revision,
+            revision == value.revision &&
+                (_closeDisposition == 'discard' || revision == _closeTarget),
             'Close revision mismatch; view retained.',
           );
           _pending.remove(requestId);
           value = value._with(ready: false, closed: true);
+          _closeCompletion?.complete();
+          _closeCompletion = null;
         case 'ack':
           _keys(message, {'stage', 'throughRevision', 'error'});
           _require(
@@ -400,14 +433,30 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
                 (message['error'] as String).isNotEmpty,
             'Missing rejection error.',
           );
-          _pending.remove(requestId);
+          final pending = _pending.remove(requestId);
+          if (pending == 'snapshot') {
+            _snapshotTarget = null;
+            _snapshotCompletion?.completeError(
+              StateError(message['error'] as String),
+            );
+            _snapshotCompletion = null;
+            break;
+          }
+          if (pending == 'close') {
+            value = value._with(closing: false);
+            _closeCompletion?.completeError(
+              StateError(message['error'] as String),
+            );
+            _closeCompletion = null;
+            break;
+          }
           reportTransportError(
             'Editor rejected a request: ${message['error']}',
           );
         default:
           throw const FormatException('Unknown editor message type.');
       }
-      _remember(requestId, wire, response);
+      _remember(requestId, type == 'save' ? null : wire, response);
       return response;
     } on FormatException catch (error) {
       reportTransportError(error.message);
@@ -534,7 +583,7 @@ Unicode: 中文 · 日本語 · العربية · é · 🌍
 
   void _remember(
     String requestId,
-    String wire,
+    String? wire,
     Map<String, Object?>? response,
   ) {
     _completed[requestId] = _CompletedRequest(
@@ -648,6 +697,16 @@ class _CompletedRequest {
   const _CompletedRequest(this.wire, this.response);
 
   // Exact bounded wire fingerprints avoid accepting hash collisions as replays.
-  final String wire;
+  final String? wire;
   final Map<String, Object?>? response;
 }
+
+/// Only a validated mirror-matching transfer can produce this capture.
+@immutable
+class EditorSnapshot {
+  const EditorSnapshot(this.text, this.revision);
+  final String text;
+  final int revision;
+}
+
+typedef EditorSend = void Function(Map<String, Object?> message);

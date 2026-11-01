@@ -2,7 +2,7 @@
 
 ## Gate status
 
-The editor/build kickoff is implemented and locally exercised. **Neither Phase 0 nor Phase 1 has passed.** A Windows core build and an editor-only session do not establish notebook persistence, mobile native packaging, desktop compatibility or iOS readiness. No personal notebook or production account is used.
+The managed-notebook native slice is implemented and exercised on Android. **Phase 0 publication and full Phase 1 gates remain open:** the new core pin is local until authorized publication, and iOS/physical-device checks are unperformed. Sections below retain the earlier editor-only evidence and add the native slice results separately. No personal notebook or production account is used.
 
 ## Source and host toolchain evidence
 
@@ -94,7 +94,7 @@ Using a new isolated `.tools/npm-public-cache` (public-registry metadata/tarball
 
 Reinstalled and cold-launched the rebuilt public-registry APK on the same Android emulator. Input `Registry_checked` appeared in the editor and Check snapshot again matched the Dart mirror at revision 13. The emulator was then stopped. The temporary lock-generation directory and isolated cache were removed; user-level npm configuration was not changed. The fresh source-tree export above predates these review corrections and is not relabeled as a second post-correction export.
 
-## Remaining native/product gates
+## Gates remaining after the editor-only kickoff
 
 - Additive context-level persistent app/local roots before core initialization, with desktop regressions; no ignored JSON, environment or test-mode production workaround.
 - Actual Android OpenSSL/curl and iPhoneOS/simulator curl/dependency builds, TLS trust handling, release symbols and 16 KB native packaging.
@@ -102,3 +102,107 @@ Reinstalled and cold-launched the rebuilt public-registry APK on the same Androi
 - Core ordinary-save crash safety and durable draft/write-intent recovery before persistence labels; concurrent error-state synchronization and bounded search cancellation/result behavior before those workers are enabled.
 - Desktop/mobile fixture round trips, real-device IME/accessibility/performance and process-kill tests; preview isolation, WebDAV, import/export/share and release scenarios in plan section 7.
 - Owner-controlled upstream changes/publication, store IDs, signing and LGPL distribution review. No push or store submission occurred.
+
+
+## Native notebook slice
+
+The next slice introduces the additive explicit-root core API, checked ordinary
+source publication, the bounded native owner host, generated FFI, and the
+Personal/Welcome.md workflow. Desktop compatibility baseline remains f8026adb;
+core changes are separately committed and the current gitlink/toolchain manifest
+is authoritative. No core or mobile push is authorized or performed.
+
+### Build and behavioral evidence
+
+- OpenSSL 3.5.9 source archive verified against SHA-256
+  `603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a`;
+  built for Android x86_64 and arm64 with NDK 28.2.13676358/API 28.
+- Native CMake wrapper built full vxcore, dependencies and vnote_host for both
+  Android ABIs. `llvm-readelf -lW` reported `0x4000` alignment for every LOAD
+  segment. Dynamic dependencies were only libc, libm and libdl; the C++ runtime
+  and native dependencies are linked into the host.
+- ffigen 23.0.0/libclang 18.1.1 generated the host bindings from the real C header;
+  regeneration check matched. The generator's YAML-deprecation and intentional
+  opaque-forward-declaration warnings remain visible; unused core callback
+  typedefs were excluded rather than exposing an enum-sized native ABI.
+- TypeScript typecheck and 18 protocol/history tests passed.
+- Nine real Dart/native bridge tests passed: UTF-8/BOM/CRLF and empty writes,
+  identity-preserving reopen, same-mtime conflict detection, invalid/oversized
+  input, unsupported/encrypted content, cancellation/close and isolated roots.
+- Flutter analysis reported no issues; all 54 editor/coordinator tests passed.
+  The added real-core Write → Reopen → revision-one Write regression failed
+  before reopening a fresh native host and passed after that correction.
+- The native C++ host test executable passed its real-core scenarios.
+- Upstream MSVC regression suites passed: test_context_paths,
+  test_atomic_buffer_save, test_core, test_buffer_save_read_only,
+  test_file_utils, test_session_persistence and test_buffer (7/7). Test roots
+  were unique system-temp directories outside any Git working tree.
+
+Commands used include `node scripts/verify.mjs verify`,
+`node scripts/verify.mjs android`, native CMake configure/build for
+`.tools/host-windows` and `.tools/host-android-{x64,arm64}-28`, and serial ctest
+runs selecting the seven upstream suites. JNI/native build inputs resolve from
+the pinned Dart workspace lock. Builds use no Qt and no runtime downloads.
+
+### Actual Android surface and persistence
+
+Installed the native APK on Medium_Phone (`emulator-5554`, Android 17/API 37,
+x86_64, 16 KB pages). The real app created a bundled notebook under
+`files/notebooks/Personal`, with separate `files/core/app` and `files/core/local`
+roots. The editor reached On disk revision 0 from actual native reads.
+
+Entered `Native_roundtrip_` through Android input and used Write. The physical
+Welcome.md bytes changed; notebook, folder and note IDs remained unchanged.
+Reopen drained the old native owner and installed a fresh revision-zero editor.
+A second write succeeded, and force-stop/cold-launch retained exact file bytes
+and all three portable IDs. Making the note read-only caused core error 6 to
+reach Flutter without changing its previous bytes; repairing permissions and
+retrying wrote the retained source successfully. Native core, OpenSSL and
+libgit2 license text was visible in the app.
+
+The initial welcome text was restored through the actual CodeMirror transaction
+and native Write, not a direct filesystem body edit. Android's debug WebView
+endpoint was used for that final fixture restoration after an ADB keyboard
+shortcut opened Gboard's unrelated microphone prompt (permission denied).
+The debug socket/port forward were released. The AVD and app are left running
+for the user's testing, as requested.
+
+### Failures found and resolved
+
+- Native Windows Perl is not a Unix OpenSSL build environment. The helper uses
+  Git's Unix Perl/Bash and hash-pinned missing CPAN modules, preserving PERL5LIB
+  across native make. No Git/OpenSSL source patches or TLS verification bypasses.
+- NDK headers require C99 inline in libgit2; only Android libgit2/util targets
+  override the old C90 setting. SQLite now links Threads::Threads instead of a
+  nonexistent Android libpthread; optional statx is gated at Android API 30.
+- The public core types header's unguarded C++ namespace broke actual C/FFI
+  parsing; a __cplusplus guard repaired it without changing ABI layout.
+- Android app UIDs can search `/data` but cannot enumerate it. Root validation
+  now requires traversal for ancestors, reserving read/write checks for storage.
+- Dart's UTF-8 decoder consumes a leading BOM; the bridge restores the original
+  source code unit so editing/writing cannot drop those bytes.
+- A core buffer test inherited Git attributes when TEMP was placed inside this
+  repository. Running in a unique external system-temp directory removed that
+  fixture contamination; no production behavior or assertion was weakened.
+- Windows ReplaceFileW added inherited ACEs. Real disposable-file experiments
+  and the core regression showed the change. The preservation mode temporarily
+  protects the original DACL, restores it exactly, and rejects callers unable
+  to preserve permissions. The final test compares owner/group/DACL semantics,
+  creation time, denied-delete sharing failure, old bytes, dirty state and cleanup.
+- Microsoft documents partial ReplaceFileW errors that can move/remove the
+  original path. The mode now reserves a recovery directory, never overwrites a
+  leftover backup, restores only into an absent original path, and retains both
+  copies on uncertain outcomes. Error 1176/1177 and abrupt termination in that
+  Windows multi-step window were **not fault-injected**. Protection may remain
+  hardened after failure/interruption; retained recovery entries are not trash.
+
+### Gates still open
+
+No iOS build/runtime or physical-device check was performed. OpenSSL/curl linking
+is not TLS trust-store/connectivity validation. Full desktop VNote UI fixture
+roundtrips, autosave, durable draft/write-intent journal, saved receipts,
+startup recovery, import/export, preview, WebDAV and release signing remain
+unimplemented or unverified as their planned phases specify. Windows replacement
+is recoverable multi-step publication, not crash-atomic or a power-loss claim.
+CI is configured but not dispatched; the new core gitlink must be published to
+the core remote before publishing this mobile commit.

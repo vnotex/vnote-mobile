@@ -10,24 +10,86 @@
   "ninja": "1.12.0",
   "core": {
     "repository": "https://github.com/vnotex/vxcore.git",
-    "revision": "c3319ca9a7dfd5432cad1f7c35de6be099fc87bf",
+    "revision": "c1f847563ee7753a5ed9d682b689e0a9d5ebc3be",
     "desktopReference": "f8026adb4c43f78d90251148e24b6e72ca28f3d7"
   },
-  "androidEditorBuild": {
+  "android": {
     "compileSdk": 36,
     "targetSdk": 36,
-    "minSdk": 24,
+    "minSdk": 28,
     "ndk": "28.2.13676358",
     "gradle": "9.3.1",
     "androidGradlePlugin": "9.1.0",
     "kotlin": "2.4.0",
     "java": "17.0.20.1+1"
   },
-  "iosEditorBuild": {
+  "ios": {
     "minimumOs": "15.0",
     "xcode": "26.6",
     "xcodeBuild": "17F113",
     "sdk": "26.5",
     "status": "selected; not executed on this Windows host"
+  },
+  "openssl": {
+    "version": "3.5.9",
+    "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
+    "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
+  },
+  "ffigen": "23.0.0",
+  "libclang": "18.1.1",
+  "perlModules": [
+    {
+      "version": "0.21",
+      "url": "https://cpan.metacpan.org/authors/id/J/JE/JESSE/Locale-Maketext-Simple-0.21.tar.gz",
+      "sha256": "b009ff51f4fb108d19961a523e99b4373ccf958d37ca35bf1583215908dca9a9",
+      "name": "Locale-Maketext-Simple",
+      "module": "Locale/Maketext/Simple.pm"
+    },
+    {
+      "name": "ExtUtils-MakeMaker",
+      "version": "7.78",
+      "module": "ExtUtils/MakeMaker.pm",
+      "url": "https://cpan.metacpan.org/authors/id/B/BI/BINGOS/ExtUtils-MakeMaker-7.78.tar.gz",
+      "sha256": "43b33c20f8d82dba7cc48f8cd702f8fc9811e9d07880886dfd31b7077bd4a3a6"
+    },
+    {
+      "name": "Pod-Usage",
+      "version": "2.05",
+      "module": "Pod/Usage.pm",
+      "url": "https://cpan.metacpan.org/authors/id/M/MA/MAREKR/Pod-Usage-2.05.tar.gz",
+      "sha256": "100c27908757c56ebfeca8b7bf15a9867e449df663ff013de3855d183dfbea30"
+    },
+    {
+      "name": "podlators",
+      "version": "v6.1.1",
+      "module": "Pod/Text.pm",
+      "url": "https://cpan.metacpan.org/authors/id/R/RR/RRA/podlators-v6.1.1.tar.gz",
+      "sha256": "709a7dc4a2259683eb2f89e085ec70cf743710d950510e489ec6ddca3eb80c68"
+    },
+    {
+      "name": "Pod-Simple",
+      "version": "3.48",
+      "module": "Pod/Simple.pm",
+      "url": "https://cpan.metacpan.org/authors/id/K/KH/KHW/Pod-Simple-3.48.tar.gz",
+      "sha256": "3297cf3c078de9d8297942423ec6ab59e85e30dfb38b782242699e386727c63a"
+    },
+    {
+      "name": "Pod-Escapes",
+      "version": "1.07",
+      "module": "Pod/Escapes.pm",
+      "url": "https://cpan.metacpan.org/authors/id/N/NE/NEILB/Pod-Escapes-1.07.tar.gz",
+      "sha256": "dbf7c827984951fb248907f940fd8f19f2696bc5545c0a15287e0fbe56a52308"
+    },
+    {
+      "name": "Pod-Perldoc",
+      "version": "3.28",
+      "module": "Pod/Perldoc.pm",
+      "url": "https://cpan.metacpan.org/authors/id/M/MA/MALLEN/Pod-Perldoc-3.28.tar.gz",
+      "sha256": "cc41e605b8e13c40a8ee6504ff46347b5ba7fbd92203b3bb055422051befc64d"
+    }
+  ],
+  "jsonLicense": {
+    "url": "https://raw.githubusercontent.com/nlohmann/json/v3.11.3/LICENSE.MIT",
+    "sha256": "86b998c792894ccb911a1cb7994f7a9652894e7a094c0b5e45be2f553f45cf14"
   }
 }

@@ -1,0 +1,41 @@
+name: VxcoreHostBindings
+description: Generated native owner-thread bridge; regenerate with the pinned ffigen.
+output: lib/src/generated/vxcore_host_bindings.dart
+headers:
+  entry-points:
+    - native/vxcore_host.h
+  include-directives:
+    - native/vxcore_host.h
+    - '**/vxcore_types.h'
+compiler-opts:
+  - '-I../../third_party/vxcore/include'
+functions:
+  include:
+    - 'vxm_.*'
+typedefs:
+  include:
+    - 'Vxm.*'
+structs:
+  include:
+    - 'Vxm.*'
+enums:
+  include:
+    - 'VxCoreError'
+    - 'VxCoreLineEnding'
+  as-int:
+    include:
+      - '.*'
+unnamed-enums:
+  include:
+    - 'VXM_.*'
+  as-int:
+    include:
+      - '.*'
+macros:
+  exclude:
+    - '.*'
+ffi-native:
+  asset-id: 'package:vxcore_bridge/src/generated/vxcore_host_bindings.dart'
+preamble: |
+  // SPDX-License-Identifier: LGPL-3.0-only
+  // Generated from native/vxcore_host.h. Do not edit by hand.

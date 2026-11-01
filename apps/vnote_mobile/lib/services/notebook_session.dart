@@ -1,0 +1,380 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:vxcore_bridge/vxcore_bridge.dart';
+
+import 'editor_session.dart';
+
+enum NotebookDisposition { write, discard, cancel }
+
+@immutable
+class NotebookSessionState {
+  const NotebookSessionState({
+    this.editor,
+    this.note,
+    this.onDiskRevision = 0,
+    this.loading = false,
+    this.writing = false,
+    this.transitioning = false,
+    this.closed = false,
+    this.error,
+  });
+
+  final EditorSession? editor;
+  final CoreNote? note;
+  final int onDiskRevision;
+  final bool loading;
+  final bool writing;
+  final bool transitioning;
+  final bool closed;
+  final String? error;
+  bool get dirty => editor != null && editor!.value.revision != onDiskRevision;
+  bool get busy => loading || writing || transitioning;
+}
+
+/// Owns one native notebook and one editor generation. Native writes are never
+/// inferred from editor receipt. The platform adapter alone creates support dirs.
+class NotebookSession extends ValueNotifier<NotebookSessionState> {
+  NotebookSession({Future<NotebookCore> Function()? openCore})
+    : _openCore = openCore ?? _openManaged,
+      super(const NotebookSessionState());
+
+  final Future<NotebookCore> Function() _openCore;
+  NotebookCore? _core;
+  String? _baseHash;
+  Future<void>? _initialization;
+  Future<void>? _shutdownFuture;
+  Completer<void>? _active;
+  bool _disposed = false;
+  bool _shuttingDown = false;
+
+  String get nativeNotices => _core?.nativeNotices ?? '';
+
+  Future<void> initialize() => _initialization ??= _initialize();
+
+  Future<void> retryOpen() async {
+    if (value.editor != null || !_admit()) return;
+    _publish(loading: true, clearError: true);
+    try {
+      await _core?.close();
+      _core = null;
+      if (!_shuttingDown) await (_initialization = _initialize());
+    } on Object catch (error) {
+      _publish(error: _error(error));
+    } finally {
+      _publish(loading: false);
+      _retire();
+    }
+  }
+
+  Future<void> _initialize() async {
+    _publish(loading: true);
+    try {
+      final core = await _openCore();
+      _core = core;
+      if (_shuttingDown) return;
+      final note = await core.read();
+      _install(note);
+    } on Object catch (error) {
+      _publish(error: _error(error));
+    } finally {
+      _publish(loading: false);
+    }
+  }
+
+  void _install(CoreNote note) {
+    if (_shuttingDown) return;
+    // UTF-8 hex is stable, delimiter-unambiguous and bounded by EditorSession.
+    String identity(String value) => utf8
+        .encode(value)
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+    final editor = EditorSession(
+      initialText: note.text,
+      documentId: '${identity(note.notebookId)}:${identity(note.nodeId)}',
+      baseVersion: note.baseHash,
+    );
+    final previous = value.editor;
+    previous?.removeListener(_editorChanged);
+    editor.addListener(_editorChanged);
+    _baseHash = note.baseHash;
+    value = NotebookSessionState(editor: editor, note: note);
+    previous?.dispose();
+  }
+
+  void _editorChanged() => _publish();
+
+  Future<bool> write(EditorSend send) async {
+    if (!_admit()) return false;
+    try {
+      return await _write(send);
+    } finally {
+      _retire();
+    }
+  }
+
+  Future<bool> _write(EditorSend send) async {
+    final editor = value.editor;
+    if (editor == null || _core == null) return false;
+    _publish(writing: true, clearError: true);
+    try {
+      final snapshot = await editor.captureSnapshot(send);
+      if (_shuttingDown) return false;
+      // A write with no accepted edits must not normalize the original bytes.
+      if (snapshot.revision != value.onDiskRevision) {
+        final result = await _core!.write(
+          snapshot.text,
+          revision: snapshot.revision,
+          baseHash: _baseHash!,
+        );
+        if (result.revision != snapshot.revision ||
+            result.baseHash.length != 64 ||
+            !RegExp(r'^[0-9a-f]{64}$').hasMatch(result.baseHash)) {
+          throw StateError('Native write returned a mismatched receipt.');
+        }
+        _baseHash = result.baseHash;
+        _publish(onDiskRevision: snapshot.revision);
+      }
+      return true;
+    } on Object catch (error) {
+      _publish(error: _error(error));
+      return false;
+    } finally {
+      _publish(writing: false);
+    }
+  }
+
+  Future<bool> reopen(NotebookDisposition disposition, EditorSend send) =>
+      _transition(disposition, send, reopen: true);
+
+  Future<bool> close(NotebookDisposition disposition, EditorSend send) =>
+      _transition(disposition, send, reopen: false);
+
+  Future<bool> _transition(
+    NotebookDisposition disposition,
+    EditorSend send, {
+    required bool reopen,
+  }) async {
+    if (disposition == NotebookDisposition.cancel || !_admit()) return false;
+    _publish(transitioning: true, clearError: true);
+    try {
+      if (disposition == NotebookDisposition.write && !await _write(send)) {
+        return false;
+      }
+      if (_shuttingDown) return false;
+      if (disposition == NotebookDisposition.write && value.dirty) {
+        throw StateError(
+          'Newer edits arrived during Write. Write again or explicitly discard them.',
+        );
+      }
+      // Even a received-clean mirror may have pending/composing JS input. The
+      // written barrier flushes it and refuses close if its revision advanced.
+      if (disposition != NotebookDisposition.discard ||
+          value.editor?.value.error == null) {
+        await value.editor?.closeEditor(
+          send,
+          discard: disposition == NotebookDisposition.discard,
+        );
+      }
+      if (_shuttingDown) return false;
+      if (reopen) {
+        // A new editor starts revision zero, so it needs a new native host epoch.
+        // Drain/join the old owner before reusing the same persistent roots.
+        final previousCore = _core;
+        _core = null;
+        await previousCore?.close();
+        if (_shuttingDown) return false;
+        _core = await _openCore();
+        if (_shuttingDown) return false;
+        final note = await _core!.read();
+        _install(note);
+      } else {
+        await _core?.close();
+        _publish(closed: true);
+      }
+      return true;
+    } on Object catch (error) {
+      // Keep the old generation/source available for copying after read errors.
+      _publish(error: _error(error));
+      return false;
+    } finally {
+      _publish(transitioning: false);
+      _retire();
+    }
+  }
+
+  bool _admit() {
+    if (_shuttingDown || value.busy || value.closed || _active != null) {
+      return false;
+    }
+    _active = Completer<void>();
+    return true;
+  }
+
+  void _retire() {
+    _active?.complete();
+    _active = null;
+  }
+
+  /// Native close performs its join off the UI isolate. Disposal stops editor
+  /// waits, then drains any admitted native mutation before closing the owner.
+  Future<void> shutdown() => _shutdownFuture ??= _shutdown();
+
+  Future<void> _shutdown() async {
+    _shuttingDown = true;
+    final editor = value.editor;
+    editor?.reportTransportError('The notebook session is closing.');
+    await _initialization;
+    await _active?.future;
+    await _core?.close();
+  }
+
+  @override
+  void dispose() {
+    if (_disposed) return;
+    value.editor?.removeListener(_editorChanged);
+    unawaited(shutdown().catchError((Object _) {}));
+    _disposed = true;
+    value.editor?.dispose();
+    super.dispose();
+  }
+
+  void _publish({
+    bool? loading,
+    bool? writing,
+    bool? transitioning,
+    bool? closed,
+    int? onDiskRevision,
+    String? error,
+    bool clearError = false,
+  }) {
+    if (_disposed) return;
+    value = NotebookSessionState(
+      editor: value.editor,
+      note: value.note,
+      onDiskRevision: onDiskRevision ?? value.onDiskRevision,
+      loading: loading ?? value.loading,
+      writing: writing ?? value.writing,
+      transitioning: transitioning ?? value.transitioning,
+      closed: closed ?? value.closed,
+      error: clearError ? null : error ?? value.error,
+    );
+  }
+
+  static String _error(Object error) => error is CoreException
+      ? 'Core error ${error.code}: ${error.message}'
+      : error is StateError
+      ? error.message.toString()
+      : 'Notebook operation failed. Source is retained; no notebook was recreated.';
+
+  static Future<NotebookCore> _openManaged() async {
+    final paths = await ManagedNotebookPaths.obtain();
+    return CoreNotebook.open(
+      appDataPath: paths.app,
+      localDataPath: paths.local,
+      notebookPath: paths.notebook,
+      notebookName: 'Personal',
+      notePath: 'Welcome.md',
+      initialText: '# Welcome\n\nThis is your Personal notebook.\n\nUse Write to put changes on disk, then Reopen to read them back.\n',
+    );
+  }
+}
+
+/// Only this adapter creates support directories; notebook files and the
+/// notebook root are exclusively created/read/written by the native core.
+class ManagedNotebookPaths {
+  const ManagedNotebookPaths({
+    required this.app,
+    required this.local,
+    required this.notebook,
+  });
+  final String app;
+  final String local;
+  final String notebook;
+
+  static Future<ManagedNotebookPaths> obtain() async {
+    final support = await getApplicationSupportDirectory();
+    final excluded = [
+      await getTemporaryDirectory(),
+      await getApplicationCacheDirectory(),
+      Directory.systemTemp,
+    ];
+    final root = await _canonical(support);
+    for (final directory in excluded) {
+      if (_within(root, await _canonical(directory))) {
+        throw StateError(
+          'Application Support resolves to temporary/cache storage.',
+        );
+      }
+    }
+    await Directory(root).create(recursive: true);
+    if (_key(await support.resolveSymbolicLinks()) != _key(root)) {
+      throw StateError('Application Support changed during initialization.');
+    }
+    Future<String> child(String relative, {bool create = true}) async {
+      final expected = Directory.fromUri(Directory(root).uri.resolve(relative));
+      final canonical = await _canonical(expected);
+      if (!_within(canonical, root) || _key(canonical) != _key(expected.path)) {
+        throw StateError(
+          'Managed storage escapes its persistent support root.',
+        );
+      }
+      if (create) {
+        await expected.create(recursive: true);
+        if (_key(await expected.resolveSymbolicLinks()) != _key(canonical)) {
+          throw StateError('Managed storage changed during initialization.');
+        }
+      }
+      return canonical;
+    }
+
+    await child('core/');
+    final app = await child('core/app/');
+    final local = await child('core/local/');
+    await child('notebooks/');
+    final notebook = await child('notebooks/Personal/', create: false);
+    return ManagedNotebookPaths(app: app, local: local, notebook: notebook);
+  }
+
+  static String _key(String path) {
+    final normalized = path
+        .replaceAll('\\', '/')
+        .replaceFirst(RegExp(r'/+$'), '');
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
+
+  static bool _within(String path, String parent) =>
+      _key(path) == _key(parent) || _key(path).startsWith('${_key(parent)}/');
+
+  static Future<String> _canonical(Directory directory) async {
+    final suffix = <String>[];
+    var current = directory.absolute;
+    while (!await current.exists()) {
+      if (await FileSystemEntity.type(current.path, followLinks: false) !=
+          FileSystemEntityType.notFound) {
+        throw StateError(
+          'A managed storage ancestor is not an accessible directory.',
+        );
+      }
+      final parent = current.parent;
+      if (parent.path == current.path) {
+        throw StateError('Persistent storage has no accessible ancestor.');
+      }
+      suffix.insert(
+        0,
+        current.uri.pathSegments.where((part) => part.isNotEmpty).last,
+      );
+      current = parent;
+    }
+    final canonical = Directory(await current.resolveSymbolicLinks());
+    return Directory.fromUri(
+      canonical.uri.resolve(
+        suffix.isEmpty ? '' : '${suffix.map(Uri.encodeComponent).join('/')}/',
+      ),
+    ).path;
+  }
+}
