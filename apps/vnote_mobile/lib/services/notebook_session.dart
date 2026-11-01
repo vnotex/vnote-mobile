@@ -39,9 +39,8 @@ class NotebookSessionState {
 /// Owns one native notebook and one editor generation. Native writes are never
 /// inferred from editor receipt. The platform adapter alone creates support dirs.
 class NotebookSession extends ValueNotifier<NotebookSessionState> {
-  NotebookSession({Future<NotebookCore> Function()? openCore})
-    : _openCore = openCore ?? _openManaged,
-      super(const NotebookSessionState());
+  NotebookSession({required this._openCore})
+    : super(const NotebookSessionState());
 
   final Future<NotebookCore> Function() _openCore;
   NotebookCore? _core;
@@ -54,7 +53,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
 
   String get nativeNotices => _core?.nativeNotices ?? '';
 
-  Future<void> initialize() => _initialization ??= _initialize();
+  Future<void> initialize() =>
+      _shuttingDown ? Future<void>.value() : _initialization ??= _initialize();
 
   Future<void> retryOpen() async {
     if (value.editor != null || !_admit()) return;
@@ -97,6 +97,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       initialText: note.text,
       documentId: '${identity(note.notebookId)}:${identity(note.nodeId)}',
       baseVersion: note.baseHash,
+      language: note.editorType.name,
     );
     final previous = value.editor;
     previous?.removeListener(_editorChanged);
@@ -185,8 +186,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
         // A new editor starts revision zero, so it needs a new native host epoch.
         // Drain/join the old owner before reusing the same persistent roots.
         final previousCore = _core;
-        _core = null;
         await previousCore?.close();
+        _core = null;
         if (_shuttingDown) return false;
         _core = await _openCore();
         if (_shuttingDown) return false;
@@ -194,6 +195,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
         _install(note);
       } else {
         await _core?.close();
+        _core = null;
         _publish(closed: true);
       }
       return true;
@@ -231,6 +233,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     await _initialization;
     await _active?.future;
     await _core?.close();
+    _core = null;
   }
 
   @override
@@ -270,18 +273,6 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       : error is StateError
       ? error.message.toString()
       : 'Notebook operation failed. Source is retained; no notebook was recreated.';
-
-  static Future<NotebookCore> _openManaged() async {
-    final paths = await ManagedNotebookPaths.obtain();
-    return CoreNotebook.open(
-      appDataPath: paths.app,
-      localDataPath: paths.local,
-      notebookPath: paths.notebook,
-      notebookName: 'Personal',
-      notePath: 'Welcome.md',
-      initialText: '# Welcome\n\nThis is your Personal notebook.\n\nUse Write to put changes on disk, then Reopen to read them back.\n',
-    );
-  }
 }
 
 /// Only this adapter creates support directories; notebook files and the

@@ -13,6 +13,7 @@ EditorSession sessionWith(String text) {
     initialText: text,
     documentId: documentId,
     baseVersion: baseHash,
+    language: 'markdown',
     generationFactory: () => generation,
   );
   addTearDown(session.dispose);
@@ -84,12 +85,27 @@ void expectRejectedWithoutMutation(
 
 void main() {
   group('session and handshake', () {
+    test('unsupported language cannot establish an editor session', () {
+      for (final language in ['', 'html', 'text\n']) {
+        expect(
+          () => EditorSession(
+            initialText: '',
+            documentId: documentId,
+            baseVersion: baseHash,
+            language: language,
+          ),
+          throwsArgumentError,
+        );
+      }
+    });
+
     test('injected generation is validated as a 128-bit session token', () {
       expect(
         () => EditorSession(
           initialText: '',
           documentId: documentId,
           baseVersion: baseHash,
+          language: 'markdown',
           generationFactory: () => 'invalid',
         ),
         throwsArgumentError,
@@ -122,6 +138,7 @@ void main() {
               initialText: '',
               documentId: id,
               baseVersion: baseHash,
+              language: 'markdown',
             ),
             throwsArgumentError,
           );
@@ -131,6 +148,7 @@ void main() {
             initialText: '',
             documentId: documentId,
             baseVersion: 'invalid',
+            language: 'markdown',
           ),
           throwsArgumentError,
         );
@@ -372,6 +390,7 @@ void main() {
           initialText: String.fromCharCode(0xd800),
           documentId: documentId,
           baseVersion: baseHash,
+          language: 'markdown',
           generationFactory: () => generation,
         ),
         throwsFormatException,

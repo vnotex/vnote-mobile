@@ -14,9 +14,9 @@ Use one dedicated native owner OS thread per host for context lifetime, metadata
 
 | Operations / real API | Executor and exclusion | Lifetime / cancellation |
 | --- | --- | --- |
-| Context create, configuration get/update, locale; `vxcore_context_create`, later proposed create-with-paths | O; initialization before admitting other work; explicit roots prerequisite in ADR 0001 | Host owns context; queued cancellation only, no destroy while calls run |
+| Context create, configuration get/update, locale; `vxcore_context_create`, platform-selected `vxcore_context_create_with_paths` | O; initialization before admitting other work; explicit roots prerequisite in ADR 0001 | Host owns context; queued cancellation only, no destroy while calls run |
 | `vxcore_notebook_create`, `open`, `open_ex`, `list`, `get_config` | O; root/lifecycle admission; G for create/open | Copy/free IDs and JSON; mutation completes once begun; reject unsupported/read-only writes |
-| `vxcore_folder_create`, `vxcore_file_create`; folder/file listing, rename/move/delete APIs used by later offline workflow | O + G; structural mutations also reject editor/apply reservations | No speculative success; cancel before dispatch, retain actual mutation result afterward |
+| `vxcore_folder_create`, `vxcore_file_create`, `vxcore_folder_list_children`, `vxcore_node_get_path_by_id`, `vxcore_node_get_config`, rename/move/delete | Catalog O + G; no live editor owner for the same notebook | Resolve stable IDs at dispatch; cancel before mutation, retain actual result; refresh after every attempt without claiming rollback |
 | `vxcore_notebook_collect_node_ids`, `vxcore_folder_attach_imported`, `vxcore_notebook_recover_imports` | O + G and notebook lifecycle lease; reconcile core import journals and application importing ledger before other mutations/sync | Copy/free returned IDs/JSON; preserve final staged identities for retries. Cancel before attach dispatch, never abandon journaled commit/recovery after mutation. Core attach rechecks collisions and publishes one child-folder cohort; share extensions write only the durable inbox, never the live notebook (ADR 0006) |
 | `vxcore_buffer_open`, `open_by_node_id`, `get`, `get_state`, `get_revision`, `get_content_raw` | O; F and G for open/disk interaction | Raw content pointer is borrowed until modification/close: copy immediately, never send pointer to Dart |
 | `vxcore_buffer_set_content_raw` then `vxcore_buffer_save` | O + F + G as one indivisible scheduled job | Captured editor generation/revision/bytes retained; cancellation only before mutation, then finish save attempt and publish actual result |
@@ -50,9 +50,9 @@ The pinned API accepts `volatile int *cancel_flag`; volatile is not portable cro
 
 ## Host ABI and bounded transport
 
-The host ABI is separate from `vxcore_*` exports. The current `vxm_*` boundary implements create/read/write/cancel/drain/free/close/destroy and a borrowed read-only notices export. Later sync handshakes extend these host protocol choices: versioned submit, cancel, reservation-reply, drain-events, release-event and asynchronous shutdown operations. Use fixed-width request ID and context/notebook/session generation; payloads carry operation, captured editor revision, byte length and explicit ownership. Terminal envelope carries actual core code, redacted explanation and outcome (success/error/cancelled/stale), plus partial-application facts. Never retrieve shared last-error text to label a different operation.
+The host ABI is separate from `vxcore_*` exports. The current `vxm_*` boundary implements explicit catalog/note creation, note read/write, catalog list/mutate, cancel/drain/free/close/destroy and a borrowed read-only notices export. Later sync handshakes extend these host protocol choices: versioned submit, cancel, reservation-reply, drain-events, release-event and asynchronous shutdown operations. Use fixed-width request ID and context/notebook/session generation; payloads carry operation, captured editor revision, byte length and explicit ownership. Terminal envelope carries actual core code, redacted explanation and outcome (success/error/cancelled/stale), plus partial-application facts. Never retrieve shared last-error text to label a different operation.
 
-Initial admission limits: 64 pending requests and 32 MiB total queued input per host, 8 MiB maximum editor snapshot, 128 queued events and 16 MiB total result storage; oversized editor input is rejected before mutation with recoverable source preserved. Reserve one terminal slot per admitted request separately from progress/batches. Progress may coalesce; terminal results and save errors may not drop. Search uses small chunks, explicit 10,000-match / 8 MiB delivered-result cap and an explicit incomplete/limit status, not falsely complete truncated results. A single native search chunk can itself exceed transport limits because core constructs its JSON first: reject oversized files/match-heavy work up front where possible and require an upstream bounded result sink before claiming bounded native search memory for arbitrary inputs. Do not advertise queue bounds as a core allocation guarantee.
+Current admission limits: 64 admitted operations and 32 MiB total queued input per host, 4 MiB editor source, 8 MiB catalog JSON, 64 retained terminals plus one separately reserved close terminal, and 16 MiB aggregate result storage including bounded dynamic metadata; oversized editor input is rejected before mutation with recoverable source preserved. Reserve one terminal slot per admitted request separately from progress/batches. Progress may coalesce; terminal results and save errors may not drop. Search uses small chunks, explicit 10,000-match / 8 MiB delivered-result cap and an explicit incomplete/limit status, not falsely complete truncated results. A single native search chunk can itself exceed transport limits because core constructs its JSON first: reject oversized files/match-heavy work up front where possible and require an upstream bounded result sink before claiming bounded native search memory for arbitrary inputs. Do not advertise queue bounds as a core allocation guarantee.
 
 Core log callbacks execute under the logger mutex; events/search callbacks can arrive on the calling worker. Copy bounded borrowed data before return, redact secrets, and enqueue without calling Dart or synchronously re-entering core. Never wait for UI while holding a core mutex/G. If a required handshake cannot be delivered, fail before apply; progress loss is not permission to lose a terminal outcome. Result release is explicit and independent of context destruction.
 
@@ -60,6 +60,47 @@ Core log callbacks execute under the logger mutex; events/search callbacks can a
 The current implementation serializes core jobs across host instances with a process-wide mutex because the core UUID generator has unsynchronized shared RNG state. Contexts and storage remain independently owned. Admission/cancellation/event draining and notifications do not take this core-job gate. Remove or narrow that gate only after upstream global state has a proven concurrency contract.
 
 Dart retains NativeCallable.listener while the owner runs. Close retires admission, drains terminal events, nulls the usable event handle, performs native destroy/join on a cleanup isolate, then closes the callable. Reopen creates a fresh native host as well as a fresh editor generation: the native write-revision watermark cannot be reused after an editor resets to revision zero.
+
+### Catalog and editor ownership
+
+Catalog mode owns a context/notebook but no buffer. Note mode requires the expected
+notebook and node IDs, resolves the current path through core, and never creates a
+missing notebook or note. Catalog mutations are rejected in note mode; note reads
+and writes are rejected in catalog mode. The Flutter workspace drains one owner
+before opening the other. All later catalog opens retain the first observed
+notebook UUID, including failed-note-open recovery.
+
+`vxcore_node_get_path_by_id` is a cache lookup, not an absence proof. The root
+folder UUID is anchored through core metadata. Cache misses or contradictory cache hits use core folder
+listings, bounded to 100,000 inspected nodes and 8 MiB of queued path text;
+exhaustion is explicit, never a false NOT_FOUND. Missing indexed nodes may be
+resolved for deletion through their parent listing, but never installed as an
+editable note or used as a creation destination. Unrelated legacy basenames do
+not abort another node's search; mutation targets still obey portable-name policy.
+Unsafe branches are not traversed or treated as proof that an ID is absent.
+
+Catalog admission reserves an 8 MiB listing allowance plus bounded metadata under
+the existing 16 MiB aggregate output budget; it does not allocate an unused source
+buffer. The returned core JSON allocation has a separate owner and is freed only
+with `vxcore_string_free`, including errors. Null-plus-success and oversized data
+are rejected. On acceptance, reserved credit shrinks under the capacity mutex to
+the retained payload/metadata charge; taken events can outlive host destruction.
+Dart validates the generated-key schema and the 10,000-direct-child presentation
+limit explicitly, never truncates a listing or substitutes an empty folder.
+
+Structural commands use a closed operation enum and bounded IDs/names, not arbitrary
+paths from widgets or JavaScript. Once dispatched they finish with their real core
+outcome. Refresh is a distinct step after success or failure: the core may already
+have changed metadata, so a failed refresh is not proof of rollback. Core delete
+may fall back to permanent deletion; the confirmation must disclose that fact.
+
+Markdown file moves also preflight the pinned core's implicit relative-resource
+moves on O + G, using the existing public cmark dependency and bounded public
+file-size/peek APIs. Incomplete C-string peeks, malformed/oversized source, unsafe
+paths, overwrites and implicitly moved indexed nodes are refused before dispatch.
+UUID assets and captured resource destinations are checked after core success;
+nonfatal core resource failures become explicit partial-outcome errors, never host
+filesystem repairs. Ordinary text suffixes do not receive a Markdown move parser.
 
 ### Additional upstream concurrency gate
 

@@ -2,4 +2,13 @@
 library;
 
 export 'src/core_notebook.dart'
-    show CoreException, CoreNote, CoreNotebook, CoreWriteResult, NotebookCore;
+    show
+        CatalogCore,
+        CoreDirectory,
+        CoreEditorType,
+        CoreEntry,
+        CoreException,
+        CoreNote,
+        CoreNotebook,
+        CoreWriteResult,
+        NotebookCore;

@@ -2,9 +2,9 @@
 import 'package:flutter/material.dart';
 
 import 'app/vnote_app.dart';
-import 'services/notebook_session.dart';
+import 'services/notebook_workspace.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  runApp(VNoteApp(session: NotebookSession()));
+  runApp(VNoteApp(workspace: NotebookWorkspace()));
 }

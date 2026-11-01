@@ -16,7 +16,7 @@ const envelope = (type: string, extra: Record<string, unknown> = {}) => ({
   v: 1, type, documentId, generation, revision: 0, requestId: 'host-1', ...extra,
 });
 const load = (text: string) => envelope('load', {
-  text, baseVersion, lineEndingPolicy: 'preserve', reason: 'open', selection: { anchor: 0, head: 0 },
+  text, language: 'markdown', baseVersion, lineEndingPolicy: 'preserve', reason: 'open', selection: { anchor: 0, head: 0 },
 });
 
 test('exact source survives edits with BOM, mixed separators, combining marks, emoji and RTL', () => {
@@ -108,6 +108,8 @@ test('strict envelopes reject malformed shapes, unsupported durability and unsaf
     envelope('ack', { stage: 'rejected', throughRevision: 0 }),
     envelope('close', { mode: 'request', disposition: 'save' }),
     { ...load('ok'), documentId: '' }, { ...load('ok'), documentId: 'x'.repeat(257) },
+    { ...load('ok'), language: undefined }, { ...load('ok'), language: null },
+    { ...load('ok'), language: 'html' }, { ...load('ok'), language: 'text\n' },
     { ...load('ok'), baseVersion: 'old-mtime' },
     { ...load('ok'), baseVersion: baseVersion + '\n' },
     { ...load('ok'), documentId: documentId + '\n' },

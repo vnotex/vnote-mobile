@@ -1,0 +1,929 @@
+// SPDX-License-Identifier: LGPL-3.0-only
+import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:flutter/material.dart';
+import 'package:flutter_test/flutter_test.dart';
+import 'package:vnote_mobile/features/library/notebook_browser.dart';
+import 'package:vnote_mobile/services/notebook_session.dart';
+import 'package:vnote_mobile/services/notebook_workspace.dart';
+import 'package:vxcore_bridge/vxcore_bridge.dart';
+
+// Reuse the existing protocol driver, not a second editor implementation.
+import 'notebook_session_test.dart'
+    as protocol
+    show ControlledCore, answer, insert, ready, reply, turn;
+
+const _note = CoreEntry(
+  id: 'note-id',
+  name: '研究.md',
+  isFolder: false,
+  exists: true,
+  encrypted: false,
+);
+const _folder = CoreEntry(
+  id: 'folder-id',
+  name: 'Research',
+  isFolder: true,
+  exists: true,
+  encrypted: false,
+);
+
+CoreDirectory _directory({
+  String id = 'root-id',
+  String path = '.',
+  String? parentId,
+  List<CoreEntry> entries = const [_folder, _note],
+}) => CoreDirectory(
+  notebookId: 'book-identity',
+  notebookName: 'Personal',
+  folderId: id,
+  path: path,
+  parentId: parentId,
+  entries: entries,
+);
+
+// These presentation doubles control completion order only. Persistence and
+// stable IDs are exercised through the real native factories below.
+class _Owners {
+  int active = 0;
+  int maximum = 0;
+
+  void acquire() {
+    expect(active, 0, reason: 'A new native owner must follow the old join.');
+    active++;
+    if (active > maximum) maximum = active;
+  }
+
+  void release() => active--;
+}
+
+class _Catalog implements CatalogCore {
+  _Catalog(this.owners, this.initialDirectory) {
+    owners.acquire();
+  }
+
+  final _Owners owners;
+  @override
+  final CoreDirectory initialDirectory;
+  final lists = <String?>[];
+  final changes = <List<String>>[];
+  Future<CoreDirectory> Function(String?)? onList;
+  Future<String> Function()? onMutation;
+  Completer<void>? closeGate;
+  int closes = 0;
+  Future<void>? _closing;
+
+  @override
+  String get nativeNotices => 'Catalog notices';
+
+  @override
+  Future<CoreDirectory> list([String? folderId]) async {
+    lists.add(folderId);
+    return onList == null ? initialDirectory : await onList!(folderId);
+  }
+
+  Future<String> _change(List<String> arguments) async {
+    changes.add(arguments);
+    return onMutation == null ? 'new-node' : await onMutation!();
+  }
+
+  @override
+  Future<String> createNote(String folderId, String name) =>
+      _change(['note', folderId, name]);
+  @override
+  Future<String> createFolder(String folderId, String name) =>
+      _change(['folder', folderId, name]);
+  @override
+  Future<void> rename(String nodeId, String name) async {
+    await _change(['rename', nodeId, name]);
+  }
+
+  @override
+  Future<void> move(String nodeId, String destinationFolderId) async {
+    await _change(['move', nodeId, destinationFolderId]);
+  }
+
+  @override
+  Future<void> delete(String nodeId) async {
+    await _change(['delete', nodeId]);
+  }
+
+  @override
+  Future<void> close() => _closing ??= _close();
+
+  Future<void> _close() async {
+    closes++;
+    await closeGate?.future;
+    owners.release();
+  }
+}
+
+class _Note implements NotebookCore {
+  _Note(this.owners) {
+    owners.acquire();
+  }
+  final _Owners owners;
+  final core = protocol.ControlledCore();
+  Future<void>? _closing;
+
+  @override
+  String get nativeNotices => core.nativeNotices;
+  @override
+  Future<CoreNote> read() => core.read();
+  @override
+  Future<CoreWriteResult> write(
+    String text, {
+    required int revision,
+    required String baseHash,
+  }) => core.write(text, revision: revision, baseHash: baseHash);
+  @override
+  Future<void> close() => _closing ??= _close();
+
+  Future<void> _close() async {
+    await core.close();
+    owners.release();
+  }
+}
+
+class _Harness {
+  _Harness({bool widgetTest = false}) {
+    workspace = NotebookWorkspace(
+      obtainPaths: () async => const ManagedNotebookPaths(
+        app: 'app',
+        local: 'local',
+        notebook: 'notebook',
+      ),
+      openCatalog: (paths, expected) async {
+        expectedIds.add(expected);
+        if (catalogFactory != null) return catalogFactory!(expected);
+        final catalog = _Catalog(owners, _directory());
+        catalogs.add(catalog);
+        return catalog;
+      },
+      openNote: (paths, notebookId, nodeId) async {
+        noteIds.add([notebookId, nodeId]);
+        if (noteFactory != null) return noteFactory!();
+        final note = _Note(owners);
+        notes.add(note);
+        return note;
+      },
+    );
+    void verifyCleanup() {
+      workspace.dispose();
+      expect(owners.active, 0);
+      expect(owners.maximum, lessThanOrEqualTo(1));
+    }
+
+    if (widgetTest) {
+      // A completed future from the fake clock must not be awaited later from
+      // the outer runner's teardown zone. Widget bodies await shutdown first.
+      addTearDown(() {
+        expect(workspace.value.closed, isTrue);
+        verifyCleanup();
+      });
+    } else {
+      addTearDown(() async {
+        await workspace.shutdown();
+        verifyCleanup();
+      });
+    }
+  }
+
+  final owners = _Owners();
+  final catalogs = <_Catalog>[];
+  final notes = <_Note>[];
+  final expectedIds = <String?>[];
+  final noteIds = <List<String>>[];
+  Future<CatalogCore> Function(String?)? catalogFactory;
+  Future<NotebookCore> Function()? noteFactory;
+  late final NotebookWorkspace workspace;
+
+  Future<NotebookSession> edit() async {
+    await workspace.initialize();
+    expect(await workspace.openNote(_note), isTrue);
+    final session = workspace.value.session!;
+    protocol.ready(session.value.editor!);
+    return session;
+  }
+}
+
+void main() {
+  test('native nested create, write, reopen, move and return preserve notebook and node identities', () async {
+    final root = await Directory.systemTemp.createTemp('vnote-workspace-');
+    final paths = ManagedNotebookPaths(
+      app: '${root.path}/app',
+      local: '${root.path}/local',
+      notebook: '${root.path}/book',
+    );
+    final expectedIds = <String?>[];
+    final workspace = NotebookWorkspace(
+      obtainPaths: () async => paths,
+      openCatalog: (paths, expected) {
+        expectedIds.add(expected);
+        return CoreNotebook.openCatalog(
+          appDataPath: paths.app,
+          localDataPath: paths.local,
+          notebookPath: paths.notebook,
+          notebookName: 'Personal',
+          expectedNotebookId: expected,
+        );
+      },
+    );
+    addTearDown(() async {
+      await workspace.shutdown();
+      workspace.dispose();
+      await root.delete(recursive: true);
+    });
+    await workspace.initialize();
+    expect(workspace.value.error, isNull);
+    final notebookId = workspace.value.directory!.notebookId;
+    final rootId = workspace.value.directory!.folderId;
+    expect(workspace.value.directory!.entries, isEmpty);
+    final folder = await workspace.createFolder('研究');
+    expect(folder!.applied, isTrue);
+    expect(await workspace.navigate(folder.nodeId), isTrue);
+    final created = await workspace.createNote('笔记.md');
+    expect(created!.applied, isTrue);
+    final entry = workspace.value.directory!.entries.single;
+    expect(entry.id, created.nodeId);
+    expect(await workspace.openNote(entry), isTrue);
+    final session = workspace.value.session!;
+    final editor = session.value.editor!;
+    protocol.ready(editor);
+    expect(session.value.note!.path, '研究/笔记.md');
+    expect(session.value.note!.editorType, CoreEditorType.markdown);
+    final ending = switch (session.value.note!.lineEnding) {
+      2 => '\r\n',
+      3 => '\r',
+      _ => '\n',
+    };
+    final storedText = '# 研究😀${ending}Persistent source.';
+    protocol.insert(editor, '# 研究😀\nPersistent source.');
+    expect(
+      await session.write((message) => protocol.answer(editor, message)),
+      isTrue,
+    );
+    expect(
+      await session.reopen(
+        NotebookDisposition.discard,
+        (message) => protocol.answer(editor, message),
+      ),
+      isTrue,
+    );
+    final reopened = session.value.editor!;
+    protocol.ready(reopened);
+    expect(reopened.generation, isNot(editor.generation));
+    expect(reopened.value.revision, 0);
+    expect(reopened.value.text, storedText);
+    protocol.insert(reopened, '\nSecond host.');
+    expect(
+      await workspace.returnToBrowser(
+        session,
+        NotebookDisposition.write,
+        (message) => protocol.answer(reopened, message),
+      ),
+      isTrue,
+    );
+    expect(workspace.value.directory!.folderId, folder.nodeId);
+    expect(workspace.value.directory!.notebookId, notebookId);
+    expect(workspace.value.directory!.entries.single.id, entry.id);
+    final renamed = await workspace.rename(
+      workspace.value.directory!.entries.single,
+      'Renamed.md',
+    );
+    expect(renamed!.applied, isTrue);
+    expect(
+      (await workspace.move(
+        workspace.value.directory!.entries.single,
+        rootId,
+      ))!.applied,
+      isTrue,
+    );
+    expect(workspace.value.directory!.entries, isEmpty);
+    expect(await workspace.navigate(rootId), isTrue);
+    final moved = workspace.value.directory!.entries.singleWhere(
+      (item) => item.id == entry.id,
+    );
+    expect(moved.name, 'Renamed.md');
+    expect(
+      await File('${paths.notebook}/Renamed.md').readAsString(),
+      '$storedText${ending}Second host.',
+    );
+    expect(await workspace.openNote(moved), isTrue);
+    final movedSession = workspace.value.session!;
+    protocol.ready(movedSession.value.editor!);
+    expect(movedSession.value.note!.nodeId, entry.id);
+    expect(movedSession.value.note!.path, 'Renamed.md');
+    expect(
+      await workspace.returnToBrowser(
+        movedSession,
+        NotebookDisposition.discard,
+        (message) => protocol.answer(movedSession.value.editor!, message),
+      ),
+      isTrue,
+    );
+    final textCreated = await workspace.createNote('Plain.txt');
+    expect(textCreated!.applied, isTrue);
+    final textEntry = workspace.value.directory!.entries.singleWhere(
+      (item) => item.id == textCreated.nodeId,
+    );
+    expect(await workspace.openNote(textEntry), isTrue);
+    final textSession = workspace.value.session!;
+    final textEditor = textSession.value.editor!;
+    final load = textEditor.beginLoad()!;
+    expect(load['language'], 'text');
+    expect(textSession.value.note!.editorType, CoreEditorType.text);
+    textEditor.receive(
+      jsonEncode(
+        protocol.reply(textEditor, 'ready', load['requestId']! as String, {
+          'textLength': textEditor.value.text.length,
+        }),
+      ),
+    );
+    protocol.insert(textEditor, '# literal text, not Markdown 😀');
+    expect(
+      await workspace.returnToBrowser(
+        textSession,
+        NotebookDisposition.write,
+        (message) => protocol.answer(textEditor, message),
+      ),
+      isTrue,
+    );
+    expect(
+      await File('${paths.notebook}/Plain.txt').readAsString(),
+      '# literal text, not Markdown 😀',
+    );
+    final deleting = workspace.value.directory!.entries.singleWhere(
+      (item) => item.id == entry.id,
+    );
+    expect((await workspace.delete(deleting))!.applied, isTrue);
+    expect(
+      workspace.value.directory!.entries.any((item) => item.id == entry.id),
+      isFalse,
+    );
+    expect(expectedIds.first, isNull);
+    expect(expectedIds.skip(1), everyElement(notebookId));
+  });
+
+  test(
+    'native restore and retry refuse to recreate a missing observed notebook',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'vnote-workspace-missing-',
+      );
+      final paths = ManagedNotebookPaths(
+        app: '${root.path}/app',
+        local: '${root.path}/local',
+        notebook: '${root.path}/book',
+      );
+      final expectedIds = <String?>[];
+      var removeBeforeOpen = false;
+      final workspace = NotebookWorkspace(
+        obtainPaths: () async => paths,
+        openCatalog: (paths, expected) async {
+          expectedIds.add(expected);
+          if (removeBeforeOpen) {
+            removeBeforeOpen = false;
+            await Directory(paths.notebook).rename('${root.path}/removed');
+          }
+          return CoreNotebook.openCatalog(
+            appDataPath: paths.app,
+            localDataPath: paths.local,
+            notebookPath: paths.notebook,
+            notebookName: 'Personal',
+            expectedNotebookId: expected,
+          );
+        },
+      );
+      addTearDown(() async {
+        await workspace.shutdown();
+        workspace.dispose();
+        await root.delete(recursive: true);
+      });
+      await workspace.initialize();
+      final notebookId = workspace.value.directory!.notebookId;
+      await workspace.createNote('Existing.md');
+      await workspace.openNote(workspace.value.directory!.entries.single);
+      final session = workspace.value.session!;
+      protocol.ready(session.value.editor!);
+      removeBeforeOpen = true;
+      expect(
+        await workspace.returnToBrowser(
+          session,
+          NotebookDisposition.discard,
+          (message) => protocol.answer(session.value.editor!, message),
+        ),
+        isTrue,
+      );
+      expect(workspace.value.session, isNull);
+      expect(workspace.value.error, contains('Core error'));
+      expect(workspace.value.stale, isTrue);
+      expect(await workspace.refresh(), isFalse);
+      expect(await Directory(paths.notebook).exists(), isFalse);
+      expect(expectedIds.skip(1), everyElement(notebookId));
+      await Directory('${root.path}/removed').rename(paths.notebook);
+      expect(await workspace.refresh(), isTrue);
+      expect(workspace.value.directory!.notebookId, notebookId);
+    },
+  );
+
+  test('failed note admission restores the same catalog identity without hiding its error', () async {
+    final harness = _Harness();
+    harness.noteFactory = () async {
+      throw const CoreException(16, 'Encrypted content cannot be edited');
+    };
+    await harness.workspace.initialize();
+    expect(await harness.workspace.openNote(_note), isFalse);
+    expect(harness.workspace.value.session, isNull);
+    expect(harness.workspace.value.error, contains('16'));
+    expect(harness.workspace.value.error, contains('Encrypted'));
+    expect(harness.workspace.value.stale, isFalse);
+    expect(harness.expectedIds, [null, 'book-identity']);
+    expect(harness.catalogs.first.closes, 1);
+    expect(harness.owners.active, 1);
+  });
+
+  test(
+    'cancel and failed writes retain dirty editor and never open a catalog',
+    () async {
+      final harness = _Harness();
+      final session = await harness.edit();
+      final editor = session.value.editor!;
+      protocol.insert(editor, 'unsaved');
+      expect(
+        await harness.workspace.returnToBrowser(
+          session,
+          NotebookDisposition.cancel,
+          (_) => fail('Cancel sends nothing'),
+        ),
+        isFalse,
+      );
+      final returning = harness.workspace.returnToBrowser(
+        session,
+        NotebookDisposition.write,
+        (message) => protocol.answer(editor, message),
+      );
+      await protocol.turn();
+      harness.notes.single.core.writes.single.completion.completeError(
+        const CoreException(18, 'Disk conflict'),
+      );
+      expect(await returning, isFalse);
+      expect(harness.workspace.value.session, same(session));
+      expect(editor.value.text, 'base\r\nunsaved');
+      expect(session.value.dirty, isTrue);
+      expect(session.value.error, contains('18'));
+      expect(harness.notes.single.core.closes, 0);
+      expect(harness.expectedIds, [null]);
+    },
+  );
+
+  test('a rejected close barrier preserves pending input instead of returning to the browser', () async {
+    final harness = _Harness();
+    final session = await harness.edit();
+    final editor = session.value.editor!;
+    final returned = await harness.workspace.returnToBrowser(
+      session,
+      NotebookDisposition.write,
+      (message) {
+        if (message['type'] == 'save') {
+          protocol.answer(editor, message);
+        } else {
+          protocol.insert(editor, 'last input');
+          editor.receive(
+            jsonEncode(
+              protocol.reply(editor, 'ack', message['requestId']! as String, {
+                'stage': 'rejected',
+                'throughRevision': editor.value.revision,
+                'error': 'Newer revision',
+              }),
+            ),
+          );
+        }
+      },
+    );
+    expect(returned, isFalse);
+    expect(harness.workspace.value.session, same(session));
+    expect(editor.value.text, 'base\r\nlast input');
+    expect(editor.value.ready, isTrue);
+    expect(session.value.dirty, isTrue);
+    expect(harness.notes.single.core.closes, 0);
+    expect(harness.expectedIds, [null]);
+  });
+
+  test('shutdown cancels a pending editor barrier and joins without reopening the catalog', () async {
+    final harness = _Harness();
+    final session = await harness.edit();
+    final requested = Completer<void>();
+    final returning = harness.workspace.returnToBrowser(
+      session,
+      NotebookDisposition.write,
+      (_) => requested.complete(),
+    );
+    await requested.future;
+    final closing = harness.workspace.shutdown();
+    expect(await returning, isFalse);
+    await closing;
+    expect(harness.notes.single.core.closes, 1);
+    expect(harness.expectedIds, [null]);
+  });
+
+  test('shutdown drains an admitted native write before releasing the selected owner', () async {
+    final harness = _Harness();
+    final session = await harness.edit();
+    final editor = session.value.editor!;
+    protocol.insert(editor, 'write in flight');
+    final writing = session.write(
+      (message) => protocol.answer(editor, message),
+    );
+    await protocol.turn();
+    final core = harness.notes.single.core;
+    final closing = harness.workspace.shutdown();
+    expect(core.closes, 0);
+    core.writes.single.completion.complete(
+      CoreWriteResult(revision: 1, baseHash: 'b' * 64),
+    );
+    expect(await writing, isTrue);
+    await closing;
+    expect(core.closes, 1);
+    expect(harness.expectedIds, [null]);
+  });
+
+  test(
+    'failed mutations refresh and retain both native and listing failures',
+    () async {
+      final harness = _Harness();
+      await harness.workspace.initialize();
+      final catalog = harness.catalogs.single;
+      final snapshot = harness.workspace.value.directory;
+      catalog.onMutation = () async {
+        throw const CoreException(
+          6,
+          'Partial create failed physical-size check',
+        );
+      };
+      catalog.onList = (_) async {
+        throw const CoreException(8, 'Malformed folder metadata');
+      };
+      final result = await harness.workspace.createNote('Partial.md');
+      expect(result!.applied, isFalse);
+      expect(result.error, contains('6'));
+      expect(result.refreshError, contains('8'));
+      expect(catalog.lists, ['root-id']);
+      expect(harness.workspace.value.directory, same(snapshot));
+      expect(harness.workspace.value.stale, isTrue);
+      expect(harness.workspace.value.canMutate, isFalse);
+      expect(await harness.workspace.delete(_note), isNull);
+      expect(catalog.changes.length, 1);
+      catalog.onList = null;
+      expect(await harness.workspace.refresh(), isTrue);
+      expect(harness.workspace.value.canMutate, isTrue);
+      final failedButRefreshed = await harness.workspace.createNote(
+        'StillFails.md',
+      );
+      expect(failedButRefreshed!.applied, isFalse);
+      expect(failedButRefreshed.refreshError, isNull);
+      expect(harness.workspace.value.stale, isFalse);
+    },
+  );
+
+  test(
+    'successful mutation plus failed refresh is not reported as rollback',
+    () async {
+      final harness = _Harness();
+      await harness.workspace.initialize();
+      harness.catalogs.single.onList = (_) async {
+        throw const CoreException(6, 'Read failed after rename');
+      };
+      final result = await harness.workspace.rename(_note, 'New.md');
+      expect(result!.applied, isTrue);
+      expect(result.error, isNull);
+      expect(result.refreshError, contains('Read failed'));
+      expect(harness.workspace.value.mutation, same(result));
+      expect(harness.workspace.value.stale, isTrue);
+      expect(harness.catalogs.single.lists, ['root-id']);
+    },
+  );
+
+  test('an admitted mutation drains and refreshes before shutdown closes the owner', () async {
+    final harness = _Harness();
+    await harness.workspace.initialize();
+    final catalog = harness.catalogs.single;
+    final mutation = Completer<String>();
+    final listing = Completer<CoreDirectory>();
+    catalog.onMutation = () => mutation.future;
+    catalog.onList = (_) => listing.future;
+    final changing = harness.workspace.createFolder('Pending');
+    expect(await harness.workspace.refresh(), isFalse);
+    expect(await harness.workspace.createNote('Concurrent.md'), isNull);
+    final closing = harness.workspace.shutdown();
+    expect(catalog.closes, 0);
+    mutation.complete('created-folder');
+    await protocol.turn();
+    expect(catalog.lists, ['root-id']);
+    expect(catalog.closes, 0);
+    listing.complete(_directory(entries: const []));
+    expect((await changing)!.applied, isTrue);
+    await closing;
+    expect(catalog.closes, 1);
+    expect(harness.workspace.value.closed, isTrue);
+    expect(harness.workspace.value.directory!.entries, contains(_note));
+  });
+
+  test('disposal waits for catalog initialization and prevents late state installation', () async {
+    final harness = _Harness();
+    final opening = Completer<CatalogCore>();
+    harness.catalogFactory = (_) => opening.future;
+    final states = <NotebookWorkspaceState>[];
+    harness.workspace.addListener(() => states.add(harness.workspace.value));
+    final initializing = harness.workspace.initialize();
+    await protocol.turn();
+    harness.workspace.dispose();
+    final catalog = _Catalog(harness.owners, _directory())
+      ..closeGate = Completer<void>();
+    opening.complete(catalog);
+    await initializing;
+    await protocol.turn();
+    expect(catalog.closes, 1);
+    expect(harness.owners.active, 1);
+    catalog.closeGate!.complete();
+    await harness.workspace.shutdown();
+    await harness.workspace.initialize();
+    expect(harness.expectedIds, [null]);
+    expect(
+      states.every((state) => state.directory == null && state.session == null),
+      isTrue,
+    );
+  });
+
+  test(
+    'shutdown during catalog join prevents opening a replacement editor',
+    () async {
+      final harness = _Harness();
+      await harness.workspace.initialize();
+      final catalog = harness.catalogs.single..closeGate = Completer<void>();
+      final opening = harness.workspace.openNote(_note);
+      await protocol.turn();
+      final closing = harness.workspace.shutdown();
+      expect(harness.noteIds, isEmpty);
+      expect(harness.owners.active, 1);
+      catalog.closeGate!.complete();
+      expect(await opening, isFalse);
+      await closing;
+      expect(harness.noteIds, isEmpty);
+    },
+  );
+
+  test('shutdown during selected-note open closes the late host without reading it', () async {
+    final harness = _Harness();
+    final pending = Completer<NotebookCore>();
+    harness.noteFactory = () => pending.future;
+    await harness.workspace.initialize();
+    final opening = harness.workspace.openNote(_note);
+    await protocol.turn();
+    final closing = harness.workspace.shutdown();
+    final note = _Note(harness.owners);
+    pending.complete(note);
+    expect(await opening, isFalse);
+    await closing;
+    expect(note.core.reads, 0);
+    expect(note.core.closes, 1);
+    expect(harness.workspace.value.session, isNull);
+  });
+
+  test('return waits for native close; stale editor callbacks cannot close the next note', () async {
+    final harness = _Harness();
+    final first = await harness.edit();
+    final firstEditor = first.value.editor!;
+    final note = harness.notes.single;
+    note.core.closeGate = Completer<void>();
+    final returning = harness.workspace.returnToBrowser(
+      first,
+      NotebookDisposition.discard,
+      (message) => protocol.answer(firstEditor, message),
+    );
+    await protocol.turn();
+    expect(harness.expectedIds, [null]);
+    expect(await harness.workspace.openNote(_note), isFalse);
+    expect(harness.owners.active, 1);
+    note.core.closeGate!.complete();
+    expect(await returning, isTrue);
+    expect(harness.expectedIds, [null, 'book-identity']);
+    expect(await harness.workspace.openNote(_note), isTrue);
+    final next = harness.workspace.value.session!;
+    expect(
+      await harness.workspace.returnToBrowser(
+        first,
+        NotebookDisposition.discard,
+        (_) => fail('Stale callback'),
+      ),
+      isFalse,
+    );
+    expect(harness.workspace.value.session, same(next));
+    expect(next.value.editor!.generation, isNot(firstEditor.generation));
+    expect(harness.notes.last.core.closes, 0);
+  });
+
+  test('failed refresh rejects stale entry callbacks and a later listing replaces identity tokens', () async {
+    final harness = _Harness();
+    await harness.workspace.initialize();
+    final catalog = harness.catalogs.single;
+    catalog.onList = (_) async {
+      throw const CoreException(6, 'Read failed');
+    };
+    expect(await harness.workspace.refresh(), isFalse);
+    expect(await harness.workspace.openNote(_note), isFalse);
+    catalog.onList = (_) async => _directory(
+      entries: [
+        CoreEntry(
+          id: _note.id,
+          name: 'Renamed externally.md',
+          isFolder: false,
+          exists: true,
+          encrypted: false,
+        ),
+      ],
+    );
+    expect(await harness.workspace.refresh(), isTrue);
+    expect(await harness.workspace.rename(_note, 'Stale.md'), isNull);
+    expect(catalog.changes, isEmpty);
+    expect(
+      await harness.workspace.openNote(
+        harness.workspace.value.directory!.entries.single,
+      ),
+      isTrue,
+    );
+  });
+
+  test('folder picker queries preserve current location and missing return folder offers root recovery', () async {
+    final harness = _Harness();
+    await harness.workspace.initialize();
+    final nested = _directory(
+      id: _folder.id,
+      path: 'Research',
+      parentId: 'root-id',
+      entries: const [_note],
+    );
+    harness.catalogs.single.onList = (id) async =>
+        id == _folder.id ? nested : _directory();
+    expect(await harness.workspace.navigate(_folder.id), isTrue);
+    expect((await harness.workspace.listDestination()).folderId, 'root-id');
+    expect(harness.workspace.value.directory, same(nested));
+    expect(await harness.workspace.openNote(_note), isTrue);
+    final session = harness.workspace.value.session!;
+    protocol.ready(session.value.editor!);
+    harness.catalogFactory = (_) async {
+      final catalog = _Catalog(harness.owners, _directory());
+      catalog.onList = (id) async {
+        if (id == _folder.id) {
+          throw const CoreException(10, 'Folder no longer exists');
+        }
+        return _directory();
+      };
+      return catalog;
+    };
+    expect(
+      await harness.workspace.returnToBrowser(
+        session,
+        NotebookDisposition.discard,
+        (message) => protocol.answer(session.value.editor!, message),
+      ),
+      isTrue,
+    );
+    expect(harness.workspace.value.stale, isTrue);
+    expect(harness.workspace.value.directory, same(nested));
+    expect(harness.workspace.value.error, contains('Folder no longer exists'));
+    expect(await harness.workspace.navigate(null), isTrue);
+    expect(harness.workspace.value.directory!.path, '.');
+  });
+
+  testWidgets(
+    'browser submits entered names and lists missing and encrypted content without exposing IDs',
+    (tester) async {
+      final harness = _Harness(widgetTest: true);
+      harness.catalogFactory = (_) async {
+        final catalog = _Catalog(
+          harness.owners,
+          _directory(
+            entries: const [
+              _folder,
+              CoreEntry(
+                id: 'hidden-missing-id',
+                name: 'Missing.bin',
+                isFolder: false,
+                exists: false,
+                encrypted: false,
+              ),
+              CoreEntry(
+                id: 'hidden-secret-id',
+                name: 'Secret.md',
+                isFolder: false,
+                exists: true,
+                encrypted: true,
+              ),
+            ],
+          ),
+        );
+        harness.catalogs.add(catalog);
+        return catalog;
+      };
+      await harness.workspace.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookBrowser(
+            workspace: harness.workspace,
+            dark: false,
+            onThemeChanged: (_) {},
+          ),
+        ),
+      );
+      expect(find.text('Missing.bin'), findsOneWidget);
+      expect(find.text('Missing content'), findsOneWidget);
+      expect(find.text('Encrypted'), findsOneWidget);
+      expect(find.text('hidden-missing-id'), findsNothing);
+      await tester.tap(find.text('New note'));
+      await tester.pumpAndSettle(
+        const Duration(milliseconds: 100),
+        EnginePhase.sendSemanticsUpdate,
+        const Duration(seconds: 5),
+      );
+      await tester.enterText(find.byType(TextFormField), '用户.txt');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle(
+        const Duration(milliseconds: 100),
+        EnginePhase.sendSemanticsUpdate,
+        const Duration(seconds: 5),
+      );
+      expect(harness.catalogs.single.changes, [
+        ['note', 'root-id', '用户.txt'],
+      ]);
+      expect(harness.catalogs.single.lists, ['root-id']);
+      // Finish async ownership cleanup while the widget-test clock is active.
+      await harness.workspace.shutdown();
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+  testWidgets(
+    'move traverses actual destination listings and excludes the source subtree',
+    (tester) async {
+      final harness = _Harness(widgetTest: true);
+      const destination = CoreEntry(
+        id: 'destination-id',
+        name: 'Destination',
+        isFolder: true,
+        exists: true,
+        encrypted: false,
+      );
+      final rootDirectory = _directory(entries: const [_folder, destination]);
+      final destinationDirectory = _directory(
+        id: destination.id,
+        path: destination.name,
+        parentId: 'root-id',
+        entries: const [],
+      );
+      harness.catalogFactory = (_) async {
+        final catalog = _Catalog(harness.owners, rootDirectory);
+        catalog.onList = (id) async =>
+            id == destination.id ? destinationDirectory : rootDirectory;
+        harness.catalogs.add(catalog);
+        return catalog;
+      };
+      await harness.workspace.initialize();
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookBrowser(
+            workspace: harness.workspace,
+            dark: false,
+            onThemeChanged: (_) {},
+          ),
+        ),
+      );
+      await tester.tap(find.byTooltip('Actions for Research'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Move'));
+      await tester.pumpAndSettle();
+      final dialog = find.byType(AlertDialog);
+      final sourceTile = find.ancestor(
+        of: find.descendant(of: dialog, matching: find.text('Research')),
+        matching: find.byType(ListTile),
+      );
+      expect(tester.widget<ListTile>(sourceTile).onTap, isNull);
+      await tester.tap(
+        find.descendant(of: dialog, matching: find.text('Destination')),
+      );
+      await tester.pumpAndSettle();
+      expect(harness.catalogs.single.lists, [null, destination.id]);
+      expect(harness.workspace.value.directory, same(rootDirectory));
+      await tester.tap(find.text('Move here'));
+      await tester.pumpAndSettle();
+      expect(harness.catalogs.single.changes, [
+        ['move', _folder.id, destination.id],
+      ]);
+      expect(harness.catalogs.single.lists.last, 'root-id');
+      // Finish async ownership cleanup while the widget-test clock is active.
+      await harness.workspace.shutdown();
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+}

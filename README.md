@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app opens a managed **Personal** bundled notebook and **Welcome.md** through the real native core. **Write** commits the captured editor revision to the note; **Reopen** starts a fresh native/editor session against the same files and identities. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
+The app browses the managed **Personal** bundled notebook through the real native core. Create Markdown/plain-text notes and folders, rename/move/delete nodes, then open a selected note by its stable ID. Existing notebooks and Welcome.md are preserved; a fresh installation starts with an empty notebook. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning to the browser requires Write/Discard/Cancel, and catalog/editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
 
 ## Development
 
@@ -16,13 +16,13 @@ node scripts/verify.mjs ios
 node scripts/verify.mjs run
 ```
 
-Run commands at the repository root. `verify` installs locked editor/Dart dependencies, builds and checks assets, then checks generated FFI drift, TypeScript, the real native bridge tests, and Flutter. `android` produces an arm64/x86_64 debug APK requiring Android 9/API 28; `ios` requires macOS/Xcode 26.6 and builds unsigned device and simulator apps. `run` performs the same asset/dependency gate before Flutter device selection. These commands do not configure release signing, accept SDK licenses or publish anything.
+Run commands at the repository root. `verify` installs locked editor/Dart dependencies, builds and checks assets, then checks generated FFI drift, TypeScript, the real native bridge tests, and Flutter. `android` produces an arm64/x86_64 debug APK requiring Android 9/API 28; `ios` requires macOS/Xcode 26.6 and builds unsigned device and simulator apps. `run` performs the same asset/dependency gate before Flutter device selection. These commands publish/check bundled editor assets before packaging; tests alone do not update the WebView bundle. They do not configure release signing, accept SDK licenses or publish anything.
 
 Flutter may be on PATH, specified by the `FLUTTER` environment variable, or installed at `.tools/flutter`. Windows commands require PowerShell 7. On Windows the locally downloaded Node can be invoked as `./.tools/node-v24.22.2-win-x64/node.exe`; its matching npm is used by the script. Set `JAVA_HOME` to a JDK matching the Android pin before building (the local download is `.tools/java/jdk-17.0.20.1+1`). SDK caches and machine paths are not committed.
 
 Linux host builds also require OpenSSL development headers and libraries. Desktop native assets are test harnesses: the bridge explicitly enables `VXCORE_ENABLE_MOBILE_TEST_API` with installation disabled. This exposes isolated roots without enabling the mobile writer; default desktop vxcore builds expose no mobile API.
 
-Native binding generation uses ffigen 23.0.0 and libclang 18.1.1 with the pinned NDK headers:
+Native binding generation uses ffigen 23.0.0 and libclang 18.1.1 with the pinned NDK headers, and generates catalog JSON keys from the authoritative core constants:
 
 ```sh
 python -m pip install --index-url https://pypi.org/simple --target .tools/libclang --no-deps libclang==18.1.1
@@ -54,6 +54,20 @@ Generated editor and legal assets are ignored, never downloaded at runtime. `che
 Read [architecture](docs/architecture.md), [compatibility](docs/compatibility.md) and the six ADRs linked there before extending the boundary. Mobile TLS trust integration, iOS execution and full draft durability remain gates, not ignored errors or permission to replace core operations with Dart filesystem writes.
 
 Android `com.example.vnote_mobile` and iOS `com.example.vnoteMobile` are generated development identities, not owner-approved store identifiers.
+
+## Browser safety and remaining work
+
+Delete uses the core's behavior: it attempts recycling but may permanently delete
+when recycling fails. The confirmation discloses this; there is no mobile restore
+promise. Unsafe resource layouts, linked paths, destructive collisions and moves
+that would orphan another indexed linked note are refused. A core mutation can
+partially apply on IO failure; the browser refreshes and never presents failure as
+proof of rollback. Markdown move preflight uses the already-pinned cmark parser.
+
+This slice covers the current managed notebook. Multi-notebook management,
+search/tag UI, managed import/export and attachment editing remain planned offline
+work; preview, autosave/recovery and sync remain later gates. No iOS or physical-
+device completion follows from Android/host verification.
 
 ## License
 

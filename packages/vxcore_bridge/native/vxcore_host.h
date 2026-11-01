@@ -27,6 +27,19 @@ enum {
   VXM_EVENT_READ = 2,
   VXM_EVENT_WRITE = 3,
   VXM_EVENT_CLOSED = 4,
+  VXM_EVENT_CATALOG_OPEN = 5,
+  VXM_EVENT_LIST = 6,
+  VXM_EVENT_MUTATE = 7,
+  VXM_MODE_NOTE = 1,
+  VXM_MODE_CATALOG = 2,
+  VXM_EDITOR_MARKDOWN = 1,
+  VXM_EDITOR_TEXT = 2,
+  VXM_CREATE_NOTE = 1,
+  VXM_CREATE_FOLDER = 2,
+  VXM_RENAME = 3,
+  VXM_MOVE = 4,
+  VXM_DELETE = 5,
+  VXM_MAX_CATALOG_BYTES = 8388608,
   VXM_MAX_SOURCE_BYTES = 4194304,
   VXM_MAX_OPERATIONS = 64,
   VXM_MAX_INPUT_BYTES = 33554432,
@@ -38,14 +51,15 @@ typedef struct VxmOpenOptions {
   const char *local_data_path;
   const char *notebook_path;
   const char *notebook_name;
-  const char *note_path;
-  const uint8_t *initial_data;
-  uint64_t initial_size;
+  const char *expected_notebook_id;
+  const char *node_id;
+  int32_t mode;
 } VxmOpenOptions;
 
 // Immutable terminal event. Pointers are borrowed until vxm_event_free(), which
 // is required exactly once even for errors. Taken events may outlive their host.
-// No borrowed core handles, JSON, or unredacted last-error strings cross this ABI.
+// Metadata and listing JSON belong to the event, never to its host. No core
+// handles or unredacted last-error strings cross this ABI.
 typedef struct VxmEvent {
   uint64_t request_id;
   uint64_t generation;
@@ -53,18 +67,23 @@ typedef struct VxmEvent {
   int32_t kind;
   int32_t code;
   int32_t line_ending;
+  int32_t editor_type;
   const char *message;
   const char *notebook_id;
   const char *node_id;
   const char *base_hash;
   const char *core_version;
+  const char *path;
+  const char *parent_id;
+  const char *notebook_name;
   const uint8_t *data;
   uint64_t size;
 } VxmEvent;
 
-// Copies bounded input and starts an owner thread. OPEN is request 1, revision 0.
-// Create a bundled notebook/first note only when notebook_path is absent. An
-// existing malformed notebook or missing indexed note is an error, never repair.
+// Copies bounded input and starts an owner thread. OPEN/CATALOG_OPEN is request
+// 1, revision 0. Only one host may own a given storage root until teardown.
+// Only an initial catalog open without an expected UUID may create an absent
+// notebook. Note mode requires existing notebook/node UUIDs and never creates.
 // All returns are actual VxCoreError values. Admission failure produces no event.
 // Success reserves terminal storage before work starts. Notify runs outside the
 // queue mutex and carries only a caller-owned integer token; it must not block.
@@ -75,6 +94,15 @@ VXM_API int32_t vxm_host_read(VxmHost *host, uint64_t request_id, uint64_t gener
 VXM_API int32_t vxm_host_write(VxmHost *host, uint64_t request_id, uint64_t generation,
                              uint64_t revision, const char *base_hash,
                              const uint8_t *data, uint64_t size);
+// Catalog-only. A null/empty folder ID lists root; mutations require node IDs.
+// MUTATE returns the affected/new ID, including any known partial failure ID.
+// Refresh separately after every attempted mutation; failure is not rollback.
+VXM_API int32_t vxm_host_catalog_list(VxmHost *host, uint64_t request_id,
+                                    uint64_t generation, const char *folder_id);
+VXM_API int32_t vxm_host_catalog_mutate(VxmHost *host, uint64_t request_id,
+                                      uint64_t generation, int32_t operation,
+                                      const char *node_id, const char *name,
+                                      const char *destination_folder_id);
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
 // Cancel only affects pending requests; an active operation returns its real
 // outcome. INVALID_STATE means no pending matching request (not false cancel).

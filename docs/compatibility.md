@@ -13,7 +13,7 @@ Remote refs and recursive checkout were verified during initialization. Branch h
 
 ## Notebook contract
 
-Bundled notebook JSON/files remain authoritative. Core SQLite metadata is a derived cache; a Flutter source mirror is volatile state, not notebook truth. Preserve stable notebook/node UUIDs, source bytes, tags, assets, unknown supported metadata and opaque/unsupported files. The app now creates/reopens a real managed bundled notebook and preserves its portable IDs across explicit writes and Android process restart. A full desktop VNote UI ↔ mobile fixture round trip has not been executed.
+Bundled notebook JSON/files remain authoritative. Core SQLite metadata is a derived cache; a Flutter source mirror is volatile state, not notebook truth. Preserve stable notebook/node UUIDs, source bytes, tags, assets, unknown supported metadata and opaque/unsupported files. The app now creates/reopens a real managed bundled notebook and preserves its portable IDs across explicit writes and Android process restart. The navigator uses stable node IDs for open/rename/move/delete, preserving core-owned metadata rather than reserializing it in Dart. The versioned `packages/vxcore_bridge/test/fixtures/desktop_notebook.json` contains exact file bytes produced through the default Windows desktop-core C API, including Unicode, plain text, tags/custom metadata, a PNG asset and opaque bytes. That engine fixture is not a claim that the desktop Qt UI roundtrip has been executed.
 
 Encrypted-note editing, raw notebook sync, desktop plugins and unsupported editor formats remain outside the first release. That never permits plaintext fallback, identity regeneration, silent mutation or dropping opaque data. Import/export uses managed copies and preflight; core owns notebook schema and migrations.
 
@@ -24,6 +24,21 @@ Exact-source editor offsets are UTF-16; native bodies are UTF-8. Opening without
 [toolchains.json](../toolchains.json) records exact initialization pins. Flutter 3.47.9 / Dart 3.13.7 and Node 24.22.2 / npm 11.19.1 were executed locally. Android native builds select API 36, minimum API 28 (Bionic Iconv availability), NDK 28.2.13676358, Gradle 9.3.1, AGP 9.1.0 and Kotlin 2.4.0 from the pinned Flutter template. iOS selects deployment 15.0 and Xcode 26.6 (17F113), SDK 26.5; the [macOS CI image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md) lists that Xcode. This selection is not iOS build evidence or the completed full-native dependency intersection.
 
 Android arm64/x86_64 now source-build pinned OpenSSL 3.5.9 and link the complete core into a native asset. The iOS branch selects bundled curl/OpenSSL rather than assuming iPhoneOS supplies libcurl, but has not been executed. TLS trust-store integration remains unverified; no network-ready claim follows from linking. Test arm64 devices and selected emulator/simulator ABIs separately, including Android 16 KB native-library packaging and release dead stripping. Both Android native ELF LOAD segments were checked for 16 KB alignment, and x86_64 ran on a 16 KB emulator. Arm64 physical-device and iOS execution remain required.
+
+## Structural-operation boundaries
+
+The core move API can implicitly relocate relative-linked files and can report
+success even when an asset move fails. The mobile host preflights those effects
+with the pinned cmark parser, rejects collisions/escaping links/indexed linked-node
+moves, and checks resource postconditions. A failure may still be a partial core
+mutation; the browser refreshes to expose actual state. Delete can fall back from
+recycling to permanent removal and is labelled accordingly. Unsafe external or
+traversing resource layouts are refused, not rewritten to new portable metadata.
+
+Catalog JSON names come from generated canonical constants (`exists`, not a
+literal `nodeExists`; encryption state is nested under `metadata`). Unsupported
+files stay visible but do not enter an editable session. Plain-text notes use a
+source editor without the Markdown language extension.
 
 ## Release compatibility remains open
 

@@ -24,6 +24,42 @@ external int vxm_host_cancel(
 
 @ffi.Native<
   ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_catalog_list(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> folder_id,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Int32,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_catalog_mutate(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  int operation,
+  ffi.Pointer<ffi.Char> node_id,
+  ffi.Pointer<ffi.Char> name,
+  ffi.Pointer<ffi.Char> destination_folder_id,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
     ffi.Pointer<VxmOpenOptions>,
     VxmNotify,
     ffi.Int64,
@@ -80,13 +116,31 @@ external int vxm_host_write(
 @ffi.Native<ffi.Pointer<ffi.Char> Function()>()
 external ffi.Pointer<ffi.Char> vxm_native_notices();
 
+const int VXM_CREATE_FOLDER = 2;
+
+const int VXM_CREATE_NOTE = 1;
+
+const int VXM_DELETE = 5;
+
+const int VXM_EDITOR_MARKDOWN = 1;
+
+const int VXM_EDITOR_TEXT = 2;
+
+const int VXM_EVENT_CATALOG_OPEN = 5;
+
 const int VXM_EVENT_CLOSED = 4;
+
+const int VXM_EVENT_LIST = 6;
+
+const int VXM_EVENT_MUTATE = 7;
 
 const int VXM_EVENT_OPEN = 1;
 
 const int VXM_EVENT_READ = 2;
 
 const int VXM_EVENT_WRITE = 3;
+
+const int VXM_MAX_CATALOG_BYTES = 8388608;
 
 const int VXM_MAX_INPUT_BYTES = 33554432;
 
@@ -95,6 +149,14 @@ const int VXM_MAX_OPERATIONS = 64;
 const int VXM_MAX_OUTPUT_BYTES = 16777216;
 
 const int VXM_MAX_SOURCE_BYTES = 4194304;
+
+const int VXM_MODE_CATALOG = 2;
+
+const int VXM_MODE_NOTE = 1;
+
+const int VXM_MOVE = 4;
+
+const int VXM_RENAME = 3;
 
 sealed class VxCoreError {
   static const VXCORE_OK = 0;
@@ -163,6 +225,9 @@ final class VxmEvent extends ffi.Struct {
   @ffi.Int32()
   external int line_ending;
 
+  @ffi.Int32()
+  external int editor_type;
+
   external ffi.Pointer<ffi.Char> message;
 
   external ffi.Pointer<ffi.Char> notebook_id;
@@ -172,6 +237,12 @@ final class VxmEvent extends ffi.Struct {
   external ffi.Pointer<ffi.Char> base_hash;
 
   external ffi.Pointer<ffi.Char> core_version;
+
+  external ffi.Pointer<ffi.Char> path;
+
+  external ffi.Pointer<ffi.Char> parent_id;
+
+  external ffi.Pointer<ffi.Char> notebook_name;
 
   external ffi.Pointer<ffi.Uint8> data;
 
@@ -186,11 +257,15 @@ final class VxmEvent extends ffi.Struct {
     required int kind,
     required int code,
     required int line_ending,
+    required int editor_type,
     required ffi.Pointer<ffi.Char> message,
     required ffi.Pointer<ffi.Char> notebook_id,
     required ffi.Pointer<ffi.Char> node_id,
     required ffi.Pointer<ffi.Char> base_hash,
     required ffi.Pointer<ffi.Char> core_version,
+    required ffi.Pointer<ffi.Char> path,
+    required ffi.Pointer<ffi.Char> parent_id,
+    required ffi.Pointer<ffi.Char> notebook_name,
     required ffi.Pointer<ffi.Uint8> data,
     required int size,
   }) => $allocator<VxmEvent>()
@@ -200,11 +275,15 @@ final class VxmEvent extends ffi.Struct {
     ..ref.kind = kind
     ..ref.code = code
     ..ref.line_ending = line_ending
+    ..ref.editor_type = editor_type
     ..ref.message = message
     ..ref.notebook_id = notebook_id
     ..ref.node_id = node_id
     ..ref.base_hash = base_hash
     ..ref.core_version = core_version
+    ..ref.path = path
+    ..ref.parent_id = parent_id
+    ..ref.notebook_name = notebook_name
     ..ref.data = data
     ..ref.size = size;
 }
@@ -224,12 +303,12 @@ final class VxmOpenOptions extends ffi.Struct {
 
   external ffi.Pointer<ffi.Char> notebook_name;
 
-  external ffi.Pointer<ffi.Char> note_path;
+  external ffi.Pointer<ffi.Char> expected_notebook_id;
 
-  external ffi.Pointer<ffi.Uint8> initial_data;
+  external ffi.Pointer<ffi.Char> node_id;
 
-  @ffi.Uint64()
-  external int initial_size;
+  @ffi.Int32()
+  external int mode;
 
   static ffi.Pointer<VxmOpenOptions> $allocate(
     ffi.Allocator $allocator, {
@@ -237,15 +316,15 @@ final class VxmOpenOptions extends ffi.Struct {
     required ffi.Pointer<ffi.Char> local_data_path,
     required ffi.Pointer<ffi.Char> notebook_path,
     required ffi.Pointer<ffi.Char> notebook_name,
-    required ffi.Pointer<ffi.Char> note_path,
-    required ffi.Pointer<ffi.Uint8> initial_data,
-    required int initial_size,
+    required ffi.Pointer<ffi.Char> expected_notebook_id,
+    required ffi.Pointer<ffi.Char> node_id,
+    required int mode,
   }) => $allocator<VxmOpenOptions>()
     ..ref.app_data_path = app_data_path
     ..ref.local_data_path = local_data_path
     ..ref.notebook_path = notebook_path
     ..ref.notebook_name = notebook_name
-    ..ref.note_path = note_path
-    ..ref.initial_data = initial_data
-    ..ref.initial_size = initial_size;
+    ..ref.expected_notebook_id = expected_notebook_id
+    ..ref.node_id = node_id
+    ..ref.mode = mode;
 }

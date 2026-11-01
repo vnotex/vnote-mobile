@@ -7,6 +7,7 @@ import 'dart:typed_data';
 
 import 'package:ffi/ffi.dart';
 
+import 'generated/core_json_keys.dart';
 import 'generated/vxcore_host_bindings.dart' as native;
 
 abstract interface class NotebookCore {
@@ -20,10 +21,61 @@ abstract interface class NotebookCore {
   String get nativeNotices;
 }
 
+enum CoreEditorType { markdown, text }
+
+final class CoreEntry {
+  const CoreEntry({
+    required this.id,
+    required this.name,
+    required this.isFolder,
+    required this.exists,
+    required this.encrypted,
+  });
+
+  final String id;
+  final String name;
+  final bool isFolder;
+  final bool exists;
+  final bool encrypted;
+}
+
+final class CoreDirectory {
+  CoreDirectory({
+    required this.notebookId,
+    required this.notebookName,
+    required this.folderId,
+    required this.path,
+    required this.parentId,
+    required List<CoreEntry> entries,
+  }) : entries = List.unmodifiable(entries);
+
+  final String notebookId;
+  final String notebookName;
+  final String folderId;
+  final String path;
+  final String? parentId;
+  final List<CoreEntry> entries;
+}
+
+abstract interface class CatalogCore {
+  CoreDirectory get initialDirectory;
+  String get nativeNotices;
+  Future<CoreDirectory> list([String? folderId]);
+  Future<String> createNote(String folderId, String name);
+  Future<String> createFolder(String folderId, String name);
+  Future<void> rename(String nodeId, String name);
+  Future<void> move(String nodeId, String destinationFolderId);
+  Future<void> delete(String nodeId);
+  Future<void> close();
+}
+
 final class CoreNote {
   const CoreNote({
     required this.notebookId,
     required this.nodeId,
+    required this.path,
+    required this.notebookName,
+    required this.editorType,
     required this.text,
     required this.baseHash,
     required this.coreVersion,
@@ -32,6 +84,9 @@ final class CoreNote {
 
   final String notebookId;
   final String nodeId;
+  final String path;
+  final String notebookName;
+  final CoreEditorType editorType;
   final String text;
   final String baseHash;
   final String coreVersion;
@@ -56,6 +111,7 @@ final class CoreException implements Exception {
 }
 
 const _maxSource = 4 * 1024 * 1024;
+const _maxCatalog = 8 * 1024 * 1024;
 const _maxInteger = 9007199254740991;
 const _invalid = native.VxCoreError.VXCORE_ERR_INVALID_PARAM;
 const _unusable = native.VxCoreError.VXCORE_ERR_INVALID_STATE;
@@ -139,8 +195,91 @@ final class _Pending {
   final completer = Completer<Object>();
 }
 
-final class CoreNotebook implements NotebookCore {
-  CoreNotebook._() : _token = _nextToken++ {
+Never _badDirectory() => throw const CoreException(
+  native.VxCoreError.VXCORE_ERR_JSON_PARSE,
+  'Malformed native directory listing',
+);
+
+String _listingString(Object? value, {int maximum = 16384}) {
+  if (value is! String || value.isEmpty || value.contains('\u0000'))
+    _badDirectory();
+  _encode(value, maximum: maximum);
+  return value;
+}
+
+CoreDirectory _directory(native.VxmEvent event) {
+  if (event.size <= 0 || event.size > _maxCatalog || event.data == nullptr)
+    _badDirectory();
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(
+      utf8.decode(event.data.asTypedList(event.size), allowMalformed: false),
+    );
+  } on FormatException {
+    _badDirectory();
+  }
+  if (decoded is! Map<String, dynamic>) _badDirectory();
+  final files = decoded[CoreJsonKeys.files];
+  final folders = decoded[CoreJsonKeys.folders];
+  if (files is! List || folders is! List) _badDirectory();
+  if (files.length + folders.length > 10000) {
+    throw const CoreException(
+      _unsupported,
+      'Directory exceeds the 10000-child limit',
+    );
+  }
+  final entries = <CoreEntry>[];
+  final identities = <String>{};
+  void append(List<dynamic> children, bool isFolder) {
+    for (final child in children) {
+      if (child is! Map<String, dynamic>) _badDirectory();
+      final id = _listingString(child[CoreJsonKeys.id], maximum: 127);
+      if (!identities.add(id)) _badDirectory();
+      final name = _listingString(child[CoreJsonKeys.name]);
+      final exists = child[CoreJsonKeys.nodeExists];
+      final metadata = child[CoreJsonKeys.metadata];
+      if (exists is! bool || metadata is! Map<String, dynamic>) _badDirectory();
+      final encrypted = metadata.containsKey(CoreJsonKeys.encrypted)
+          ? metadata[CoreJsonKeys.encrypted]
+          : false;
+      if (encrypted is! bool) _badDirectory();
+      entries.add(
+        CoreEntry(
+          id: id,
+          name: name,
+          isFolder: isFolder,
+          exists: exists,
+          encrypted: encrypted,
+        ),
+      );
+    }
+  }
+
+  append(folders, true);
+  append(files, false);
+  final parent = event.parent_id.cast<Utf8>().toDartString();
+  final path = _listingString(event.path.cast<Utf8>().toDartString());
+  if ((path == '.') != parent.isEmpty) _badDirectory();
+  return CoreDirectory(
+    notebookId: _listingString(
+      event.notebook_id.cast<Utf8>().toDartString(),
+      maximum: 127,
+    ),
+    notebookName: _listingString(
+      event.notebook_name.cast<Utf8>().toDartString(),
+    ),
+    folderId: _listingString(
+      event.node_id.cast<Utf8>().toDartString(),
+      maximum: 127,
+    ),
+    path: path,
+    parentId: parent.isEmpty ? null : _listingString(parent, maximum: 127),
+    entries: entries,
+  );
+}
+
+final class CoreNotebook implements NotebookCore, CatalogCore {
+  CoreNotebook._(this._mode) : _token = _nextToken++ {
     _listener = NativeCallable<Void Function(Int64)>.listener(_onNotify);
   }
 
@@ -155,13 +294,61 @@ final class CoreNotebook implements NotebookCore {
   final _closedEvent = Completer<int>();
   Future<void>? _closing;
 
-  static Future<CoreNotebook> open({
+  final int _mode;
+  CoreDirectory? _initialDirectory;
+
+  @override
+  CoreDirectory get initialDirectory {
+    _requireMode(native.VXM_MODE_CATALOG);
+    return _initialDirectory!;
+  }
+
+  void _requireMode(int mode) {
+    if (_mode != mode) {
+      throw const CoreException(
+        _unusable,
+        'Operation is not available in this notebook mode',
+      );
+    }
+  }
+
+  static Future<CoreNotebook> openCatalog({
     required String appDataPath,
     required String localDataPath,
     required String notebookPath,
     required String notebookName,
-    required String notePath,
-    required String initialText,
+    String? expectedNotebookId,
+  }) => _open(
+    appDataPath: appDataPath,
+    localDataPath: localDataPath,
+    notebookPath: notebookPath,
+    notebookName: notebookName,
+    expectedNotebookId: expectedNotebookId,
+    mode: native.VXM_MODE_CATALOG,
+  );
+
+  static Future<CoreNotebook> openNote({
+    required String appDataPath,
+    required String localDataPath,
+    required String notebookPath,
+    required String notebookId,
+    required String nodeId,
+  }) => _open(
+    appDataPath: appDataPath,
+    localDataPath: localDataPath,
+    notebookPath: notebookPath,
+    expectedNotebookId: notebookId,
+    nodeId: nodeId,
+    mode: native.VXM_MODE_NOTE,
+  );
+  static Future<CoreNotebook> _open({
+    required String appDataPath,
+    required String localDataPath,
+    required String notebookPath,
+    required int mode,
+    String? notebookName,
+    String? expectedNotebookId,
+    String? nodeId,
   }) async {
     if (_nextToken > _maxInteger) {
       throw const CoreException(
@@ -169,9 +356,13 @@ final class CoreNotebook implements NotebookCore {
         'Native session tokens are exhausted',
       );
     }
-    final initial = _encode(initialText);
-    final host = CoreNotebook._();
-    final pending = _Pending(native.VXM_EVENT_OPEN, 0);
+    final host = CoreNotebook._(mode);
+    final pending = _Pending(
+      mode == native.VXM_MODE_CATALOG
+          ? native.VXM_EVENT_CATALOG_OPEN
+          : native.VXM_EVENT_OPEN,
+      0,
+    );
     try {
       using((arena) {
         final options = arena<native.VxmOpenOptions>();
@@ -179,10 +370,14 @@ final class CoreNotebook implements NotebookCore {
           ..app_data_path = _option(arena, appDataPath)
           ..local_data_path = _option(arena, localDataPath)
           ..notebook_path = _option(arena, notebookPath)
-          ..notebook_name = _option(arena, notebookName)
-          ..note_path = _option(arena, notePath)
-          ..initial_data = _copyBytes(arena, initial)
-          ..initial_size = initial.length;
+          ..notebook_name = notebookName == null
+              ? nullptr
+              : _option(arena, notebookName)
+          ..expected_notebook_id = expectedNotebookId == null
+              ? nullptr
+              : _option(arena, expectedNotebookId)
+          ..node_id = nodeId == null ? nullptr : _option(arena, nodeId)
+          ..mode = mode;
         final out = arena<Pointer<native.VxmHost>>();
         final code = native.vxm_host_create(
           options,
@@ -198,7 +393,8 @@ final class CoreNotebook implements NotebookCore {
         host._generation = native.vxm_host_generation(out.value);
         host._pending[1] = pending;
       });
-      await pending.completer.future;
+      final initial = await pending.completer.future;
+      if (initial is CoreDirectory) host._initialDirectory = initial;
       return host;
     } catch (error, stack) {
       // Even initialization errors retain the listener until owner teardown and
@@ -232,6 +428,7 @@ final class CoreNotebook implements NotebookCore {
 
   @override
   Future<CoreNote> read() async {
+    _requireMode(native.VXM_MODE_NOTE);
     final handle = _usableHandle();
     final id = _nextRequest++;
     final pending = _Pending(native.VXM_EVENT_READ, 0);
@@ -249,6 +446,7 @@ final class CoreNotebook implements NotebookCore {
     required int revision,
     required String baseHash,
   }) async {
+    _requireMode(native.VXM_MODE_NOTE);
     final handle = _usableHandle();
     if (revision < 0 ||
         revision > _maxInteger ||
@@ -277,6 +475,78 @@ final class CoreNotebook implements NotebookCore {
     }
     _pending[id] = pending;
     return await pending.completer.future as CoreWriteResult;
+  }
+
+  @override
+  Future<CoreDirectory> list([String? folderId]) async {
+    _requireMode(native.VXM_MODE_CATALOG);
+    final handle = _usableHandle();
+    final id = _nextRequest++;
+    final pending = _Pending(native.VXM_EVENT_LIST, 0);
+    final code = using(
+      (arena) => native.vxm_host_catalog_list(
+        handle,
+        id,
+        _generation,
+        folderId == null || folderId.isEmpty
+            ? nullptr
+            : _option(arena, folderId),
+      ),
+    );
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native listing admission failed');
+    }
+    _pending[id] = pending;
+    return await pending.completer.future as CoreDirectory;
+  }
+
+  Future<String> _mutate(
+    int operation,
+    String nodeId, {
+    String? name,
+    String? destination,
+  }) async {
+    _requireMode(native.VXM_MODE_CATALOG);
+    final handle = _usableHandle();
+    final id = _nextRequest++;
+    final pending = _Pending(native.VXM_EVENT_MUTATE, 0);
+    final code = using(
+      (arena) => native.vxm_host_catalog_mutate(
+        handle,
+        id,
+        _generation,
+        operation,
+        _option(arena, nodeId),
+        name == null ? nullptr : _option(arena, name),
+        destination == null ? nullptr : _option(arena, destination),
+      ),
+    );
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native mutation admission failed');
+    }
+    _pending[id] = pending;
+    return await pending.completer.future as String;
+  }
+
+  @override
+  Future<String> createNote(String folderId, String name) =>
+      _mutate(native.VXM_CREATE_NOTE, folderId, name: name);
+  @override
+  Future<String> createFolder(String folderId, String name) =>
+      _mutate(native.VXM_CREATE_FOLDER, folderId, name: name);
+  @override
+  Future<void> rename(String nodeId, String name) async {
+    await _mutate(native.VXM_RENAME, nodeId, name: name);
+  }
+
+  @override
+  Future<void> move(String nodeId, String destinationFolderId) async {
+    await _mutate(native.VXM_MOVE, nodeId, destination: destinationFolderId);
+  }
+
+  @override
+  Future<void> delete(String nodeId) async {
+    await _mutate(native.VXM_DELETE, nodeId);
   }
 
   void _onNotify(int token) {
@@ -313,6 +583,13 @@ final class CoreNotebook implements NotebookCore {
             pending.completer.complete(
               CoreWriteResult(revision: event.revision, baseHash: hash),
             );
+          } else if (event.kind == native.VXM_EVENT_MUTATE) {
+            pending.completer.complete(
+              event.node_id.cast<Utf8>().toDartString(),
+            );
+          } else if (event.kind == native.VXM_EVENT_LIST ||
+              event.kind == native.VXM_EVENT_CATALOG_OPEN) {
+            pending.completer.complete(_directory(event));
           } else {
             if (event.size > _maxSource) {
               throw const CoreException(
@@ -327,7 +604,9 @@ final class CoreNotebook implements NotebookCore {
               // Dart's decoder consumes one leading BOM; source offsets and
               // subsequent writes must retain that original code unit.
               if (bytes.length >= 3 &&
-                  bytes[0] == 0xef && bytes[1] == 0xbb && bytes[2] == 0xbf) {
+                  bytes[0] == 0xef &&
+                  bytes[1] == 0xbb &&
+                  bytes[2] == 0xbf) {
                 text = '\ufeff$text';
               }
             }
@@ -335,6 +614,16 @@ final class CoreNotebook implements NotebookCore {
               CoreNote(
                 notebookId: event.notebook_id.cast<Utf8>().toDartString(),
                 nodeId: event.node_id.cast<Utf8>().toDartString(),
+                path: event.path.cast<Utf8>().toDartString(),
+                notebookName: event.notebook_name.cast<Utf8>().toDartString(),
+                editorType: switch (event.editor_type) {
+                  native.VXM_EDITOR_MARKDOWN => CoreEditorType.markdown,
+                  native.VXM_EDITOR_TEXT => CoreEditorType.text,
+                  _ => throw const CoreException(
+                    _unsupported,
+                    'Unsupported native editor type',
+                  ),
+                },
                 text: text,
                 baseHash: hash,
                 coreVersion: event.core_version.cast<Utf8>().toDartString(),

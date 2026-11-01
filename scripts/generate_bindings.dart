@@ -133,5 +133,56 @@ Future<void> main(List<String> args) async {
     await output.writeAsBytes(bytes);
     print('Generated ${output.path}');
   }
+  await generateCoreJsonKeys(root, check: args.isNotEmpty);
   await temporary.delete(recursive: true);
+}
+
+Future<void> generateCoreJsonKeys(Directory root, {required bool check}) async {
+  final header = await File(
+    '${root.path}/third_party/vxcore/include/vxcore/notebook_json_keys.h',
+  ).readAsString();
+  const symbols = {
+    'Id': 'id',
+    'Name': 'name',
+    'Files': 'files',
+    'Folders': 'folders',
+    'Metadata': 'metadata',
+    'Encrypted': 'encrypted',
+    'NodeExists': 'nodeExists',
+  };
+  final declarations = RegExp(
+    r'inline\s+constexpr\s+const\s+char\s*\*\s*kJsonKey([A-Za-z0-9_]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*;',
+  ).allMatches(header).toList();
+  final generated = StringBuffer(
+    '// SPDX-License-Identifier: LGPL-3.0-only\n'
+    '// Generated from vxcore/notebook_json_keys.h. Do not edit by hand.\n'
+    'abstract final class CoreJsonKeys {\n',
+  );
+  for (final entry in symbols.entries) {
+    final matches = declarations
+        .where((match) => match.group(1) == entry.key)
+        .toList();
+    if (matches.length != 1) {
+      throw StateError(
+        'Expected exactly one literal kJsonKey${entry.key} declaration',
+      );
+    }
+    final value = jsonDecode(matches.single.group(2)!) as String;
+    generated.writeln('  static const ${entry.value} = ${jsonEncode(value)};');
+  }
+  generated.writeln('}');
+  final output = File(
+    '${root.path}/packages/vxcore_bridge/lib/src/generated/core_json_keys.dart',
+  );
+  final expected = generated.toString();
+  if (check) {
+    if (!await output.exists() || await output.readAsString() != expected) {
+      throw StateError('Generated core JSON keys are stale');
+    }
+    print('Generated JSON keys match the public core constants.');
+  } else {
+    await output.parent.create(recursive: true);
+    await output.writeAsString(expected);
+    print('Generated ${output.path}');
+  }
 }

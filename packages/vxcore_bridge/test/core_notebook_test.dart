@@ -11,17 +11,48 @@ final class _Fixture {
 
   final Directory root;
   final hosts = <CoreNotebook>[];
+  String? notebookId;
+  String? nodeId;
   String path(String child) => '${root.path}${Platform.pathSeparator}$child';
   File get note => File('${path('book')}${Platform.pathSeparator}Welcome.md');
 
   Future<CoreNotebook> open({String initial = 'initial\r\n'}) async {
-    final host = await CoreNotebook.open(
+    if (notebookId == null) {
+      final catalog = await CoreNotebook.openCatalog(
+        appDataPath: path('app'),
+        localDataPath: path('local'),
+        notebookPath: path('book'),
+        notebookName: 'Personal',
+      );
+      try {
+        notebookId = catalog.initialDirectory.notebookId;
+        nodeId = await catalog.createNote(
+          catalog.initialDirectory.folderId,
+          'Welcome.md',
+        );
+      } finally {
+        await catalog.close();
+      }
+      final seed = await CoreNotebook.openNote(
+        appDataPath: path('app'),
+        localDataPath: path('local'),
+        notebookPath: path('book'),
+        notebookId: notebookId!,
+        nodeId: nodeId!,
+      );
+      try {
+        final empty = await seed.read();
+        await seed.write(initial, revision: 1, baseHash: empty.baseHash);
+      } finally {
+        await seed.close();
+      }
+    }
+    final host = await CoreNotebook.openNote(
       appDataPath: path('app'),
       localDataPath: path('local'),
       notebookPath: path('book'),
-      notebookName: 'Personal',
-      notePath: 'Welcome.md',
-      initialText: initial,
+      notebookId: notebookId!,
+      nodeId: nodeId!,
     );
     hosts.add(host);
     return host;
@@ -55,6 +86,9 @@ void main() {
     expect(opened.text, source);
     expect(opened.baseHash, matches(RegExp(r'^[0-9a-f]{64}$')));
     expect(opened.lineEnding, 0);
+    expect(opened.path, 'Welcome.md');
+    expect(opened.notebookName, 'Personal');
+    expect(opened.editorType, CoreEditorType.markdown);
     expect(await fixture.note.readAsBytes(), utf8.encode(source));
 
     const edited = '$source\n日本語 edited 😀\r\n';

@@ -324,16 +324,17 @@ function deletePairedLineBreak(editor: EditorView, backward: boolean): boolean {
     userEvent: backward ? 'delete.backward' : 'delete.forward' });
   return true;
 }
-function createState(source: string, selection: Selection): EditorState {
+function createState(source: string, selection: Selection, language: 'markdown' | 'text'): EditorState {
   return EditorState.create({
     doc: Text.of(source.split('\n')), selection,
     extensions: [
       EditorState.lineSeparator.of('\n'),
       EditorState.allowMultipleSelections.of(false),
       writable.of([EditorState.readOnly.of(true), EditorView.editable.of(false)]), theme.of(editorTheme(false)),
-      undoHistory.of(history({ minDepth: LIMITS.historyGroups })), markdown({ addKeymap: false }),
+      undoHistory.of(history({ minDepth: LIMITS.historyGroups })),
+      language === 'markdown' ? markdown({ addKeymap: false }) : [],
       syntaxHighlighting(defaultHighlightStyle), lineNumbers(), EditorView.lineWrapping,
-      EditorView.contentAttributes.of({ 'aria-label': 'Exact Markdown source; memory only',
+      EditorView.contentAttributes.of({ 'aria-label': language === 'markdown' ? 'Markdown source editor' : 'Plain text source editor',
         'aria-describedby': 'status', spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off' }),
       EditorState.transactionExtender.of(transaction => !transaction.docChanged || composing
         ? { annotations: Transaction.addToHistory.of(false) } : null),
@@ -373,7 +374,7 @@ function createState(source: string, selection: Selection): EditorState {
   });
 }
 const view = new EditorView({ parent: document.getElementById('editor')!,
-  state: createState('', { anchor: 0, head: 0 }),
+  state: createState('', { anchor: 0, head: 0 }, 'text'),
   dispatchTransactions: transactions => { for (const transaction of transactions) applyTransaction(transaction); },
 });
 
@@ -414,7 +415,10 @@ function handle(message: HostMessage): void {
   if (message.type === 'load') {
     requireThat(generation === null, 'A load cannot replace existing text. Explicitly discard the session first.');
     requireThat(window.VNoteEditor && typeof window.VNoteEditor.postMessage === 'function', 'Waiting for the native host channel.');
-    const state = createState(message.text, message.selection);
+    const state = createState(message.text, message.selection, message.language);
+    const title = message.language === 'markdown' ? 'Markdown source' : 'Plain text source';
+    document.getElementById('source-title')!.textContent = title;
+    document.getElementById('editor')!.setAttribute('aria-label', `${title} editor`);
     documentBytes = validateSource(message.text);
     lineEnding = preferredLineEnding(state.doc);
     documentId = message.documentId;

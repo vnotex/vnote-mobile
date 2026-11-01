@@ -275,3 +275,107 @@ Observed verification:
 macOS/iOS, physical-device, file-protection and interruption gates remain unrun.
 The GUI checks establish the Android explicit-write workflow, not autosave or
 power-loss durability. No core/mobile push or CI dispatch was performed.
+
+
+## Managed notebook navigator
+
+This independent offline slice adds the Personal notebook browser, nested folder
+and Markdown/plain-text creation, rename/move/delete, and identity-bound note
+selection. Catalog and editor owners are exclusive. It does not complete the
+remaining Phase 1 device/iOS gates or all Phase 2 functionality. vxcore remains
+unchanged at the separately squashed `b0e157f` pin.
+
+### Executed boundary and interoperability checks
+
+- Native C++ host executable passed its real-storage, admission, cancellation,
+  terminal-credit, lifecycle, catalog-mode and mutation cases, including a real
+  Windows handle preventing an asset move after the note had moved. The host
+  reported that partial outcome rather than clean success.
+- The bridge suite passed 33 tests covering nested Unicode CRUD, source/identity
+  preservation, desktop-fixture metadata/assets, missing and unsupported content,
+  mode/owner exclusion, collisions, readonly paths, junction/linked-resource
+  guards, implicit resource side effects, partial creation and bounded listings.
+  Exactly 10,000 direct children retained their full identity set; 10,001 and
+  malformed listings failed explicitly without truncation.
+- TypeScript typecheck and 18 protocol/history tests passed. The strict load
+  language is Markdown or plain text only. FFI and canonical JSON keys are
+  generated from the real C/public-core headers, not manually duplicated schema.
+- Flutter analysis reported no issues, and all 73 editor/coordinator/workspace
+  and browser interaction tests passed after the fixes described below.
+- The versioned desktop fixture was produced through the default Windows desktop
+  vxcore DLL, with the mobile test API absent. It includes a Unicode Markdown
+  note, BOM/CRLF plain text, tags/custom metadata, a PNG asset/attachment and opaque
+  bytes. A separate mobile-host smoke renamed/moved/edited the note and exercised
+  core deletion/recycling. The default desktop DLL then reopened that mutated
+  notebook and verified notebook/node UUIDs, edited UTF-8 bytes, tags, custom
+  metadata, attachment references, PNG, untouched plain text and opaque bytes.
+  This is a desktop-engine roundtrip, not a desktop Qt UI claim.
+
+### Actual Android surface
+
+The arm64/x86_64 debug APK built and ran on Medium_Phone. The existing Personal
+notebook and Welcome.md were not replaced. Through the actual Flutter controls,
+the smoke created nested folders and a note, opened it, cancelled a dirty return,
+then completed Write before returning to the browser. A later explicit Discard
+retained the previously saved bytes. Note rename/move and folder rename/move
+preserved the observed note/folder UUIDs and source.
+
+A real plain-text note used zero CodeMirror language providers (Markdown used
+one), displayed literal markup without HTML elements, and retained exact CRLF
+bytes through native Write. A duplicate filename surfaced core error 5 without
+changing the existing file. Delete confirmation disclosed possible permanent
+fallback; Cancel retained the subtree, and confirmed deletion moved the owned
+smoke files to the core recycler. The original notebook/root/Welcome UUIDs and
+Welcome source were checked unchanged. No production Dart filesystem writes or
+fake catalog records were used.
+
+### Integration failures found and corrected
+
+- Core ID-to-path lookup reads a lazy SQLite cache and treats the root's empty
+  path as not found. The bridge now anchors the root ID from core metadata and
+  uses bounded public core listings on cache misses. Missing indexed nodes may
+  be deleted through their authoritative parent record, never opened for editing
+  or used as a creation destination.
+- Review found that a contradictory SQLite cache hit still prevented lookup and
+  that an unrelated legacy basename could block another identity. Cached paths
+  now fall through to authoritative listings when verification fails (allocation
+  failures still propagate). Search applies path-safety checks only where it
+  traverses, while portable-name policy is enforced on mutation targets. A native
+  regression deliberately changed only the derived SQLite filename: rename by ID
+  failed before the fix and passed afterward, preserving bytes and identity on
+  reopen. A separate legacy-sibling regression passed without changing that
+  sibling's metadata.
+- A removed parent is rejected before create, so that is not a valid partial-
+  creation fixture. The regression now denies file creation in an existing owned
+  directory while leaving parallel metadata writable, proving the post-create
+  file-size check and subsequent missing-entry refresh/deletion behavior.
+- Core Markdown moves can implicitly move relative files, overwrite destinations
+  or orphan another indexed file, and can ignore resource failures. The host uses
+  the same pinned public cmark parser for bounded preflight and verifies resource
+  postconditions. Unsafe moves are refused before dispatch; no host file-copy
+  replacement or private core API was introduced.
+- The asset insertion API returned a notebook-relative path. The fixture's source
+  link was corrected through the default desktop buffer API to be document-relative;
+  IDs, tags/custom metadata, attachment metadata and image bytes were retained.
+- A move picker initially notified its ancestor workspace during widget building.
+  Its initial request now runs after the first frame; the failing browser widget
+  regression passes. Widget fixture cleanup also now awaits shutdown inside the
+  fake clock and performs synchronous outer teardown, avoiding an unrelated
+  cross-zone wait on an already completed fake-clock future. The rebuilt APK
+  opened/cancelled the corrected picker on a clean launch without a framework
+  build-phase exception.
+- Android automation initially waited for a nonexistent Create label (the dialog
+  uses Save) and overlong action batches exhausted its harness deadline. Bounded
+  actions and actual accessibility labels were used; these harness failures are
+  not counted as app failures or passes.
+
+Final commands `node scripts/verify.mjs verify` and
+`node scripts/verify.mjs android` passed, including asset publication/checks and
+the arm64/x86_64 package. The app was cold-launched after installation and left
+on the ready notebook browser.
+
+Remaining limitations: no macOS/iOS, physical-device, Qt UI, release signing or
+power-loss verification. Multi-notebook management, search/tag UI, managed
+import/export, attachment editing, preview, autosave/recovery and WebDAV remain
+planned work. Debug builds are not performance evidence. No upstream change,
+repository publication or store submission occurred.

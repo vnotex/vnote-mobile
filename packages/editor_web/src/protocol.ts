@@ -133,7 +133,7 @@ export interface Envelope {
   requestId: string;
 }
 export type HostMessage = Envelope & (
-  | { type: 'load'; text: string; baseVersion: string; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
+  | { type: 'load'; text: string; language: 'markdown' | 'text'; baseVersion: string; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
   | { type: 'ack'; stage: 'received' | 'rejected'; throughRevision: number; error?: string }
   | { type: 'selection'; anchor: number; head: number }
   | { type: 'command'; command: 'undo' | 'redo' }
@@ -165,8 +165,9 @@ export function validateHostMessage(value: unknown): HostMessage {
   encodeMessage(value, value.type === 'load' ? LIMITS.fullMessageBytes : LIMITS.controlBytes);
   switch (value.type) {
     case 'load':
-      keys(value, [...HEADER, 'text', 'baseVersion', 'lineEndingPolicy', 'reason', 'selection']);
+      keys(value, [...HEADER, 'text', 'language', 'baseVersion', 'lineEndingPolicy', 'reason', 'selection']);
       requireThat(value.revision === 0 && typeof value.text === 'string' && typeof value.baseVersion === 'string' && value.baseVersion.length === 64 && /^[0-9a-f]{64}$/.test(value.baseVersion)
+        && (value.language === 'markdown' || value.language === 'text')
         && value.lineEndingPolicy === 'preserve' && value.reason === 'open', 'Invalid load policy.');
       selectionShape(value.selection);
       validateSource(value.text);

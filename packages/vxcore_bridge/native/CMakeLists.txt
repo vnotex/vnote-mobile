@@ -83,7 +83,7 @@ configure_file(licenses.cpp.in "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp" @ONLY)
 add_library(vnote_host SHARED vxcore_host.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
 target_compile_definitions(vnote_host PRIVATE VXM_HOST_BUILD)
 target_include_directories(vnote_host PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(vnote_host PRIVATE vxcore nlohmann_json sodium)
+target_link_libraries(vnote_host PRIVATE vxcore nlohmann_json sodium cmark)
 set_target_properties(vnote_host PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   C_VISIBILITY_PRESET hidden
@@ -104,7 +104,7 @@ endif()
 if(VXM_BUILD_TESTS)
   enable_testing()
   add_executable(native_host_test ../test/native_host_test.cpp)
-  target_link_libraries(native_host_test PRIVATE vnote_host vxcore)
+  target_link_libraries(native_host_test PRIVATE vnote_host vxcore sqlite3)
   target_include_directories(native_host_test PRIVATE "${VXM_CORE_ROOT}/include")
   set_target_properties(native_host_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts"

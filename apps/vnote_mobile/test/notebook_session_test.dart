@@ -17,6 +17,9 @@ final thirdHash = 'c' * 64;
 CoreNote note({String text = 'base\r\n', String? hash}) => CoreNote(
   notebookId: 'book-identity',
   nodeId: 'node-identity',
+  path: 'Notes/base.md',
+  notebookName: 'Personal',
+  editorType: CoreEditorType.markdown,
   text: text,
   baseHash: hash ?? firstHash,
   coreVersion: '1.0.0',
@@ -153,14 +156,25 @@ void main() {
     'a reopened editor can write revision one through the real core',
     () async {
       final root = await Directory.systemTemp.createTemp('vnote-coordinator-');
+      final catalog = await CoreNotebook.openCatalog(
+        appDataPath: '${root.path}/app',
+        localDataPath: '${root.path}/local',
+        notebookPath: '${root.path}/book',
+        notebookName: 'Personal',
+      );
+      final notebookId = catalog.initialDirectory.notebookId;
+      final nodeId = await catalog.createNote(
+        catalog.initialDirectory.folderId,
+        'Welcome.md',
+      );
+      await catalog.close();
       final session = NotebookSession(
-        openCore: () => CoreNotebook.open(
+        openCore: () => CoreNotebook.openNote(
           appDataPath: '${root.path}/app',
           localDataPath: '${root.path}/local',
           notebookPath: '${root.path}/book',
-          notebookName: 'Personal',
-          notePath: 'Welcome.md',
-          initialText: 'original\r\n',
+          notebookId: notebookId,
+          nodeId: nodeId,
         ),
       );
       addTearDown(() async {
@@ -193,7 +207,7 @@ void main() {
       expect(session.value.note!.nodeId, id);
       expect(
         await File('${root.path}/book/Welcome.md').readAsString(),
-        'original\r\nonetwothree',
+        'onetwothree',
       );
     },
   );

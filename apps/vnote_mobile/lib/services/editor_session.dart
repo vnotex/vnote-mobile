@@ -63,6 +63,7 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
     required String initialText,
     required this.documentId,
     required this.baseVersion,
+    required this.language,
     String Function()? generationFactory,
   }) : generation = (generationFactory ?? _randomGeneration)(),
        super(EditorSessionState(text: initialText)) {
@@ -77,11 +78,15 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
         !RegExp(r'^[0-9a-f]{64}$').hasMatch(baseVersion)) {
       throw ArgumentError('Invalid document identity or disk base hash.');
     }
+    if (language != 'markdown' && language != 'text') {
+      throw ArgumentError('Unsupported source editor language.');
+    }
     _sourceBytes = _sourceSize(initialText);
   }
 
   final String documentId;
   final String baseVersion;
+  final String language;
   static const maxSourceUnits = 4 * 1024 * 1024;
   static const maxSourceBytes = 4 * 1024 * 1024;
   static const maxEnvelopeBytes = 32 * 1024 * 1024;
@@ -123,6 +128,7 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
     }
     final message = _request('load', {
       'text': value.text,
+      'language': language,
       'baseVersion': baseVersion,
       'lineEndingPolicy': 'preserve',
       'reason': 'open',

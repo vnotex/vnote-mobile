@@ -1,16 +1,47 @@
 # Mobile architecture
 
-The [handoff plan](mobile-client-plan.md) is the product contract. This document distinguishes the managed notebook boundary from designs not yet implemented. Runtime evidence belongs in [verification.md](verification.md).
+The [handoff plan](mobile-client-plan.md) is the product contract. This document distinguishes the managed-notebook navigator/editor boundary from later product phases. Runtime evidence belongs in [verification.md](verification.md).
 
 ## Managed notebook and editor boundary
 
-`apps/vnote_mobile` is the Flutter app in the root Dart workspace. `lib/services/editor_session.dart` owns a generation-bound volatile source mirror; Riverpod supplies the constructor-injected session dependency; Flutter listens to its immutable `ValueNotifier` states. Only a matching, validated edit batch advances the mirror. A received acknowledgement does not mean disk persistence.
+`apps/vnote_mobile` is the Flutter app in the root Dart workspace. `lib/services/editor_session.dart` owns a generation-bound volatile source mirror; Riverpod supplies the constructor-injected workspace dependency; Flutter listens to its immutable `ValueNotifier` states. Only a matching, validated edit batch advances the mirror. A received acknowledgement does not mean disk persistence.
 
 `packages/editor_web` independently builds CodeMirror source/highlighting/history into `apps/vnote_mobile/assets/editor`. The view owns editable text, selection and undo; the host owns generation, document identity and accepted revisions. A narrow JSON channel is the only application boundary. No path, credential, notebook handle, renderer or filesystem command is exposed to JavaScript.
 
-The document identity binds the real notebook and node IDs. `notebook_session.dart` coordinates native writes and a separate on-disk revision watermark; a received editor acknowledgement remains volatile, not a durable draft or sync result. Theme changes reconfigure the existing view. Explicit discard is distinct from successful save. Loading and editing untrusted Markdown as source never executes its HTML.
+The document identity binds the real notebook and node IDs. `notebook_session.dart` coordinates native writes and a separate on-disk revision watermark; a received editor acknowledgement remains volatile, not a durable draft or sync result. The core-classified Markdown/plain-text language is fixed by the load envelope; plain text installs no Markdown parser. Theme changes reconfigure the existing view. Explicit discard is distinct from successful save. Loading and editing untrusted Markdown as source never executes its HTML.
 
 Root `scripts/verify.mjs` is the supported asset/dependency/check/packaging entrypoint. The Node build emits deterministic bundled assets, dependency license notices, application licenses and a hash manifest. Outputs are ignored; the source and dependency locks are authoritative. Check mode fails on absent or changed output rather than silently repairing it. Native sources remain pinned through recursive gitlinks.
+
+## Managed notebook navigator
+
+`notebook_workspace.dart` owns one managed notebook workflow: either a catalog host
+or a `NotebookSession`, never both. The catalog has no open editor buffer. Folder
+browsing and create/rename/move/delete run through core APIs on its native owner.
+Selected notes are opened by notebook/node UUID after catalog shutdown. Core SQLite identity lookup is only a lazy cache: the bridge anchors the root ID in core metadata and resolves cache misses through bounded authoritative core listings, without reading/rebuilding notebook schemas itself. Returning
+from the editor completes Write/Discard/Cancel, drains the editor owner, then
+reopens the catalog with the already observed notebook UUID. Missing/replaced
+notebooks are errors, not opportunities to recreate identities.
+
+The browser displays real indexed children, including missing and unsupported
+content. Native filetype and protection checks admit only supported Markdown or
+plain-text bodies to the editor. Structural actions refresh after every attempted
+mutation; a failed refresh marks retained data stale and does not imply rollback.
+`Delete` explicitly warns that core recycling can fall back to permanent deletion.
+There is no mobile restore promise or second recycle implementation.
+
+Listing JSON stays core-owned until event release. Dart decodes it using generated
+`CoreJsonKeys` from the authoritative core header, including `nodeExists = "exists"`
+and nested `metadata.encrypted`. Native admission reserves bounded result space
+before dispatch and retains actual ownership through cancellation and shutdown.
+Names, IDs, resolved paths and configured resource namespaces are checked before
+mutation; external/traversing layouts are refused without rewriting metadata.
+Markdown file moves additionally preflight the core's implicit linked-resource
+side effects with the same pinned public cmark parser. Destinations cannot be
+overwritten, linked indexed nodes cannot be orphaned, and resource postconditions
+are checked after core success. This is not a new transaction/rollback guarantee.
+
+This slice covers the current managed notebook, not multi-notebook management,
+search/tag UI, import/export, attachment editing, preview, autosave or sync.
 
 ## Native ownership and storage
 
@@ -20,7 +51,7 @@ The implemented host has one native owner OS thread for context/metadata/buffer 
 
 CMake selects the checked POSIX writer from `src/mobile/` only for Android/iOS; desktop saves use the original in-place implementation from `src/platform/buffer_file_save_desktop.cpp`. The Windows DACL/recovery path from the initial native slice has been removed. Shared callsites and the native owner-thread protocol are unchanged.
 
-No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires VNote-compatible notebook operations, recovery, preview and WebDAV interoperability.
+No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires the remaining notebook/import/search workflows, recovery, preview and WebDAV interoperability.
 
 ## Decisions and gates
 
