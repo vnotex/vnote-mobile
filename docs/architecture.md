@@ -14,9 +14,11 @@ Root `scripts/verify.mjs` is the supported asset/dependency/check/packaging entr
 
 ## Native ownership and storage
 
-`packages/vxcore_bridge` owns the real context, notebook, buffer, bounded requests/events and FFI allocation releases. The additive `vxcore_context_create_with_paths` copies validated, nonoverlapping app/local roots before configuration loading; legacy context creation keeps its desktop defaults. The platform adapter obtains persistent Application Support/internal-files locations. Notebook bodies and metadata are written only through core APIs.
+`packages/vxcore_bridge` owns the real context, notebook, buffer, bounded requests/events and FFI allocation releases. The Android/iOS extension `vxcore_context_create_with_paths`, declared in `vxcore/mobile/vxcore_mobile.h`, copies validated, nonoverlapping app/local roots before configuration loading. Default desktop builds neither expose this extension nor change legacy context defaults. Desktop-hosted bridge tests explicitly enable only the context extension, not mobile persistence. The platform adapter obtains persistent Application Support/internal-files locations. Notebook bodies and metadata are written only through core APIs.
 
 The implemented host has one native owner OS thread for context/metadata/buffer lifetime and ordinary writes. A process-wide core-job mutex additionally protects the core's unsynchronized global UUID generator across separate hosts; admission, cancellation, notification and event drain stay outside it. There are no network workers yet. The later sync design requires the additional upstream concurrency gates before network/owner overlap. Dart calls bounded enqueue/control functions, not synchronous disk/network APIs. Ordinary writes reload and compare the exact disk SHA-256 before `set_content_raw` plus `buffer_save` under owner exclusion; memory-only prepared saves are not a substitute.
+
+CMake selects the checked POSIX writer from `src/mobile/` only for Android/iOS; desktop saves use the original in-place implementation from `src/platform/buffer_file_save_desktop.cpp`. The Windows DACL/recovery path from the initial native slice has been removed. Shared callsites and the native owner-thread protocol are unchanged.
 
 No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires VNote-compatible notebook operations, recovery, preview and WebDAV interoperability.
 
@@ -24,7 +26,7 @@ No second authoritative note database, mobile notebook-schema rewrite, credentia
 
 | ADR | Selected boundary |
 | --- | --- |
-| [0001](adr/0001-native-packaging-and-storage.md) | Native dependency packaging, explicit persistent sandbox roots and desktop-compatible additive API |
+| [0001](adr/0001-native-packaging-and-storage.md) | Native dependency packaging, explicit persistent sandbox roots and platform-selected mobile API |
 | [0002](adr/0002-native-execution.md) | Owner/worker matrix, ownership, bounded events, cancellation and shutdown |
 | [0003](adr/0003-editor-protocol-and-durability.md) | Exact-source UTF-16 protocol, received/durable/saved distinctions, autosave and recovery |
 | [0004](adr/0004-rendering-security.md) | Unprivileged preview, bundled parser/math/diagrams, resource and navigation policy |

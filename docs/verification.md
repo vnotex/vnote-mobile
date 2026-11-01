@@ -104,7 +104,14 @@ Reinstalled and cold-launched the rebuilt public-registry APK on the same Androi
 - Owner-controlled upstream changes/publication, store IDs, signing and LGPL distribution review. No push or store submission occurred.
 
 
-## Native notebook slice
+## Native notebook slice (historical: core c1f8475)
+
+This section records the original native slice before platform isolation. Its
+Windows DACL/recovery implementation and globally selected replacement writer
+were subsequently removed; the current platform contracts are described in
+[ADR 0001](adr/0001-native-packaging-and-storage.md) and
+[ADR 0003](adr/0003-editor-protocol-and-durability.md). The earlier results below
+remain historical evidence, not tests of the current desktop save policy.
 
 The next slice introduces the additive explicit-root core API, checked ordinary
 source publication, the bounded native owner host, generated FFI, and the
@@ -206,3 +213,65 @@ unimplemented or unverified as their planned phases specify. Windows replacement
 is recoverable multi-step publication, not crash-atomic or a power-loss claim.
 CI is configured but not dispatched; the new core gitlink must be published to
 the core remote before publishing this mobile commit.
+
+
+## Platform-isolation follow-up
+
+The shared C-header language guard and `Threads::Threads` remain universal.
+Android/iOS select the mobile context extension and POSIX writer from
+`src/mobile/`; default desktop selects the original in-place writer. The optional
+desktop mobile-API test extension does not alter persistence. Windows DACL/recovery
+code and its explicit links were removed. The generic platform-isolation rule is
+in the core `AGENTS.md`.
+
+Observed verification:
+
+- Shared headers compiled as C and C++; the mobile header compiled with its
+  availability definition and did not declare the extension in the default mode.
+- Default MSVC core: CLI reported `VxCore v0.1.0`; six selected suites passed
+  (`test_core`, `test_buffer_save_desktop`, `test_buffer_save_read_only`,
+  `test_session_persistence`, `test_file_utils`, `test_buffer`). Hardlinked bytes
+  and identity survived saves, and a writable handle denying deletion did not
+  prevent saving. `test_folder_manager` also built with the selected desktop source.
+- Explicit desktop test-API mode: `test_context_paths` and
+  `test_buffer_save_desktop` both passed. The library contained the mobile context
+  API but no `MobileFileWriter` symbols; the default static library contained no
+  mobile context API symbol.
+- The default Windows shared-library SDK built and installed without the mobile
+  header directory. Its installed DLL returned version `0.1.0` and did not export
+  the mobile context API. Loading required the existing optional libidn2 runtime
+  directory discovered by CMake; this was not a standalone distribution audit.
+  Configuring the test-only API with installation enabled failed as intended.
+- The initial static-SDK installation probe failed on existing dependency export
+  sets. The default shared-SDK configuration passed; no unrelated static packaging
+  changes were made.
+- Android x86_64 built `test_context_paths`, `test_atomic_buffer_save` and the
+  direct-compile `test_folder_manager`, including both selected mobile save sources.
+  The path suite ran successfully on Medium_Phone. The atomic suite ran under the
+  actual app UID in a disposable app-private directory and passed source/ID
+  roundtrips, binary/empty data, failure/dirty-state, symlink/directory/FIFO rejection
+  and mode preservation. Android policy denied hardlink-fixture creation; that
+  specific prerequisite is reported unavailable, not counted as device coverage.
+- Default Linux core also built with GCC 13.3/CMake 3.28.3 in WSL Ubuntu. The CLI
+  reported `VxCore v0.1.0`; five selected suites passed (`test_core`,
+  `test_buffer_save_desktop`, `test_buffer_save_read_only`, `test_file_utils`,
+  `test_session_persistence`), including real hardlink and symlink preservation.
+  Missing OpenSSL development files were supplied by extracting Ubuntu
+  `libssl-dev`/`libssl3t64` 3.0.13-0ubuntu3.16 into the ignored tools directory and
+  exposing its multiarch headers; no system packages were installed. A prior
+  local OpenSSL source-build attempt timed out and is not counted as evidence.
+- A separate Linux real-filesystem smoke exercised the actual desktop and mobile
+  writer implementations: desktop preserved hardlink/symlink identity; mobile
+  rejected both without mutation. CMake also detected the native Threads target.
+- The verification pipeline passed 18 web tests, 9 real bridge tests, 54 Flutter
+  tests, analysis and generated-FFI drift checks. The C++ native host lifecycle and
+  storage executable passed with the explicit desktop test API.
+- The arm64/x86_64 APK built and ran on Medium_Phone. A CodeMirror edit followed by
+  actual Write changed the note bytes without changing portable IDs. Original
+  source was restored through the editor and native Write; Reopen and a cold
+  launch retained exact bytes/IDs, with the editor visibly ready. Temporary device
+  fixtures and the debug port forward were removed.
+
+macOS/iOS, physical-device, file-protection and interruption gates remain unrun.
+The GUI checks establish the Android explicit-write workflow, not autosave or
+power-loss durability. No core/mobile push or CI dispatch was performed.

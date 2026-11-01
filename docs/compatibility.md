@@ -9,7 +9,7 @@
 | cmark | `6148f317138d873041043742e61d26c74d31c6a1` | Core's VNote renderer fork |
 | libgit2 | `a418d9d4ab87bae16b87d8f37143a4687ae0e4b2` | Core dependency even without mobile Git UI |
 
-Remote refs and recursive checkout were verified during initialization. Branch heads are not dependency pins. The native slice adds explicit context roots, checked ordinary-file publication, C-header compatibility and mobile CMake fixes in a separate local core commit. No core or mobile changes are pushed without owner authorization; the core commit must be published before its mobile gitlink. Additional FetchContent pins and license disposition are recorded in [ADR 0001](adr/0001-native-packaging-and-storage.md).
+Remote refs and recursive checkout were verified during initialization. Branch heads are not dependency pins. The current core separates explicit context roots and checked ordinary-file publication into mobile-selected sources. Default desktop builds retain legacy roots and in-place ordinary saves; the C-header compatibility fix and portable Threads::Threads linkage remain shared. Desktop test-only mobile API opt-in does not change persistence policy. No core or mobile changes are pushed without owner authorization; the core commit must be published before its mobile gitlink. Additional FetchContent pins and license disposition are recorded in [ADR 0001](adr/0001-native-packaging-and-storage.md).
 
 ## Notebook contract
 

@@ -15,6 +15,7 @@
 #include <vector>
 
 #include <vxcore/vxcore.h>
+#include <vxcore/mobile/vxcore_mobile.h>
 
 namespace {
 namespace fs = std::filesystem;

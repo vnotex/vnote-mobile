@@ -18,6 +18,7 @@
 #include <sodium.h>
 #include <vxcore/notebook_json_keys.h>
 #include <vxcore/vxcore.h>
+#include <vxcore/mobile/vxcore_mobile.h>
 #include <vxcore/vxcore_log.h>
 
 namespace {

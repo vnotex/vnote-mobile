@@ -20,6 +20,8 @@ Run commands at the repository root. `verify` installs locked editor/Dart depend
 
 Flutter may be on PATH, specified by the `FLUTTER` environment variable, or installed at `.tools/flutter`. Windows commands require PowerShell 7. On Windows the locally downloaded Node can be invoked as `./.tools/node-v24.22.2-win-x64/node.exe`; its matching npm is used by the script. Set `JAVA_HOME` to a JDK matching the Android pin before building (the local download is `.tools/java/jdk-17.0.20.1+1`). SDK caches and machine paths are not committed.
 
+Linux host builds also require OpenSSL development headers and libraries. Desktop native assets are test harnesses: the bridge explicitly enables `VXCORE_ENABLE_MOBILE_TEST_API` with installation disabled. This exposes isolated roots without enabling the mobile writer; default desktop vxcore builds expose no mobile API.
+
 Native binding generation uses ffigen 23.0.0 and libclang 18.1.1 with the pinned NDK headers:
 
 ```sh
@@ -46,7 +48,7 @@ Generated editor and legal assets are ignored, never downloaded at runtime. `che
 
 - Flutter/Riverpod owns presentation and editor-session orchestration.
 - CodeMirror 6 is bundled into `webview_flutter`; source text is never rendered as HTML in the privileged editor.
-- `packages/vxcore_bridge` wraps the C++17 core C ABI on a dedicated native owner thread. The core has additive sandbox-root initialization and opt-in atomic ordinary-note publication; there is no global core context or second note database.
+- `packages/vxcore_bridge` wraps the C++17 core C ABI on a dedicated native owner thread. The core selects sandbox-root initialization and checked ordinary-note publication only for Android/iOS; desktop builds retain in-place saves; there is no global core context or second note database.
 - Desktop compatibility reference: `f8026adb4c43f78d90251148e24b6e72ca28f3d7`; original core baseline: `c3319ca9a7dfd5432cad1f7c35de6be099fc87bf`. The current core gitlink and `toolchains.json` record the separately committed implementation pin.
 
 Read [architecture](docs/architecture.md), [compatibility](docs/compatibility.md) and the six ADRs linked there before extending the boundary. Mobile TLS trust integration, iOS execution and full draft durability remain gates, not ignored errors or permission to replace core operations with Dart filesystem writes.

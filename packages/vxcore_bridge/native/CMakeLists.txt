@@ -13,6 +13,13 @@ set(VXCORE_BUILD_CLI OFF CACHE BOOL "" FORCE)
 set(VXCORE_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(VXCORE_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(VXCORE_INSTALL OFF CACHE BOOL "" FORCE)
+# Desktop assets are host-test harnesses, not a desktop VNote build. They need
+# isolated mobile roots but must retain the ordinary desktop save implementation.
+if(NOT ANDROID AND NOT CMAKE_SYSTEM_NAME STREQUAL "iOS")
+  set(VXCORE_ENABLE_MOBILE_TEST_API ON CACHE BOOL "" FORCE)
+else()
+  set(VXCORE_ENABLE_MOBILE_TEST_API OFF CACHE BOOL "" FORCE)
+endif()
 if(ANDROID)
   if(ANDROID_PLATFORM_LEVEL LESS 28)
     message(FATAL_ERROR "vnote_host requires Android API 28 or newer (Bionic Iconv)")

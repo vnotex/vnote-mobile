@@ -42,15 +42,19 @@ The desktop Apple branch retains SDK libcurl/SecureTransport. The iOS branch now
 
 [Context creation](../../third_party/vxcore/src/api/vxcore_api.cpp) ignores `config_json`. [ConfigManager](../../third_party/vxcore/src/core/config_manager.cpp) chooses roots in its constructor, then `LoadConfigs()` creates directories and reads `vxcore.json` and `vxsession.json`. [PathProvider](../../third_party/vxcore/src/platform/path_provider.cpp) uses desktop HOME/XDG on Android and `Library/Caches` for Apple local data. Local data includes durable session state and cannot be treated entirely as disposable cache.
 
-The implemented **additive context-level C ABI** is:
+The implemented **mobile context-level C ABI**, declared only in `vxcore/mobile/vxcore_mobile.h`, is:
 
 ```c
+#include <vxcore/mobile/vxcore_mobile.h>
+
 VxCoreError vxcore_context_create_with_paths(
     const char *config_json, const char *app_data_path,
     const char *local_data_path, VxCoreContextHandle *out_context);
 ```
 
-Keep `vxcore_context_create`'s signature and existing desktop defaults/ignored-config semantics unchanged. Both entry points share internal initialization; the new one passes owned path options into ConfigManager construction. Do not introduce a global setter. UTF-8 input strings are borrowed only during creation and copied into that context. Clear output handle on failure. Validate both roots before default path resolution, `LoadConfigs`, directory creation or other initialization side effects: reject null, empty, malformed UTF-8, relative and identical roots (including normalized/equivalent aliases); preserve separate namespaces and reject containment/aliasing that defeats separation. Return parameter error for invalid roots, IO error for inaccessible roots, never silently use desktop defaults. Explicit valid roots take precedence over test/portable/default resolution only for this context. They are immutable for its lifetime.
+CMake selects `src/mobile/context_mobile.cpp` and `src/mobile/config_manager_mobile.cpp` only for Android/iOS, publishing `VXCORE_MOBILE_API=1`. Default desktop builds do not declare, compile or install the extension. The explicit `VXCORE_ENABLE_MOBILE_TEST_API=ON` option exposes only this API for desktop-hosted bridge tests, requires `VXCORE_INSTALL=OFF`, and never selects mobile save behavior.
+
+Keep `vxcore_context_create`'s signature and existing desktop defaults/ignored-config semantics unchanged. Both entry points share internal `vxcore::InitializeContext` manager wiring; the new one passes owned path options into ConfigManager construction. Do not introduce a global setter. UTF-8 input strings are borrowed only during creation and copied into that context. Clear output handle on failure. Validate both roots before default path resolution, `LoadConfigs`, directory creation or other initialization side effects: reject null, empty, malformed UTF-8, relative and identical roots (including normalized/equivalent aliases); preserve separate namespaces and reject containment/aliasing that defeats separation. Return parameter error for invalid roots, IO error for inaccessible roots, never silently use desktop defaults. Explicit valid roots take precedence over test/portable/default resolution only for this context. They are immutable for its lifetime.
 
 The platform adapter obtains persistent app-private sandbox locations: separate `app` and `local` children of Android internal files storage / iOS Application Support, plus a separate managed notebooks root. Validate canonical ancestry against OS-provided persistent roots and reject cache/temp or escaped/symlinked destinations. Notebook create/open root arguments do not configure core roots. Backups distinguish user settings/notebooks from device-only state and rebuildable indexes; only proven-disposable content goes in OS caches. Never change HOME, use portable executable folders, enable test mode in production, or put ignored path keys in JSON. No context probe may touch a user's profile.
 
@@ -63,5 +67,5 @@ A global pre-create setter races independent contexts. Reusing `config_json` wit
 - Clean recursive checkout resolves the recorded artifacts/locks; native hook builds and loads each selected release ABI, with export/FFI ownership checks and no host libraries in target output. Android page-size compatibility and iOS device linkage are exercised.
 - Device TLS tests accept a trusted endpoint and reject hostname mismatch, expired/untrusted certificates and downgrade. iOS curl and Android OpenSSL provenance/trust wiring are recorded.
 - New path ABI creates/reopens config/session/notebook fixtures solely in isolated approved roots; cache eviction leaves durable state intact. Invalid roots cause no default-profile writes. Two contexts with different explicit roots remain isolated; changed input storage does not change retained paths.
-- Desktop legacy create tests cover platform defaults, portable `config/app` and `config/local`, and controlled test-mode roots without behavior changes. Failure cleanup leaves no published context; persistence errors surface.
+- Desktop legacy create tests cover platform defaults, portable `config/app` and `config/local`, and controlled test-mode roots without behavior changes. Both default and explicitly test-enabled desktop configurations retain the original in-place writer and its link/permission behavior. Failure cleanup leaves no published context; persistence errors surface.
 - Exact SDK intersection, fetched license inventory, SBOM and LGPL/store distribution review are completed before release. Actual commands, results and platform limits are recorded in [verification](../verification.md).
