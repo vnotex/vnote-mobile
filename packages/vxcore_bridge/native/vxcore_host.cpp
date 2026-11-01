@@ -12,6 +12,7 @@
 #include <new>
 #include <set>
 #include <string>
+#include <string_view>
 #include <thread>
 #include <vector>
 #if defined(_WIN32)
@@ -130,10 +131,14 @@ void confined(const fs::path &root, const std::string &relative) {
   relative_path(relative);
   for (const auto &part : fs::u8path(relative)) { current /= part; no_link(current); }
 }
-void safe_tree(const fs::path &path) {
+void safe_tree(const fs::path &path, const std::atomic<bool> *cancelled = nullptr) {
+  require(!cancelled || !cancelled->load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
   no_link(path);
   if (!fs::exists(path) || !fs::is_directory(path)) return;
-  for (const auto &entry : fs::recursive_directory_iterator(path)) no_link(entry.path());
+  for (const auto &entry : fs::recursive_directory_iterator(path)) {
+    require(!cancelled || !cancelled->load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
+    no_link(entry.path());
+  }
 }
 template <size_t N> void copy_field(char (&target)[N], const std::string &value) {
   require(value.size() < N && value.find('\0') == std::string::npos &&
@@ -156,7 +161,7 @@ const char *redacted(int32_t code) {
   switch (code) {
     case VXCORE_OK: return "Completed";
     case VXCORE_ERR_FILE_CHANGED_OUTSIDE: return "The note changed on disk; reopen or preserve your edits before retrying";
-    case VXCORE_ERR_CANCELLED: return "The pending operation was cancelled";
+    case VXCORE_ERR_CANCELLED: return "The operation was cancelled";
     case VXCORE_ERR_OUT_OF_MEMORY: return "Native request capacity is exhausted";
     case VXCORE_ERR_UNSUPPORTED: return "This node, text encoding, or notebook layout is not supported";
     case VXCORE_ERR_INVALID_PARAM: return "Invalid or oversized native request";
@@ -197,6 +202,103 @@ std::string identity(const Json &json) {
   require(value.find('\0') == std::string::npos, VXCORE_ERR_INVALID_STATE);
   return value;
 }
+
+// JSON input has one bounded, validated shape before it can consume a request ID.
+enum CatalogOperation { kSearch = 1, kTags, kCreateTag, kSetTags };
+const std::string &json_string(const Json &value, bool empty = false,
+                               int32_t code = VXCORE_ERR_JSON_PARSE) {
+  require(value.is_string(), code);
+  const auto &text = value.get_ref<const std::string &>();
+  require((empty || !text.empty()) && text.size() <= kString &&
+          text.find('\0') == std::string::npos &&
+          utf8(reinterpret_cast<const uint8_t *>(text.data()), text.size()), code);
+  return text;
+}
+void tag_names(const Json &tags, int32_t code = VXCORE_ERR_JSON_PARSE) {
+  require(tags.is_array() && tags.size() <= 10000, code);
+  std::set<std::string_view> names;
+  for (const auto &tag : tags)
+    require(names.insert(json_string(tag, false, code)).second, code);
+}
+int32_t catalog_operation(const uint8_t *data, size_t size, int32_t kind) {
+  require(size && size <= kString);
+  const auto json = Json::parse(data, data + size, nullptr, false);
+  require(json.is_object() && json.contains("op"));
+  const auto &op = json_string(json.at("op"), false, VXCORE_ERR_INVALID_PARAM);
+  int32_t operation = 0;
+  if (kind == VXM_EVENT_QUERY && op == "search") {
+    const auto &text = json_string(json.at("text"), true, VXCORE_ERR_INVALID_PARAM);
+    require(json.contains("caseSensitive") && json.at("caseSensitive").is_boolean());
+    const bool tagged = json.contains("tag");
+    if (tagged) json_string(json.at("tag"), false, VXCORE_ERR_INVALID_PARAM);
+    require(!text.empty() || tagged);
+    operation = kSearch;
+  } else if (kind == VXM_EVENT_QUERY && op == "tags") {
+    operation = kTags;
+  } else if (kind == VXM_EVENT_TAG && op == "createTag") {
+    json_string(json.at("name"), false, VXCORE_ERR_INVALID_PARAM);
+    operation = kCreateTag;
+  } else if (kind == VXM_EVENT_TAG && op == "setTags") {
+    tag_names(json.at("tags"), VXCORE_ERR_INVALID_PARAM);
+    require(json.contains("nodeId"));
+    operation = kSetTags;
+  } else throw Failure{VXCORE_ERR_INVALID_PARAM};
+  if ((operation == kTags || operation == kSetTags) && json.contains("nodeId"))
+    require(json_string(json.at("nodeId"), false, VXCORE_ERR_INVALID_PARAM).size() < 128);
+  for (auto it = json.begin(); it != json.end(); ++it) {
+    const auto &key = it.key();
+    require(key == "op" ||
+            (operation == kSearch && (key == "text" || key == "tag" || key == "caseSensitive")) ||
+            ((operation == kTags || operation == kSetTags) && key == "nodeId") ||
+            (operation == kCreateTag && key == "name") || (operation == kSetTags && key == "tags"));
+  }
+  return operation;
+}
+
+// One explicit input file and batch_size=1 run inline on the owner. Never retain
+// the core callback's borrowed JSON or expose its absolute path. Escaping a 4 MiB
+// control-character line can require 24 MiB; concurrent outside writers can make
+// core read more (its own ceiling is 50 MiB), so reject excessive callback JSON.
+struct SearchMatch {
+  const std::string &expected_id;
+  bool received = false;
+  bool matched = false;
+  int32_t error = VXCORE_OK;
+  int64_t line = 0;
+  std::string snippet;
+  explicit SearchMatch(const std::string &id) : expected_id(id) {}
+  static void collect(int index, int total, const char *data, void *userdata) noexcept {
+    auto &out = *static_cast<SearchMatch *>(userdata);
+    try {
+      require(!out.received && index == 0 && total == 1, VXCORE_ERR_INVALID_STATE);
+      out.received = true;
+      const auto size = bounded_length(data, 6 * kSource + 12 * kString + 4096);
+      const auto batch = Json::parse(data, data + size, nullptr, false);
+      require(batch.is_object(), VXCORE_ERR_JSON_PARSE);
+      const auto &files = batch.at("matches");
+      require(files.is_array() && files.size() <= 1, VXCORE_ERR_INVALID_STATE);
+      if (files.empty()) return;
+      const auto &file = files.front();
+      require(identity(file) == out.expected_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      const auto &matches = file.at("matches");
+      require(matches.is_array() && matches.size() == 1, VXCORE_ERR_INVALID_STATE);
+      const auto &first = matches.front();
+      require(first.at("lineNumber").is_number_integer(), VXCORE_ERR_JSON_PARSE);
+      out.line = first.at("lineNumber").get<int64_t>();
+      require(out.line > 0 && out.line <= INT32_MAX, VXCORE_ERR_JSON_PARSE);
+      const auto &line = first.at("lineText").get_ref<const std::string &>();
+      require(line.size() <= kSource && line.find('\0') == std::string::npos &&
+              utf8(reinterpret_cast<const uint8_t *>(line.data()), line.size()), VXCORE_ERR_UNSUPPORTED);
+      size_t length = line.size() < 512 ? line.size() : 512;
+      while (length < line.size() && (static_cast<uint8_t>(line[length]) & 0xc0) == 0x80) --length;
+      out.snippet.assign(line.data(), length);
+      out.matched = true;
+    } catch (const Failure &failure) { out.error = failure.code; }
+    catch (const std::bad_alloc &) { out.error = VXCORE_ERR_OUT_OF_MEMORY; }
+    catch (const Json::exception &) { out.error = VXCORE_ERR_JSON_PARSE; }
+    catch (...) { out.error = VXCORE_ERR_UNKNOWN; }
+  }
+};
 
 // Accounting outlives the host when a consumer has taken an event. Input is
 // released on execution; operation and output reservations on event release.
@@ -277,6 +379,8 @@ struct VxmHost {
   std::shared_ptr<Capacity> capacity = std::make_shared<Capacity>();
   std::unique_ptr<EventStorage> closed = std::make_unique<EventStorage>();
   bool stopping = false;
+  uint64_t active_search = 0; // Protected by mutex, including completion handoff.
+  std::atomic<bool> search_cancelled{false};
   uint64_t generation = new_generation();
   uint64_t last_request = 0;
   VxmNotify notify = nullptr;
@@ -444,7 +548,7 @@ struct VxmHost {
     if (type == "Text") return VXM_EDITOR_TEXT;
     throw Failure{VXCORE_ERR_UNSUPPORTED};
   }
-  void layout() {
+  void layout(const std::atomic<bool> *cancelled = nullptr) {
     notebook_config();
     const auto root = fs::u8path(notebook_path);
     for (const auto *resource : {&assets, &recycle}) {
@@ -456,9 +560,9 @@ struct VxmHost {
     // The default recycler is deliberately inside metadata; it is not a node.
     require(lower_ascii(fs::u8path(assets).begin()->u8string()) != "vx_notebook", VXCORE_ERR_UNSUPPORTED);
     confined(root, "vx_notebook");
-    safe_tree(root / "vx_notebook");
+    safe_tree(root / "vx_notebook", cancelled);
     confined(root, recycle);
-    safe_tree(root / fs::u8path(recycle));
+    safe_tree(root / fs::u8path(recycle), cancelled);
   }
   void resources(const std::string &parent) {
     const auto relative = parent == "." ? assets : parent + "/" + assets;
@@ -683,6 +787,221 @@ struct VxmHost {
       check(vxcore_node_delete(context, notebook_id.c_str(), target.path.c_str()));
     }
   }
+  void check_search_cancelled() const {
+    require(!search_cancelled.load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
+  }
+  void append_query(EventStorage &out, const std::string &text) {
+    require(text.size() <= kCatalog - out.event.size, VXCORE_ERR_UNSUPPORTED);
+    std::memcpy(out.body.get() + out.event.size, text.data(), text.size());
+    out.event.size += text.size();
+  }
+  void file_identity(const Node &node) {
+    require(!node.folder, VXCORE_ERR_INVALID_PARAM);
+    for (const auto &part : fs::u8path(node.path)) basename(part.u8string());
+    ordinary(node.path);
+    confined(fs::u8path(notebook_path), node.path);
+    const auto path = fs::u8path(notebook_path) / fs::u8path(node.path);
+    require(fs::exists(path), VXCORE_ERR_NODE_NOT_EXISTS);
+    require(fs::is_regular_file(path), VXCORE_ERR_UNSUPPORTED);
+  }
+  void search_file_supported(const Node &node) {
+    file_identity(node);
+    if (node.config.value(vxcore::kJsonKeyEncrypted, false))
+      throw Failure{VXCORE_ERR_ENCRYPTION_LOCKED};
+    const auto metadata = node.config.find(vxcore::kJsonKeyMetadata);
+    if (metadata != node.config.end()) {
+      require(metadata->is_object(), VXCORE_ERR_JSON_PARSE);
+      if (metadata->value(vxcore::kJsonKeyEncrypted, false))
+        throw Failure{VXCORE_ERR_ENCRYPTION_LOCKED};
+    }
+    classify(node.path);
+    uint64_t size = 0;
+    check(vxcore_node_get_file_size(context, notebook_id.c_str(), node.path.c_str(), &size));
+    require(size <= kSource, VXCORE_ERR_UNSUPPORTED);
+    if (size) {
+      CoreString source;
+      check(vxcore_file_peek(context, notebook_id.c_str(), node.path.c_str(), static_cast<size_t>(size), &source.value));
+      require(source.value != nullptr, VXCORE_ERR_OUT_OF_MEMORY);
+      const auto length = bounded_length(source.value, kSource);
+      // Peek is a C string: unequal length also rejects any embedded NUL.
+      require(length == size && utf8(reinterpret_cast<const uint8_t *>(source.value), length), VXCORE_ERR_UNSUPPORTED);
+    }
+  }
+  static bool unsupported_candidate(int32_t code) {
+    return code == VXCORE_ERR_UNSUPPORTED || code == VXCORE_ERR_NODE_NOT_EXISTS ||
+           code == VXCORE_ERR_NOT_FOUND || code == VXCORE_ERR_ENCRYPTION_LOCKED ||
+           code == VXCORE_ERR_ENCRYPTION_AUTH_FAILED || code == VXCORE_ERR_ENCRYPTION_FORMAT ||
+           code == VXCORE_ERR_ENCRYPTION_RECOVERY_REQUIRED;
+  }
+  void search_catalog(Request &request, const Json &query) {
+    check_search_cancelled();
+    auto &out = *request.result;
+    const auto &text = query.at("text").get_ref<const std::string &>();
+    Json scope = {{"recursive", false}, {"filePatterns", Json::array({"*"})}};
+    if (query.contains("tag")) scope["tags"] = Json::array({query.at("tag")});
+    const auto core_query = text.empty()
+        ? Json{{"tags", scope.at("tags")}, {"operator", "AND"}, {"scope", scope}}.dump()
+        : Json{{"pattern", text}, {"caseSensitive", query.at("caseSensitive")},
+               {"regex", false}, {"firstMatchPerFile", true}, {"scope", scope}}.dump();
+    append_query(out, "{\"notebookId\":" + Json(notebook_id).dump() + ",\"matches\":[");
+    std::vector<std::string> folders{"."};
+    size_t queued_bytes = 1, inspected = 0, rows = 0, skipped = 0;
+    bool limited = false;
+    std::set<std::string> seen;
+    seen.insert(root_id);
+    while (!folders.empty() && !limited) {
+      check_search_cancelled();
+      auto path = std::move(folders.back());
+      folders.pop_back();
+      queued_bytes -= path.size();
+      ordinary(path);
+      confined(fs::u8path(notebook_path), path);
+      CoreString listing;
+      check(vxcore_folder_list_children(context, notebook_id.c_str(), path.c_str(), &listing.value));
+      const auto children = listing.json(kCatalog);
+      for (const bool folder : {false, true}) {
+        const auto &entries = children.at(folder ? vxcore::kJsonKeyFolders : vxcore::kJsonKeyFiles);
+        require(entries.is_array(), VXCORE_ERR_JSON_PARSE);
+        for (const auto &child : entries) {
+          check_search_cancelled();
+          if (inspected == 100000) { limited = true; break; }
+          ++inspected;
+          const auto id = identity(child);
+          require(seen.insert(id).second, VXCORE_ERR_JSON_PARSE);
+          const auto &name = json_string(child.at(vxcore::kJsonKeyName));
+          const auto exists = child.at(vxcore::kJsonKeyNodeExists).get<bool>();
+          std::string next;
+          try {
+            // Nonportable names/links/layouts are visible skipped candidates,
+            // never passed to core's recursive or permissive path handling.
+            try { basename(name); }
+            catch (const Failure &) { throw Failure{VXCORE_ERR_UNSUPPORTED}; }
+            next = joined(path, name);
+            ordinary(next);
+            confined(fs::u8path(notebook_path), next);
+            require(exists, VXCORE_ERR_NODE_NOT_EXISTS);
+            const auto physical = fs::u8path(notebook_path) / fs::u8path(next);
+            require(fs::exists(physical), VXCORE_ERR_NODE_NOT_EXISTS);
+            if (folder) {
+              require(fs::is_directory(physical), VXCORE_ERR_UNSUPPORTED);
+            } else {
+              auto node = load_node(next, id);
+              require(!node.folder, VXCORE_ERR_JSON_PARSE);
+              search_file_supported(node);
+            }
+          } catch (const Failure &failure) {
+            if (!unsupported_candidate(failure.code)) throw;
+            ++skipped;
+            continue;
+          }
+          if (folder) {
+            if (next.size() > kCatalog - queued_bytes) { limited = true; break; }
+            queued_bytes += next.size();
+            folders.push_back(std::move(next));
+            continue;
+          }
+          check_search_cancelled();
+          // Never send an empty input list: core treats that as whole-tree search.
+          const auto inputs = Json{{"files", Json::array({next})}}.dump();
+          SearchMatch match{id};
+          if (text.empty()) {
+            CoreString result;
+            check(vxcore_search_by_tags(context, notebook_id.c_str(), core_query.c_str(), inputs.c_str(), &result.value));
+            const auto body = result.json(kCatalog);
+            const auto &matches = body.at("matches");
+            require(matches.is_array() && matches.size() <= 1, VXCORE_ERR_INVALID_STATE);
+            if (!matches.empty()) {
+              require(identity(matches.front()) == id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+              match.matched = true;
+            }
+          } else {
+            check(vxcore_search_content_streaming(context, notebook_id.c_str(), core_query.c_str(),
+                                                  inputs.c_str(), 1, SearchMatch::collect, &match, nullptr));
+            require(match.error == VXCORE_OK, match.error);
+          }
+          check_search_cancelled();
+          if (!match.matched) continue;
+          const auto row = Json{{"id", id}, {"path", next}, {"line", match.line}, {"snippet", match.snippet}}.dump();
+          // Leave ample space for the fixed trailer and bounded skipped count.
+          if (row.size() + (rows ? 1 : 0) > kCatalog - out.event.size - 128) {
+            limited = true;
+            break;
+          }
+          if (rows) append_query(out, ",");
+          append_query(out, row);
+          if (++rows == 10000) { limited = true; break; }
+        }
+        if (limited) break;
+      }
+    }
+    check_search_cancelled();
+    append_query(out, std::string("],\"limited\":") + (limited ? "true" : "false") +
+                     ",\"skipped\":" + std::to_string(skipped) + "}");
+  }
+  void tags_catalog(Request &request, const Json &query) {
+    auto &out = *request.result;
+    CoreString raw;
+    check(vxcore_tag_list(context, notebook_id.c_str(), &raw.value));
+    const auto size = bounded_length(raw.value, kCatalog);
+    const auto tags = Json::parse(raw.value, raw.value + size, nullptr, false);
+    require(tags.is_array() && tags.size() <= 10000, VXCORE_ERR_UNSUPPORTED);
+    append_query(out, "{\"notebookId\":" + Json(notebook_id).dump() + ",\"tags\":[");
+    std::set<std::string_view> names;
+    bool comma = false;
+    for (const auto &tag : tags) {
+      const auto &name = json_string(tag.at(vxcore::kJsonKeyName));
+      const auto &parent = json_string(tag.at(vxcore::kJsonKeyParent), true);
+      require(names.insert(name).second, VXCORE_ERR_JSON_PARSE);
+      if (comma) append_query(out, ",");
+      append_query(out, Json{{"name", name}, {"parent", parent}}.dump());
+      comma = true;
+    }
+    append_query(out, "],\"assigned\":[");
+    if (query.contains("nodeId")) {
+      const auto node = resolve(query.at("nodeId").get<std::string>());
+      file_identity(node);
+      const auto &assigned = node.config.at(vxcore::kJsonKeyTags);
+      tag_names(assigned);
+      comma = false;
+      for (const auto &tag : assigned) {
+        if (comma) append_query(out, ",");
+        append_query(out, tag.dump());
+        comma = true;
+      }
+    }
+    append_query(out, "]}");
+  }
+  void query_catalog(Request &request) {
+    require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
+    if (request.operation == kSearch) check_search_cancelled();
+    layout(request.operation == kSearch ? &search_cancelled : nullptr);
+    load_node(".", root_id);
+    const auto query = Json::parse(request.input.begin(), request.input.end());
+    auto &out = *request.result;
+    copy_field(out.notebook, notebook_id);
+    if (request.operation == kSearch) search_catalog(request, query);
+    else tags_catalog(request, query);
+    out.event.data = out.body.get();
+    // Keep the full reservation while the preallocated body is retained. Charging
+    // only serialized bytes here would hide up to 8 MiB per held terminal.
+  }
+  void tag_catalog(Request &request) {
+    require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
+    layout();
+    load_node(".", root_id);
+    const auto query = Json::parse(request.input.begin(), request.input.end());
+    if (request.operation == kCreateTag) {
+      check(vxcore_tag_create(context, notebook_id.c_str(), query.at("name").get_ref<const std::string &>().c_str()));
+    } else {
+      const auto node = resolve(query.at("nodeId").get<std::string>());
+      file_identity(node);
+      copy_field(request.result->node, node.id);
+      const auto tags = query.at("tags").dump();
+      // Core permits defined names OR this file's existing orphan assignments.
+      // Do not tighten that validator, mutate disk directly, or refresh here.
+      check(vxcore_file_update_tags(context, notebook_id.c_str(), node.path.c_str(), tags.c_str()));
+    }
+  }
   void note_metadata() {
     const auto node = resolve(node_id);
     require(!node.folder, VXCORE_ERR_UNSUPPORTED);
@@ -868,6 +1187,10 @@ struct VxmHost {
         pending_start = (pending_start + 1) % pending.size();
         --pending_size;
         request->cancelled |= stopping;
+        if (request->result->event.kind == VXM_EVENT_QUERY && request->operation == kSearch) {
+          active_search = request->result->event.request_id;
+          search_cancelled.store(request->cancelled, std::memory_order_relaxed);
+        }
       }
       auto &event = request->result->event;
       try {
@@ -880,6 +1203,8 @@ struct VxmHost {
           else if (event.kind == VXM_EVENT_WRITE) write_note(*request);
           else if (event.kind == VXM_EVENT_LIST) list_catalog(*request);
           else if (event.kind == VXM_EVENT_MUTATE) mutate_catalog(*request);
+          else if (event.kind == VXM_EVENT_QUERY) query_catalog(*request);
+          else if (event.kind == VXM_EVENT_TAG) tag_catalog(*request);
           else throw Failure{VXCORE_ERR_INVALID_STATE};
         }
       } catch (const Failure &failure) { event.code = failure.code; }
@@ -887,12 +1212,24 @@ struct VxmHost {
       catch (const Json::exception &) { event.code = VXCORE_ERR_JSON_PARSE; }
       catch (const fs::filesystem_error &) { event.code = VXCORE_ERR_IO; }
       catch (...) { event.code = VXCORE_ERR_UNKNOWN; }
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active_search == event.request_id) {
+          // Cancel's accepted result and the terminal outcome linearize under
+          // the same mutex: no accepted cancellation can turn into late success.
+          if (search_cancelled.load(std::memory_order_relaxed)) event.code = VXCORE_ERR_CANCELLED;
+          active_search = 0;
+          search_cancelled.store(false, std::memory_order_relaxed);
+        }
+      }
       if (event.kind == VXM_EVENT_OPEN || event.kind == VXM_EVENT_CATALOG_OPEN) init_error = event.code;
       event.message = redacted(event.code);
       if (event.code != VXCORE_OK) {
         event.size = 0;
         event.data = nullptr;
-        if (event.kind == VXM_EVENT_CATALOG_OPEN || event.kind == VXM_EVENT_LIST) request->result->shrink(0);
+        if (event.kind == VXM_EVENT_QUERY) request->result->body.reset();
+        if (event.kind == VXM_EVENT_CATALOG_OPEN || event.kind == VXM_EVENT_LIST || event.kind == VXM_EVENT_QUERY)
+          request->result->shrink(0);
       }
       auto result = std::move(request->result);
       const auto input_cost = request->input_cost;
@@ -920,9 +1257,11 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     require(revision <= kMaxRevision);
     source_valid(data, size);
     if (kind == VXM_EVENT_WRITE) require(valid_hash(hash));
-    const bool catalog = kind == VXM_EVENT_CATALOG_OPEN || kind == VXM_EVENT_LIST;
+    const bool query = kind == VXM_EVENT_QUERY;
+    const bool catalog = kind == VXM_EVENT_CATALOG_OPEN || kind == VXM_EVENT_LIST || query;
     const bool source = kind == VXM_EVENT_OPEN || kind == VXM_EVENT_READ;
-    require((catalog || kind == VXM_EVENT_MUTATE) ? host.mode == VXM_MODE_CATALOG : host.mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
+    require((catalog || kind == VXM_EVENT_MUTATE || kind == VXM_EVENT_TAG) ? host.mode == VXM_MODE_CATALOG : host.mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
+    if (query || kind == VXM_EVENT_TAG) operation = catalog_operation(data, static_cast<size_t>(size), kind);
     auto node_value = optional_string(node);
     auto name_value = optional_string(name);
     auto destination_value = optional_string(destination);
@@ -942,7 +1281,7 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     auto request = std::make_unique<Request>();
     request->result = std::make_unique<EventStorage>();
     auto &result = *request->result;
-    if (source) result.body.reset(new uint8_t[kSource]);
+    if (source || query) result.body.reset(new uint8_t[query ? kCatalog : kSource]);
     if (size) request->input.assign(data, data + static_cast<size_t>(size));
     if (hash) request->expected_hash = hash;
     request->node = std::move(node_value);
@@ -968,7 +1307,17 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     return VXCORE_OK;
   } catch (const Failure &failure) { return failure.code; }
   catch (const std::bad_alloc &) { return VXCORE_ERR_OUT_OF_MEMORY; }
+  catch (const Json::exception &) { return VXCORE_ERR_INVALID_PARAM; }
   catch (...) { return VXCORE_ERR_UNKNOWN; }
+}
+int32_t admit_catalog_json(VxmHost *host, int32_t kind, uint64_t id,
+                           uint64_t generation, const char *json) {
+  if (!host) return VXCORE_ERR_NULL_POINTER;
+  try {
+    const auto size = bounded_length(json, kString);
+    return admit(*host, kind, id, generation, 0, nullptr,
+                 reinterpret_cast<const uint8_t *>(json), size);
+  } catch (const Failure &failure) { return failure.code; }
 }
 }  // namespace
 
@@ -1018,10 +1367,20 @@ int32_t vxm_host_catalog_mutate(VxmHost *host, uint64_t id, uint64_t generation,
                                const char *node, const char *name, const char *destination) {
   return host ? admit(*host, VXM_EVENT_MUTATE, id, generation, 0, nullptr, nullptr, 0, 0, operation, node, name, destination) : VXCORE_ERR_NULL_POINTER;
 }
+int32_t vxm_host_catalog_query(VxmHost *host, uint64_t id, uint64_t generation, const char *json) {
+  return admit_catalog_json(host, VXM_EVENT_QUERY, id, generation, json);
+}
+int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t id, uint64_t generation, const char *json) {
+  return admit_catalog_json(host, VXM_EVENT_TAG, id, generation, json);
+}
 int32_t vxm_host_cancel(VxmHost *host, uint64_t id, uint64_t generation) {
   if (!host) return VXCORE_ERR_NULL_POINTER;
   std::lock_guard<std::mutex> lock(host->mutex);
   if (generation != host->generation) return VXCORE_ERR_INVALID_STATE;
+  if (id && host->active_search == id) {
+    host->search_cancelled.store(true, std::memory_order_relaxed);
+    return VXCORE_OK;
+  }
   for (size_t i = 0; i < host->pending_size; ++i) {
     auto &request = *host->pending[(host->pending_start + i) % host->pending.size()];
     if (request.result->event.request_id == id) {
@@ -1035,6 +1394,7 @@ void vxm_host_request_close(VxmHost *host) {
   if (!host) return;
   std::lock_guard<std::mutex> lock(host->mutex);
   host->stopping = true;
+  if (host->active_search) host->search_cancelled.store(true, std::memory_order_relaxed);
   host->wake.notify_one();
 }
 VxmEvent *vxm_host_take_event(VxmHost *host) {

@@ -12,6 +12,7 @@
 #include <set>
 #include <stdexcept>
 #include <string>
+#include <thread>
 #include <vector>
 #if defined(_WIN32)
 #define NOMINMAX
@@ -19,12 +20,14 @@
 #endif
 
 #include <sqlite3.h>
+#include <nlohmann/json.hpp>
 
 #include <vxcore/vxcore.h>
 #include <vxcore/mobile/vxcore_mobile.h>
 
 namespace {
 namespace fs = std::filesystem;
+using Json = nlohmann::json;
 #define CHECK(expression) do { if (!(expression)) throw std::runtime_error("Check failed: " #expression); } while (false)
 using Event = std::unique_ptr<VxmEvent, decltype(&vxm_event_free)>;
 
@@ -146,7 +149,7 @@ struct Host {
     if (handle) vxm_host_destroy(handle);
     notifications = nullptr;
   }
-  Event next() {
+  Event next(std::chrono::seconds timeout = std::chrono::seconds(30)) {
     std::unique_lock<std::mutex> lock(signals.mutex);
     for (;;) {
       if (auto *event = vxm_host_take_event(handle)) {
@@ -154,7 +157,7 @@ struct Host {
         return Event(event, vxm_event_free);
       }
       const auto before = signals.count;
-      CHECK(signals.changed.wait_for(lock, std::chrono::seconds(30), [&] { return signals.count != before; }));
+      CHECK(signals.changed.wait_for(lock, timeout, [&] { return signals.count != before; }));
     }
   }
   int32_t write(uint64_t id, uint64_t revision, const std::string &hash, const std::string &source) {
@@ -163,6 +166,14 @@ struct Host {
   int32_t mutate(uint64_t id, int32_t operation, const std::string &node,
                  const char *name = nullptr, const char *destination = nullptr) {
     return vxm_host_catalog_mutate(handle, id, generation, operation, node.c_str(), name, destination);
+  }
+  int32_t query(uint64_t id, const Json &query) {
+    const auto json = query.dump();
+    return vxm_host_catalog_query(handle, id, generation, json.c_str());
+  }
+  int32_t tag(uint64_t id, const Json &mutation) {
+    const auto json = mutation.dump();
+    return vxm_host_catalog_tag(handle, id, generation, json.c_str());
   }
   void close() {
     vxm_host_request_close(handle);
@@ -616,6 +627,246 @@ void catalog_resolves_stale_cache_after_metadata_store_failure() {
   }
 }
 
+// Fixture-only portable metadata edits model existing desktop notebooks without
+// creating thousands of unrelated mutation terminals. Host never writes directly.
+fs::path root_metadata(const Fixture &fixture) {
+  return fs::u8path(fixture.notebook) / "vx_notebook" / "contents" / "vx.json";
+}
+void seed_search_files(Fixture &fixture, size_t count, const std::string &body) {
+  fixture.seed(body);
+  const auto metadata = root_metadata(fixture);
+  auto config = Json::parse(disk(metadata));
+  const auto prototype = config.at("files").front();
+  config["files"] = Json::array();
+  for (size_t i = 0; i < count; ++i) {
+    auto file = prototype;
+    auto suffix = std::to_string(i + 1);
+    suffix.insert(0, 12 - suffix.size(), '0');
+    file["id"] = "00000000-0000-4000-8000-" + suffix;
+    const auto name = "note-" + std::to_string(i) + ".md";
+    file["name"] = name;
+    file["tags"] = Json::array({"bound"});
+    config["files"].push_back(std::move(file));
+    external_write(fs::u8path(fixture.notebook) / name, body);
+  }
+  fs::remove(fixture.note());
+  external_write(metadata, config.dump());
+}
+
+void catalog_query_admission_and_lifecycle() {
+  Fixture fixture;
+  fixture.seed("needle");
+  Host host(fixture, VXM_MODE_CATALOG, true);
+  host.signals.wait_entered();
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK);
+  opened.reset();
+  const Json search = {{"op", "search"}, {"text", "needle"}, {"caseSensitive", false}};
+  CHECK(vxm_host_catalog_query(host.handle, 2, host.generation, nullptr) == VXCORE_ERR_NULL_POINTER);
+  CHECK(host.query(2, {{"op", "search"}, {"text", ""}, {"caseSensitive", false}}) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(host.query(2, {{"op", "search"}, {"text", std::string(16385, 'x')}, {"caseSensitive", false}}) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(host.query(2, {{"op", "search"}, {"text", std::string("a\0b", 3)}, {"caseSensitive", false}}) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(host.tag(2, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array({"same", "same"})}}) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(host.query(2, search) == VXCORE_OK);
+  CHECK(host.query(3, search) == VXCORE_ERR_OUT_OF_MEMORY);
+  CHECK(vxm_host_cancel(host.handle, 2, host.generation + 1) == VXCORE_ERR_INVALID_STATE);
+  CHECK(vxm_host_cancel(host.handle, 2, host.generation) == VXCORE_OK);
+  host.signals.release();
+  auto cancelled = host.next();
+  CHECK(cancelled->kind == VXM_EVENT_QUERY && cancelled->request_id == 2 && cancelled->code == VXCORE_ERR_CANCELLED);
+  CHECK(cancelled->size == 0 && cancelled->data == nullptr);
+  CHECK(host.query(3, search) == VXCORE_OK);
+  auto retained = host.next();
+  CHECK(retained->code == VXCORE_OK && retained->size <= VXM_MAX_CATALOG_BYTES);
+  CHECK(Json::parse(text(retained)).at("matches").size() == 1);
+  CHECK(vxm_host_cancel(host.handle, 3, host.generation) == VXCORE_ERR_INVALID_STATE);
+  // The actual 8 MiB allocation remains charged, not merely its small JSON size.
+  CHECK(host.query(4, search) == VXCORE_ERR_OUT_OF_MEMORY);
+  host.close();
+  CHECK(Json::parse(text(retained)).at("notebookId") == fixture.notebook_id);
+  retained.reset();
+}
+
+void catalog_search_snippets_and_skips() {
+  Fixture fixture;
+  const std::string unicode = std::string(511, 'a') + u8"😀 needle needle\nneedle";
+  fixture.seed(unicode);
+  Host host(fixture, VXM_MODE_CATALOG);
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK);
+  CHECK(host.query(2, {{"op", "search"}, {"text", "needle"}, {"caseSensitive", false}}) == VXCORE_OK);
+  auto result = host.next();
+  CHECK(result->code == VXCORE_OK);
+  auto decoded = Json::parse(text(result));
+  CHECK(decoded.at("matches").size() == 1 && !decoded.at("limited").get<bool>());
+  CHECK(decoded.at("matches").front().at("snippet") == std::string(511, 'a'));
+  CHECK(decoded.at("matches").front().at("id") == fixture.node_id);
+  CHECK(decoded.at("matches").front().at("path") == "Welcome.md");
+  CHECK(decoded.at("matches").front().at("line") == 1);
+  result.reset();
+  // A maximally escaped legal 4 MiB line exceeds the ordinary 8 MiB metadata
+  // parse ceiling, but is still one bounded callback and one <=512-byte snippet.
+  external_write(fixture.note(), "needle" + std::string(VXM_MAX_SOURCE_BYTES - 6, '\1'));
+  CHECK(host.query(3, {{"op", "search"}, {"text", "needle"}, {"caseSensitive", true}}) == VXCORE_OK);
+  result = host.next();
+  CHECK(result->code == VXCORE_OK);
+  decoded = Json::parse(text(result));
+  CHECK(decoded.at("matches").size() == 1);
+  CHECK(decoded.at("matches").front().at("snippet").get<std::string>().size() == 512);
+  result.reset();
+  uint64_t id = 4;
+  for (const auto &unsupported : {std::string("bad\0needle", 10), std::string("\xffneedle", 7),
+                                  std::string(VXM_MAX_SOURCE_BYTES + 1, 'a')}) {
+    external_write(fixture.note(), unsupported);
+    CHECK(host.query(id++, {{"op", "search"}, {"text", "needle"}, {"caseSensitive", false}}) == VXCORE_OK);
+    result = host.next();
+    CHECK(result->code == VXCORE_OK);
+    decoded = Json::parse(text(result));
+    CHECK(decoded.at("matches").empty() && decoded.at("skipped") == 1);
+    result.reset();
+  }
+  fs::remove(fixture.note());
+  CHECK(host.query(7, {{"op", "search"}, {"text", "needle"}, {"caseSensitive", false}}) == VXCORE_OK);
+  result = host.next();
+  CHECK(result->code == VXCORE_OK);
+  decoded = Json::parse(text(result));
+  CHECK(decoded.at("matches").empty() && decoded.at("skipped") == 1);
+  host.close();
+}
+
+void catalog_search_result_limits_and_cancellation() {
+  Fixture fixture;
+  seed_search_files(fixture, 10001, "needle" + std::string(506, '\1'));
+  Host host(fixture, VXM_MODE_CATALOG);
+  CHECK(host.next(std::chrono::seconds(120))->code == VXCORE_OK);
+  const Json search = {{"op", "search"}, {"text", "needle"}, {"caseSensitive", false}};
+  CHECK(host.query(2, search) == VXCORE_OK);
+  auto result = host.next(std::chrono::seconds(120));
+  CHECK(result->code == VXCORE_OK && result->size <= VXM_MAX_CATALOG_BYTES);
+  auto decoded = Json::parse(text(result));
+  CHECK(decoded.at("limited").get<bool>());
+  CHECK(decoded.at("matches").size() > 0 && decoded.at("matches").size() < 10000);
+  CHECK(decoded.at("skipped") == 0);
+  result.reset();
+  CHECK(host.query(3, {{"op", "search"}, {"text", ""}, {"tag", "bound"}, {"caseSensitive", false}}) == VXCORE_OK);
+  result = host.next(std::chrono::seconds(120));
+  CHECK(result->code == VXCORE_OK && result->size <= VXM_MAX_CATALOG_BYTES);
+  decoded = Json::parse(text(result));
+  CHECK(decoded.at("limited").get<bool>() && decoded.at("matches").size() == 10000);
+  CHECK(decoded.at("matches").front().at("line") == 0);
+  CHECK(decoded.at("matches").front().at("snippet") == "");
+  result.reset();
+  // Exercise the pending/active cancellation race against real multi-file work.
+  // Every accepted cancel must have exactly one cancelled, bodyless terminal.
+  for (uint64_t id = 4; id < 12; ++id) {
+    CHECK(host.query(id, search) == VXCORE_OK);
+    std::this_thread::yield();
+    const auto cancelled = vxm_host_cancel(host.handle, id, host.generation);
+    result = host.next(std::chrono::seconds(120));
+    CHECK(result->request_id == id && result->kind == VXM_EVENT_QUERY);
+    CHECK(cancelled == VXCORE_OK ? result->code == VXCORE_ERR_CANCELLED :
+          cancelled == VXCORE_ERR_INVALID_STATE && result->code == VXCORE_OK);
+    if (cancelled == VXCORE_OK) CHECK(result->size == 0 && result->data == nullptr);
+    result.reset();
+  }
+  CHECK(host.query(12, search) == VXCORE_OK);
+  std::this_thread::yield();
+  vxm_host_request_close(host.handle);
+  result = host.next(std::chrono::seconds(120));
+  CHECK(result->kind == VXM_EVENT_QUERY && result->request_id == 12);
+  CHECK(result->code == VXCORE_ERR_CANCELLED || result->code == VXCORE_OK);
+  host.close(); // QUERY must precede the dedicated CLOSED terminal.
+}
+
+void catalog_tags_preserve_orphans_and_mutation_outcome() {
+  Fixture fixture;
+  fixture.seed("body is unchanged");
+  auto config = Json::parse(disk(root_metadata(fixture)));
+  config["files"][0]["tags"] = Json::array({"orphan"});
+  config["files"][0]["metadata"]["custom"] = "retained";
+  external_write(root_metadata(fixture), config.dump());
+  {
+    Host host(fixture, VXM_MODE_CATALOG);
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(host.tag(2, {{"op", "createTag"}, {"name", "defined"}}) == VXCORE_OK);
+    auto created = host.next();
+    CHECK(created->kind == VXM_EVENT_TAG && created->code == VXCORE_OK && created->size == 0);
+    CHECK(host.tag(3, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array({"orphan", "defined"})}}) == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(host.query(4, {{"op", "tags"}, {"nodeId", fixture.node_id}}) == VXCORE_OK);
+    auto tags = host.next();
+    CHECK(tags->code == VXCORE_OK);
+    const auto decoded = Json::parse(text(tags));
+    CHECK(decoded.at("assigned") == Json::array({"orphan", "defined"}));
+    CHECK(decoded.at("tags") == Json::array({Json{{"name", "defined"}, {"parent", ""}}}));
+    tags.reset();
+    host.signals.wait_completed(4);
+    {
+      std::lock_guard<std::mutex> lock(host.signals.mutex);
+      host.signals.hold = true;
+      host.signals.entered = false;
+    }
+    CHECK(host.tag(5, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array({"orphan"})}}) == VXCORE_OK);
+    host.signals.wait_entered();
+    CHECK(vxm_host_cancel(host.handle, 5, host.generation) == VXCORE_ERR_INVALID_STATE);
+    vxm_host_request_close(host.handle);
+    CHECK(host.next()->code == VXCORE_OK);
+    host.signals.release();
+    host.close();
+  }
+  CHECK(disk(fixture.note()) == "body is unchanged");
+  config = Json::parse(disk(root_metadata(fixture)));
+  CHECK(config.at("files").front().at("id") == fixture.node_id);
+  CHECK(config.at("files").front().at("metadata").at("custom") == "retained");
+  {
+    Host host(fixture, VXM_MODE_CATALOG);
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(host.query(2, {{"op", "tags"}, {"nodeId", fixture.node_id}}) == VXCORE_OK);
+    auto tags = host.next();
+    CHECK(tags->code == VXCORE_OK && Json::parse(text(tags)).at("assigned") == Json::array({"orphan"}));
+    tags.reset();
+    CHECK(host.tag(3, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array({"new-unknown"})}}) == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_ERR_INVALID_PARAM);
+    CHECK(host.tag(4, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array()}}) == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(host.tag(5, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array({"orphan"})}}) == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_ERR_INVALID_PARAM);
+    fs::remove(fixture.note());
+    CHECK(host.tag(6, {{"op", "setTags"}, {"nodeId", fixture.node_id}, {"tags", Json::array({"defined"})}}) == VXCORE_OK);
+    CHECK(host.next()->code != VXCORE_OK);
+    CHECK(!fs::exists(fixture.note()));
+    host.close();
+  }
+}
+
+void catalog_tags_are_complete_or_error() {
+  for (const bool definitions : {false, true}) {
+    Fixture fixture;
+    fixture.seed("body");
+    const auto path = definitions ? fs::u8path(fixture.notebook) / "vx_notebook" / "config.json" : root_metadata(fixture);
+    auto config = Json::parse(disk(path));
+    Json tags = Json::array();
+    for (size_t i = 0; i < 10001; ++i) {
+      const auto name = "tag-" + std::to_string(i);
+      if (definitions) tags.push_back(Json{{"name", name}, {"parent", ""}});
+      else tags.push_back(name);
+    }
+    if (definitions) config["tags"] = std::move(tags);
+    else config["files"][0]["tags"] = std::move(tags);
+    external_write(path, config.dump());
+    Host host(fixture, VXM_MODE_CATALOG);
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(host.query(2, {{"op", "tags"}, {"nodeId", fixture.node_id}}) == VXCORE_OK);
+    auto result = host.next();
+    CHECK(result->code != VXCORE_OK && result->size == 0 && result->data == nullptr);
+    // Failure releases its body allocation; holding the terminal doesn't block
+    // a separate mutation outcome or falsely expose a truncated assignment set.
+    CHECK(host.tag(3, {{"op", "createTag"}, {"name", "after-query-error"}}) == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_OK);
+    host.close();
+  }
+}
+
 }  // namespace
 
 int main() {
@@ -632,6 +883,11 @@ int main() {
     catalog_completed_output_accounting();
     catalog_reports_nonfatal_asset_move_failure();
     catalog_resolves_stale_cache_after_metadata_store_failure();
+    catalog_query_admission_and_lifecycle();
+    catalog_search_snippets_and_skips();
+    catalog_search_result_limits_and_cancellation();
+    catalog_tags_preserve_orphans_and_mutation_outcome();
+    catalog_tags_are_complete_or_error();
     std::cout << "Native host real-storage tests passed\n";
     return 0;
   } catch (const std::exception &error) {

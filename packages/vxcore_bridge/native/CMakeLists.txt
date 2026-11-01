@@ -104,7 +104,7 @@ endif()
 if(VXM_BUILD_TESTS)
   enable_testing()
   add_executable(native_host_test ../test/native_host_test.cpp)
-  target_link_libraries(native_host_test PRIVATE vnote_host vxcore sqlite3)
+  target_link_libraries(native_host_test PRIVATE vnote_host vxcore sqlite3 nlohmann_json)
   target_include_directories(native_host_test PRIVATE "${VXM_CORE_ROOT}/include")
   set_target_properties(native_host_test PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/artifacts"

@@ -24,12 +24,14 @@ class NotebookMutationResult {
     this.nodeId,
     this.error,
     this.refreshError,
+    this.tags,
   });
 
   final bool applied;
   final String? nodeId;
   final String? error;
   final String? refreshError;
+  final CoreTags? tags;
 }
 
 @immutable
@@ -42,6 +44,10 @@ class NotebookWorkspaceState {
     this.closed = false,
     this.error,
     this.mutation,
+    this.search,
+    this.searching = false,
+    this.searchCancelled = false,
+    this.searchError,
   });
 
   final CoreDirectory? directory;
@@ -51,6 +57,10 @@ class NotebookWorkspaceState {
   final bool closed;
   final String? error;
   final NotebookMutationResult? mutation;
+  final CoreSearchResult? search;
+  final bool searching;
+  final bool searchCancelled;
+  final String? searchError;
 
   bool get canBrowse => !busy && !closed && session == null;
   bool get canMutate => canBrowse && directory != null && !stale;
@@ -79,6 +89,13 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   String? _folderId;
   String? _error;
   NotebookMutationResult? _mutation;
+  CoreSearchResult? _search;
+  CoreTags? _tags;
+  CoreEntry? _tagEntry;
+  int _searchGeneration = 0;
+  bool _searching = false;
+  bool _searchCancelled = false;
+  String? _searchError;
   bool _stale = true;
   bool _shuttingDown = false;
   bool _disposed = false;
@@ -128,6 +145,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   Future<bool> refresh() async {
     if (_session != null || !_admit()) return false;
+    _invalidateSnapshots();
     try {
       await _openBrowser();
       return !_shuttingDown;
@@ -141,6 +159,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   Future<bool> navigate(String? folderId) async {
     if (_session != null || !_admit()) return false;
+    _invalidateSnapshots();
     try {
       // A failed return-to-folder can still recover to root without forgetting
       // the expected notebook identity or manufacturing a replacement notebook.
@@ -154,6 +173,155 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     } on Object catch (error) {
       _browserError(error);
       return false;
+    } finally {
+      _retire();
+    }
+  }
+
+  Future<bool> search(
+    String text, {
+    String? tag,
+    bool caseSensitive = false,
+  }) async {
+    if (!value.canMutate || _catalog == null || !_admit()) return false;
+    _invalidateSearch();
+    final generation = _searchGeneration;
+    _searching = true;
+    _publish();
+    try {
+      if (text.isEmpty && (tag == null || tag.isEmpty)) {
+        throw StateError('Enter search text or choose a tag.');
+      }
+      final result = await _catalog!.search(
+        text,
+        tag: tag,
+        caseSensitive: caseSensitive,
+      );
+      if (_shuttingDown || generation != _searchGeneration) return false;
+      _checkNotebookIdentity(result.notebookId);
+      _search = result;
+      return true;
+    } on Object catch (error) {
+      if (!_shuttingDown && generation == _searchGeneration) {
+        _searchError = describeError(error);
+      }
+      return false;
+    } finally {
+      _searching = false;
+      _retire();
+    }
+  }
+
+  /// Query edits invalidate tokens immediately, even while native work drains.
+  void clearSearch() {
+    _invalidateSearch();
+    _publish();
+  }
+
+  void cancelSearch() {
+    if (!_searching || _searchCancelled) return;
+    _invalidateSearch();
+    _searchCancelled = true;
+    _publish();
+  }
+
+  void _invalidateSearch() {
+    if (_searching) _catalog?.cancelSearch();
+    _searchGeneration++;
+    _search = null;
+    _searchError = null;
+    _searchCancelled = false;
+  }
+
+  void _invalidateSnapshots() {
+    _invalidateSearch();
+    _tags = null;
+    _tagEntry = null;
+    _publish();
+  }
+
+  Future<CoreTags> loadTags([CoreEntry? entry]) async {
+    if (!value.canMutate ||
+        _catalog == null ||
+        (entry != null && (entry.isFolder || !_currentEntry(entry))) ||
+        !_admit()) {
+      throw StateError('Refresh the notebook before loading tags.');
+    }
+    _tags = null;
+    _tagEntry = null;
+    try {
+      final result = await _catalog!.tags(entry?.id);
+      if (_shuttingDown) throw StateError('The notebook is closing.');
+      _checkNotebookIdentity(result.notebookId);
+      _tags = result;
+      _tagEntry = entry;
+      return result;
+    } finally {
+      _retire();
+    }
+  }
+
+  Future<NotebookMutationResult?> createTag(
+    CoreEntry entry,
+    CoreTags snapshot,
+    String name,
+  ) => _mutateTags(entry, snapshot, (catalog) => catalog.createTag(name));
+
+  Future<NotebookMutationResult?> setTags(
+    CoreEntry entry,
+    CoreTags snapshot,
+    List<String> assigned,
+  ) => _mutateTags(
+    entry,
+    snapshot,
+    (catalog) => catalog.setTags(entry.id, List<String>.of(assigned)),
+  );
+
+  Future<NotebookMutationResult?> _mutateTags(
+    CoreEntry entry,
+    CoreTags snapshot,
+    Future<void> Function(CatalogCore) operation,
+  ) async {
+    if (entry.isFolder ||
+        !_currentEntry(entry) ||
+        !identical(_tagEntry, entry) ||
+        !identical(_tags, snapshot) ||
+        snapshot.notebookId != _notebookId ||
+        !_admit()) {
+      return null;
+    }
+    _invalidateSnapshots();
+    var applied = false;
+    String? operationError;
+    String? refreshError;
+    CoreTags? refreshed;
+    try {
+      try {
+        await operation(_catalog!);
+        applied = true;
+      } on Object catch (error) {
+        operationError = describeError(error);
+      }
+      // Do not cancel writes. Refresh complete assignments even after an error
+      // or during shutdown, which joins this entire admitted operation.
+      try {
+        final result = await _catalog!.tags(entry.id);
+        _checkNotebookIdentity(result.notebookId);
+        refreshed = result;
+        if (!_shuttingDown) {
+          _tags = result;
+          _tagEntry = entry;
+        }
+      } on Object catch (error) {
+        refreshError = describeError(error);
+      }
+      return NotebookMutationResult(
+        applied: applied,
+        nodeId: entry.id,
+        error: operationError,
+        refreshError: refreshError,
+        tags: refreshed,
+      );
     } finally {
       _retire();
     }
@@ -175,14 +343,30 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   }
 
   Future<bool> openNote(CoreEntry entry) async {
-    if (entry.isFolder || !_currentEntry(entry) || !_admit()) return false;
+    if (entry.isFolder || !_currentEntry(entry)) return false;
+    return _openNode(entry.id);
+  }
+
+  Future<bool> openSearchHit(CoreSearchResult result, CoreSearchHit hit) async {
+    if (!value.canMutate ||
+        !identical(_search, result) ||
+        result.notebookId != _notebookId ||
+        !result.matches.any((current) => identical(current, hit))) {
+      return false;
+    }
+    return _openNode(hit.id);
+  }
+
+  Future<bool> _openNode(String nodeId) async {
+    if (_catalog == null || !_admit()) return false;
+    _invalidateSnapshots();
     try {
       // Never relinquish the owner reference until its asynchronous join ends.
       await _catalog!.close();
       _catalog = null;
       if (_shuttingDown) return false;
       final session = NotebookSession(
-        openCore: () => _openNote(_paths!, _notebookId!, entry.id),
+        openCore: () => _openNote(_paths!, _notebookId!, nodeId),
       );
       _session = session;
       await session.initialize();
@@ -280,6 +464,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
         !_admit()) {
       return null;
     }
+    _invalidateSnapshots();
     final directory = _directory!;
     var applied = false;
     String? nodeId;
@@ -318,8 +503,11 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       _catalog != null &&
       _directory!.entries.any((current) => identical(current, entry));
 
-  void _checkIdentity(CoreDirectory directory) {
-    if (directory.notebookId != _notebookId) {
+  void _checkIdentity(CoreDirectory directory) =>
+      _checkNotebookIdentity(directory.notebookId);
+
+  void _checkNotebookIdentity(String notebookId) {
+    if (notebookId != _notebookId) {
       throw StateError(
         'The managed notebook identity changed. Refresh was refused.',
       );
@@ -364,6 +552,10 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       stale: _stale,
       error: _error,
       mutation: _mutation,
+      search: _search,
+      searching: _searching,
+      searchCancelled: _searchCancelled,
+      searchError: _searchError,
     );
   }
 
@@ -371,6 +563,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   Future<void> _shutdown() async {
     _shuttingDown = true;
+    _invalidateSnapshots();
     if (!_disposed) {
       value = NotebookWorkspaceState(
         directory: _directory,

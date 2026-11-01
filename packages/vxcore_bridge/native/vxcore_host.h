@@ -30,6 +30,8 @@ enum {
   VXM_EVENT_CATALOG_OPEN = 5,
   VXM_EVENT_LIST = 6,
   VXM_EVENT_MUTATE = 7,
+  VXM_EVENT_QUERY = 8,
+  VXM_EVENT_TAG = 9,
   VXM_MODE_NOTE = 1,
   VXM_MODE_CATALOG = 2,
   VXM_EDITOR_MARKDOWN = 1,
@@ -103,12 +105,25 @@ VXM_API int32_t vxm_host_catalog_mutate(VxmHost *host, uint64_t request_id,
                                       uint64_t generation, int32_t operation,
                                       const char *node_id, const char *name,
                                       const char *destination_folder_id);
+// Catalog-only bounded JSON requests (at most 16 KiB, UTF-8, no embedded NUL).
+// QUERY: {op:"search",text,tag?,caseSensitive} or {op:"tags",nodeId?}.
+// Search returns {notebookId,matches:[{id,path,line,snippet}],limited,skipped}.
+// Tags returns complete {notebookId,tags:[{name,parent}],assigned:[string]}.
+// TAG: {op:"createTag",name} or {op:"setTags",nodeId,tags:[string]}.
+// TAG success describes only the mutation; refresh separately even after errors.
+// QUERY owns a preallocated 8 MiB body until event release, including taken events.
+VXM_API int32_t vxm_host_catalog_query(VxmHost *host, uint64_t request_id,
+                                     uint64_t generation, const char *json);
+VXM_API int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t request_id,
+                                   uint64_t generation, const char *json);
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
-// Cancel only affects pending requests; an active operation returns its real
-// outcome. INVALID_STATE means no pending matching request (not false cancel).
+// Cancel affects pending requests and the matching active search, checked between
+// files/nodes. Active writes (including tags) are never cancelled. INVALID_STATE
+// means no cancellable matching request. One bounded file may delay cancellation.
 VXM_API int32_t vxm_host_cancel(VxmHost *host, uint64_t request_id, uint64_t generation);
-// Idempotent; stops admission, cancels pending work, finishes active work, then
-// emits the separately reserved CLOSED terminal (request 0) after owner teardown.
+// Idempotent; stops admission, cancels pending work and the active search, finishes
+// active mutations, then emits the separately reserved CLOSED terminal (request 0)
+// after owner teardown. Admitted terminals always precede CLOSED.
 VXM_API void vxm_host_request_close(VxmHost *host);
 VXM_API VxmEvent *vxm_host_take_event(VxmHost *host);
 VXM_API void vxm_event_free(VxmEvent *event);

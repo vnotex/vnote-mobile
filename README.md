@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app browses the managed **Personal** bundled notebook through the real native core. Create Markdown/plain-text notes and folders, rename/move/delete nodes, then open a selected note by its stable ID. Existing notebooks and Welcome.md are preserved; a fresh installation starts with an empty notebook. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning to the browser requires Write/Discard/Cancel, and catalog/editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
+The app browses the managed **Personal** bundled notebook through the real native core. Create Markdown/plain-text notes and folders, rename/move/delete nodes, then open a selected note by its stable ID. Search saved notebook text, filter by tag, and create/assign tags from note actions. Existing notebooks and Welcome.md are preserved; a fresh installation starts with an empty notebook. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning to the browser requires Write/Discard/Cancel, and catalog/editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
 
 ## Development
 
@@ -64,9 +64,16 @@ that would orphan another indexed linked note are refused. A core mutation can
 partially apply on IO failure; the browser refreshes and never presents failure as
 proof of rollback. Markdown move preflight uses the already-pinned cmark parser.
 
+Search uses the core's simple backend, with literal text and an optional case-
+sensitive match and tag filter. Each matching note shows its first matching line;
+opening resolves the current node ID rather than trusting the displayed path.
+Only saved, supported Markdown/plain-text notes are searched; excluded notes and
+result limits are disclosed. Tags are stored by core APIs in portable metadata;
+existing undefined assignments remain visible and are preserved unless removed.
+Tag loading is complete-or-error. Tag-tree deletion/reparenting is not exposed.
+
 This slice covers the current managed notebook. Multi-notebook management,
-search/tag UI, managed import/export and attachment editing remain planned offline
-work; preview, autosave/recovery and sync remain later gates. No iOS or physical-
+managed import/export and attachment editing remain planned offline work; preview, autosave/recovery and sync remain later gates. No iOS or physical-
 device completion follows from Android/host verification.
 
 ## License

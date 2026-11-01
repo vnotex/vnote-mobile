@@ -11,4 +11,8 @@ export 'src/core_notebook.dart'
         CoreNote,
         CoreNotebook,
         CoreWriteResult,
+        CoreSearchHit,
+        CoreSearchResult,
+        CoreTag,
+        CoreTags,
         NotebookCore;

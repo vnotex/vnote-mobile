@@ -125,6 +125,196 @@ void main() {
   tearDown(() => fixture.dispose());
 
   test(
+    'saved nested content and tag search resolve moved hits by stable ID',
+    () async {
+      var catalog = await fixture.catalog();
+      final root = catalog.initialDirectory.folderId;
+      final folder = await catalog.createFolder(root, '研究');
+      final first = await catalog.createNote(folder, 'first.md');
+      final second = await catalog.createNote(root, 'second.txt');
+      await catalog.createTag('研究 tag');
+      await catalog.setTags(first, ['研究 tag']);
+      await catalog.close();
+      const source = 'heading\r\n😀 literal [Needle] 日本語\r\n[Needle] again\r\n';
+      await fixture.seed(first, source);
+      await fixture.seed(second, 'other [needle] note');
+      catalog = await fixture.catalog();
+      final result = await catalog.search('[Needle]');
+      expect(result.notebookId, fixture.notebookId);
+      expect(result.matches.map((hit) => hit.id).toSet(), {first, second});
+      expect(result.limited, isFalse);
+      expect(result.skipped, 0);
+      final hit = result.matches.singleWhere((hit) => hit.id == first);
+      expect(hit.path, '研究/first.md');
+      expect(hit.line, 2);
+      expect(hit.snippet, contains('😀 literal [Needle] 日本語'));
+      expect(
+        (await catalog.search(
+          '[Needle]',
+          caseSensitive: true,
+        )).matches.map((hit) => hit.id),
+        [first],
+      );
+      expect(
+        (await catalog.search(
+          '[Needle]',
+          tag: '研究 tag',
+        )).matches.map((hit) => hit.id),
+        [first],
+      );
+      final tagged = await catalog.search('', tag: '研究 tag');
+      expect(tagged.matches.single.id, first);
+      expect(tagged.matches.single.line, 0);
+      expect(tagged.matches.single.snippet, '');
+      expect((await catalog.search('absent')).matches, isEmpty);
+      await catalog.move(first, root);
+      await catalog.rename(first, 'renamed.md');
+      await catalog.close();
+      final selected = await fixture.note(hit.id);
+      final note = await selected.read();
+      expect(note.path, 'renamed.md');
+      expect(note.text, source);
+      await selected.close();
+      catalog = await fixture.catalog();
+      expect((await catalog.tags(first)).assigned, ['研究 tag']);
+      await catalog.delete(first);
+      await catalog.close();
+      await expectLater(fixture.note(hit.id), throwsA(_failure));
+    },
+  );
+
+  test(
+    'tag replacement preserves orphan names and desktop data across reopen',
+    () async {
+      final desktop = await fixture.desktop();
+      final id = desktop['noteId'] as String;
+      final metadataPath = 'vx_notebook/contents/研究/vx.json';
+      final config = await fixture.json(metadataPath);
+      final entry = (config['files'] as List).single as Map<String, dynamic>;
+      entry['tags'] = ['desktop-tag', 'orphan'];
+      await fixture.putJson(metadataPath, config);
+      final body = await fixture
+          .file(desktop['notePath'] as String)
+          .readAsBytes();
+      final asset = await fixture
+          .file(desktop['assetPath'] as String)
+          .readAsBytes();
+      var catalog = await fixture.catalog();
+      final original = await catalog.tags(id);
+      expect(original.assigned, ['desktop-tag', 'orphan']);
+      expect(original.tags.map((tag) => tag.name), contains('desktop-tag'));
+      expect(original.tags.map((tag) => tag.name), isNot(contains('orphan')));
+      await catalog.createTag('mobile 😀');
+      await catalog.setTags(id, ['orphan', 'mobile 😀']);
+      await expectLater(
+        catalog.setTags(id, ['orphan', 'never-defined']),
+        throwsA(_failure),
+      );
+      expect((await catalog.tags(id)).assigned, ['orphan', 'mobile 😀']);
+      await catalog.close();
+      final saved = await fixture.record('研究', id);
+      expect(saved['id'], id);
+      expect(saved['tags'], ['orphan', 'mobile 😀']);
+      expect(saved['metadata'], entry['metadata']);
+      expect(saved['attachments'], entry['attachments']);
+      expect(
+        await fixture.file(desktop['notePath'] as String).readAsBytes(),
+        body,
+      );
+      expect(
+        await fixture.file(desktop['assetPath'] as String).readAsBytes(),
+        asset,
+      );
+      catalog = await fixture.catalog();
+      expect((await catalog.search('', tag: 'orphan')).matches.single.id, id);
+      await catalog.setTags(id, ['mobile 😀']);
+      await expectLater(
+        catalog.setTags(id, ['orphan', 'mobile 😀']),
+        throwsA(_failure),
+      );
+      expect((await catalog.tags(id)).assigned, ['mobile 😀']);
+      expect(
+        (await catalog.tags()).tags.map((tag) => tag.name),
+        isNot(contains('orphan')),
+      );
+    },
+  );
+
+  test(
+    'dense single-line search returns one bounded Unicode-safe snippet',
+    () async {
+      var catalog = await fixture.catalog();
+      final id = await catalog.createNote(
+        catalog.initialDirectory.folderId,
+        'dense.md',
+      );
+      await catalog.close();
+      await fixture.seed(id, '😀a' * 200000);
+      catalog = await fixture.catalog();
+      final result = await catalog.search('a');
+      expect(result.matches.single.id, id);
+      expect(result.matches.single.line, 1);
+      expect(
+        utf8.encode(result.matches.single.snippet).length,
+        lessThanOrEqualTo(512),
+      );
+      expect(result.matches.single.snippet, startsWith('😀a'));
+      expect(result.matches.single.snippet.contains('\ufffd'), isFalse);
+      expect(result.limited, isFalse);
+    },
+  );
+
+  test(
+    'search reports missing encrypted unsupported and oversized candidates',
+    () async {
+      final desktop = await fixture.desktop();
+      final config = await fixture.json('vx_notebook/contents/研究/vx.json');
+      final entry = (config['files'] as List).single as Map<String, dynamic>;
+      (entry['metadata'] as Map<String, dynamic>)['encrypted'] = true;
+      await fixture.putJson('vx_notebook/contents/研究/vx.json', config);
+      var catalog = await fixture.catalog();
+      final root = catalog.initialDirectory.folderId;
+      await catalog.createNote(root, 'large.md');
+      await catalog.createNote(root, 'missing.md');
+      await catalog.close();
+      await fixture.file('large.md').writeAsString('x' * (4 * 1024 * 1024 + 1));
+      await fixture.file('missing.md').delete();
+      catalog = await fixture.catalog();
+      final result = await catalog.search('literal');
+      expect(result.matches.map((hit) => hit.id), [desktop['textId']]);
+      expect(result.skipped, 4);
+      expect(result.limited, isFalse);
+    },
+  );
+
+  test(
+    'query mode and input rejection do not change existing assignments',
+    () async {
+      final catalog = await fixture.catalog();
+      final id = await catalog.createNote(
+        catalog.initialDirectory.folderId,
+        'keep.md',
+      );
+      await catalog.createTag('keep');
+      await catalog.setTags(id, ['keep']);
+      await expectLater(catalog.search(''), throwsA(_failure));
+      await expectLater(catalog.search('x' * 16385), throwsA(_failure));
+      await expectLater(catalog.createTag('bad\u0000tag'), throwsA(_failure));
+      await expectLater(
+        catalog.setTags(id, ['keep', 'keep']),
+        throwsA(_failure),
+      );
+      expect((await catalog.tags(id)).assigned, ['keep']);
+      await catalog.close();
+      final editor = await fixture.note(id);
+      await expectLater(editor.search('keep'), throwsA(_code(10)));
+      await expectLater(editor.tags(id), throwsA(_code(10)));
+      await expectLater(editor.setTags(id, []), throwsA(_code(10)));
+      expect((await editor.read()).text, '');
+    },
+  );
+
+  test(
     'empty startup and nested Unicode CRUD preserve stable identities',
     () async {
       final catalog = await fixture.catalog();

@@ -60,6 +60,36 @@ external int vxm_host_catalog_mutate(
 
 @ffi.Native<
   ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_catalog_query(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> json,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_catalog_tag(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> json,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
     ffi.Pointer<VxmOpenOptions>,
     VxmNotify,
     ffi.Int64,
@@ -136,7 +166,11 @@ const int VXM_EVENT_MUTATE = 7;
 
 const int VXM_EVENT_OPEN = 1;
 
+const int VXM_EVENT_QUERY = 8;
+
 const int VXM_EVENT_READ = 2;
+
+const int VXM_EVENT_TAG = 9;
 
 const int VXM_EVENT_WRITE = 3;
 

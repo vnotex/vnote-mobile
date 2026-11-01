@@ -57,6 +57,50 @@ final class CoreDirectory {
   final List<CoreEntry> entries;
 }
 
+final class CoreSearchHit {
+  const CoreSearchHit({
+    required this.id,
+    required this.path,
+    required this.line,
+    required this.snippet,
+  });
+  final String id;
+  final String path;
+  final int line;
+  final String snippet;
+}
+
+final class CoreSearchResult {
+  CoreSearchResult({
+    required this.notebookId,
+    required List<CoreSearchHit> matches,
+    required this.limited,
+    required this.skipped,
+  }) : matches = List.unmodifiable(matches);
+  final String notebookId;
+  final List<CoreSearchHit> matches;
+  final bool limited;
+  final int skipped;
+}
+
+final class CoreTag {
+  const CoreTag({required this.name, required this.parent});
+  final String name;
+  final String parent;
+}
+
+final class CoreTags {
+  CoreTags({
+    required this.notebookId,
+    required List<CoreTag> tags,
+    required List<String> assigned,
+  }) : tags = List.unmodifiable(tags),
+       assigned = List.unmodifiable(assigned);
+  final String notebookId;
+  final List<CoreTag> tags;
+  final List<String> assigned;
+}
+
 abstract interface class CatalogCore {
   CoreDirectory get initialDirectory;
   String get nativeNotices;
@@ -66,6 +110,15 @@ abstract interface class CatalogCore {
   Future<void> rename(String nodeId, String name);
   Future<void> move(String nodeId, String destinationFolderId);
   Future<void> delete(String nodeId);
+  Future<CoreSearchResult> search(
+    String text, {
+    String? tag,
+    bool caseSensitive = false,
+  });
+  Future<CoreTags> tags([String? nodeId]);
+  Future<void> createTag(String name);
+  Future<void> setTags(String nodeId, List<String> tags);
+  void cancelSearch();
   Future<void> close();
 }
 
@@ -188,10 +241,11 @@ Future<void> _destroyOffIsolate(int address) => Isolate.run(() {
 });
 
 final class _Pending {
-  _Pending(this.kind, this.revision);
+  _Pending(this.kind, this.revision, {this.decode});
 
   final int kind;
   final int revision;
+  final Object Function(native.VxmEvent)? decode;
   final completer = Completer<Object>();
 }
 
@@ -278,6 +332,103 @@ CoreDirectory _directory(native.VxmEvent event) {
   );
 }
 
+Never _badQuery() => throw const CoreException(
+  native.VxCoreError.VXCORE_ERR_JSON_PARSE,
+  'Malformed native query result',
+);
+
+String _queryString(Object? value, {int maximum = 16384, bool empty = false}) {
+  if (value is! String || (!empty && value.isEmpty) || value.contains('\u0000'))
+    _badQuery();
+  _encode(value, maximum: maximum);
+  return value;
+}
+
+Map<String, dynamic> _queryObject(native.VxmEvent event) {
+  if (event.size <= 0 || event.size > _maxCatalog || event.data == nullptr)
+    _badQuery();
+  final Object? decoded;
+  try {
+    decoded = jsonDecode(
+      utf8.decode(event.data.asTypedList(event.size), allowMalformed: false),
+    );
+  } on FormatException {
+    _badQuery();
+  }
+  if (decoded is! Map<String, dynamic>) _badQuery();
+  return decoded;
+}
+
+CoreSearchResult _searchResult(native.VxmEvent event) {
+  final json = _queryObject(event);
+  final notebookId = _queryString(json['notebookId'], maximum: 127);
+  final rows = json['matches'];
+  final limited = json['limited'];
+  final skipped = json['skipped'];
+  if (rows is! List ||
+      rows.length > 10000 ||
+      limited is! bool ||
+      skipped is! int ||
+      skipped < 0 ||
+      skipped > 100000)
+    _badQuery();
+  final matches = <CoreSearchHit>[];
+  final ids = <String>{};
+  for (final row in rows) {
+    if (row is! Map<String, dynamic>) _badQuery();
+    final id = _queryString(row['id'], maximum: 127);
+    if (!ids.add(id)) _badQuery();
+    final path = _queryString(row['path']);
+    if (path.startsWith('/') ||
+        path.contains('\\') ||
+        path.contains(':') ||
+        path
+            .split('/')
+            .any((part) => part.isEmpty || part == '.' || part == '..'))
+      _badQuery();
+    final line = row['line'];
+    if (line is! int || line < 0 || line > _maxInteger) _badQuery();
+    matches.add(
+      CoreSearchHit(
+        id: id,
+        path: path,
+        line: line,
+        snippet: _queryString(row['snippet'], maximum: 512, empty: true),
+      ),
+    );
+  }
+  return CoreSearchResult(
+    notebookId: notebookId,
+    matches: matches,
+    limited: limited,
+    skipped: skipped,
+  );
+}
+
+CoreTags _tagsResult(native.VxmEvent event) {
+  final json = _queryObject(event);
+  final notebookId = _queryString(json['notebookId'], maximum: 127);
+  final rows = json['tags'];
+  final assigned = json['assigned'];
+  if (rows is! List ||
+      rows.length > 10000 ||
+      assigned is! List ||
+      assigned.length > 10000)
+    _badQuery();
+  final tags = <CoreTag>[];
+  final names = <String>{};
+  for (final row in rows) {
+    if (row is! Map<String, dynamic>) _badQuery();
+    final name = _queryString(row['name']);
+    if (!names.add(name)) _badQuery();
+    tags.add(
+      CoreTag(name: name, parent: _queryString(row['parent'], empty: true)),
+    );
+  }
+  final assignments = assigned.map((name) => _queryString(name)).toList();
+  return CoreTags(notebookId: notebookId, tags: tags, assigned: assignments);
+}
+
 final class CoreNotebook implements NotebookCore, CatalogCore {
   CoreNotebook._(this._mode) : _token = _nextToken++ {
     _listener = NativeCallable<Void Function(Int64)>.listener(_onNotify);
@@ -290,6 +441,7 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
   Pointer<native.VxmHost>? _eventHandle;
   int _generation = 0;
   int _nextRequest = 2;
+  int? _searchRequest;
   final _pending = <int, _Pending>{};
   final _closedEvent = Completer<int>();
   Future<void>? _closing;
@@ -549,6 +701,129 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     await _mutate(native.VXM_DELETE, nodeId);
   }
 
+  Future<T> _catalogJson<T>(
+    Map<String, Object> input, {
+    Object Function(native.VxmEvent)? decode,
+    bool mutation = false,
+    bool search = false,
+  }) async {
+    _requireMode(native.VXM_MODE_CATALOG);
+    final handle = _usableHandle();
+    if (search && _searchRequest != null) {
+      throw const CoreException(
+        _unusable,
+        'A notebook search is already running',
+      );
+    }
+    final json = jsonEncode(input);
+    final id = _nextRequest++;
+    final pending = _Pending(
+      mutation ? native.VXM_EVENT_TAG : native.VXM_EVENT_QUERY,
+      0,
+      decode: decode,
+    );
+    final code = using((arena) {
+      final payload = _option(arena, json);
+      return mutation
+          ? native.vxm_host_catalog_tag(handle, id, _generation, payload)
+          : native.vxm_host_catalog_query(handle, id, _generation, payload);
+    });
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native catalog query admission failed');
+    }
+    _pending[id] = pending;
+    if (search) _searchRequest = id;
+    try {
+      return await pending.completer.future as T;
+    } finally {
+      if (search && _searchRequest == id) _searchRequest = null;
+    }
+  }
+
+  static void _queryInput(
+    String value, {
+    bool empty = false,
+    int maximum = 16384,
+  }) {
+    if ((!empty && value.isEmpty) || value.contains('\u0000')) {
+      throw const CoreException(_invalid, 'Invalid native query input');
+    }
+    _encode(value, maximum: maximum);
+  }
+
+  @override
+  Future<CoreSearchResult> search(
+    String text, {
+    String? tag,
+    bool caseSensitive = false,
+  }) async {
+    _queryInput(text, empty: true);
+    if (tag != null) _queryInput(tag);
+    if (text.isEmpty && tag == null) {
+      throw const CoreException(_invalid, 'Enter search text or choose a tag');
+    }
+    return _catalogJson<CoreSearchResult>(
+      {
+        'op': 'search',
+        'text': text,
+        if (tag != null) 'tag': tag,
+        'caseSensitive': caseSensitive,
+      },
+      decode: _searchResult,
+      search: true,
+    );
+  }
+
+  @override
+  Future<CoreTags> tags([String? nodeId]) async {
+    if (nodeId != null) _queryInput(nodeId, maximum: 127);
+    return _catalogJson<CoreTags>({
+      'op': 'tags',
+      if (nodeId != null) 'nodeId': nodeId,
+    }, decode: _tagsResult);
+  }
+
+  @override
+  Future<void> createTag(String name) async {
+    _queryInput(name);
+    await _catalogJson<bool>({'op': 'createTag', 'name': name}, mutation: true);
+  }
+
+  @override
+  Future<void> setTags(String nodeId, List<String> tags) async {
+    _queryInput(nodeId, maximum: 127);
+    if (tags.length > 10000)
+      throw const CoreException(_invalid, 'Too many tag assignments');
+    var bytes = 0;
+    final unique = <String>{};
+    for (final tag in tags) {
+      _queryInput(tag);
+      bytes += _encode(tag, maximum: 16384).length;
+      if (bytes > 16384 || !unique.add(tag))
+        throw const CoreException(
+          _invalid,
+          'Invalid or oversized tag assignments',
+        );
+    }
+    await _catalogJson<bool>({
+      'op': 'setTags',
+      'nodeId': nodeId,
+      'tags': tags,
+    }, mutation: true);
+  }
+
+  @override
+  void cancelSearch() {
+    final id = _searchRequest;
+    final handle = _handle;
+    if (id == null || handle == null) return;
+    final code = native.vxm_host_cancel(handle, id, _generation);
+    // Completion may already be queued; cancellation never rewrites its outcome.
+    if (code != native.VxCoreError.VXCORE_OK && code != _unusable) {
+      throw CoreException(code, 'Native search cancellation failed');
+    }
+  }
+
   void _onNotify(int token) {
     final handle = _eventHandle;
     if (token != _token || handle == null) return;
@@ -587,6 +862,10 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
             pending.completer.complete(
               event.node_id.cast<Utf8>().toDartString(),
             );
+          } else if (event.kind == native.VXM_EVENT_QUERY) {
+            pending.completer.complete(pending.decode!(event));
+          } else if (event.kind == native.VXM_EVENT_TAG) {
+            pending.completer.complete(true);
           } else if (event.kind == native.VXM_EVENT_LIST ||
               event.kind == native.VXM_EVENT_CATALOG_OPEN) {
             pending.completer.complete(_directory(event));

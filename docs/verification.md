@@ -379,3 +379,59 @@ power-loss verification. Multi-notebook management, search/tag UI, managed
 import/export, attachment editing, preview, autosave/recovery and WebDAV remain
 planned work. Debug builds are not performance evidence. No upstream change,
 repository publication or store submission occurred.
+
+
+## Notebook search and tags
+
+The next offline slice adds notebook-wide saved-text search, optional case/tag
+filters, stable result navigation, tag creation and assignment. Search and tags
+use vxcore APIs on the native owner; no Dart filesystem writer or second index.
+The core extension is default-off first-match-per-file content search plus the
+existing-or-defined tag replacement rule. Desktop search defaults are unchanged.
+
+### Executed verification
+
+- Built and ran `test_simple_search_backend`, `test_search` and `test_folder` in
+  the MSVC Release core build: all three suites passed. Coverage includes repeated
+  1 MiB matching lines, regex/literal first match, UTF-16 columns, exclusions,
+  default multiple matches, C API parsing, non-simple backend rejection when
+  available, orphan preservation/removal and undefined-name rejection.
+- Native host real-storage regressions passed, including singleton core search,
+  row/byte caps, valid clipped Unicode snippets, omitted unsupported notes,
+  admission reservations, cancellation/shutdown and event lifetime. A 10,001-file
+  fixture exercises the 10,000-row cap. Complete-or-error tag loading is covered.
+- All **38 bridge tests** passed. New coverage exercises nested literal/case/tag
+  search, old result IDs after move/rename, deleted-result rejection, dense lines,
+  explicit missing/encrypted/unsupported/oversized exclusions, and tag persistence
+  while preserving desktop UUIDs, note/asset bytes and custom metadata.
+- Flutter analysis reported no issues after correcting one test-only missing
+  brace. All **87 Flutter tests** passed, including stale search/assignment tokens,
+  sole-owner result opening, cancellation/shutdown, orphan selection, and distinct
+  mutation-success/refresh-error outcomes.
+- `node scripts/verify.mjs android` regenerated/checked offline assets and built
+  the debug APK for arm64 and x86_64. This is debug build evidence, not a release
+  performance or physical-device claim.
+
+### Actual Android surface
+
+Installed the APK on Medium_Phone and cold-launched it. Searching `personal`
+found the existing Welcome note at line 3; opening the result showed its exact
+source, and Discard returned through the existing safe-close dialog. Created
+`Search demo/Tagged.md`, entered `MobileSearchToken with saved body` in the real
+WebView and used Write. Created and assigned `MobileSearch` through note actions.
+Text search and combined text/tag filtering returned the nested note with its
+first-line snippet; tapping opened the same source. After force-stop/relaunch,
+tag-only search returned the same node UUID and exact saved bytes. The original
+notebook UUID and Welcome.md bytes were unchanged. Screenshots verified the
+actual Flutter surface, including the result and tag filter. The demo note/tag
+are retained for manual testing, and the AVD/app remain running.
+
+Automation initially omitted Android's `hint` attribute for the empty search
+field and later toggled off a newly-created, already-selected tag. Inspecting the
+actual field/checkbox and portable metadata corrected the harness; these were
+not app failures. No throwaway production fallback or smoke source was added.
+
+Remaining offline work includes multi-notebook management, import/export and
+attachment editing. Tag-tree deletion/reparenting, editor preview, autosave/draft
+recovery and WebDAV are not included. No iOS, physical-device, Qt UI, power-loss,
+release-signing or publication claim follows from this verification.
