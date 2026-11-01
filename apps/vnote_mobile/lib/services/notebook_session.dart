@@ -1,10 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
 
 import 'package:flutter/foundation.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'editor_session.dart';
@@ -273,99 +271,4 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       : error is StateError
       ? error.message.toString()
       : 'Notebook operation failed. Source is retained; no notebook was recreated.';
-}
-
-/// Only this adapter creates support directories; notebook files and the
-/// notebook root are exclusively created/read/written by the native core.
-class ManagedNotebookPaths {
-  const ManagedNotebookPaths({
-    required this.app,
-    required this.local,
-    required this.notebook,
-  });
-  final String app;
-  final String local;
-  final String notebook;
-
-  static Future<ManagedNotebookPaths> obtain() async {
-    final support = await getApplicationSupportDirectory();
-    final excluded = [
-      await getTemporaryDirectory(),
-      await getApplicationCacheDirectory(),
-      Directory.systemTemp,
-    ];
-    final root = await _canonical(support);
-    for (final directory in excluded) {
-      if (_within(root, await _canonical(directory))) {
-        throw StateError(
-          'Application Support resolves to temporary/cache storage.',
-        );
-      }
-    }
-    await Directory(root).create(recursive: true);
-    if (_key(await support.resolveSymbolicLinks()) != _key(root)) {
-      throw StateError('Application Support changed during initialization.');
-    }
-    Future<String> child(String relative, {bool create = true}) async {
-      final expected = Directory.fromUri(Directory(root).uri.resolve(relative));
-      final canonical = await _canonical(expected);
-      if (!_within(canonical, root) || _key(canonical) != _key(expected.path)) {
-        throw StateError(
-          'Managed storage escapes its persistent support root.',
-        );
-      }
-      if (create) {
-        await expected.create(recursive: true);
-        if (_key(await expected.resolveSymbolicLinks()) != _key(canonical)) {
-          throw StateError('Managed storage changed during initialization.');
-        }
-      }
-      return canonical;
-    }
-
-    await child('core/');
-    final app = await child('core/app/');
-    final local = await child('core/local/');
-    await child('notebooks/');
-    final notebook = await child('notebooks/Personal/', create: false);
-    return ManagedNotebookPaths(app: app, local: local, notebook: notebook);
-  }
-
-  static String _key(String path) {
-    final normalized = path
-        .replaceAll('\\', '/')
-        .replaceFirst(RegExp(r'/+$'), '');
-    return Platform.isWindows ? normalized.toLowerCase() : normalized;
-  }
-
-  static bool _within(String path, String parent) =>
-      _key(path) == _key(parent) || _key(path).startsWith('${_key(parent)}/');
-
-  static Future<String> _canonical(Directory directory) async {
-    final suffix = <String>[];
-    var current = directory.absolute;
-    while (!await current.exists()) {
-      if (await FileSystemEntity.type(current.path, followLinks: false) !=
-          FileSystemEntityType.notFound) {
-        throw StateError(
-          'A managed storage ancestor is not an accessible directory.',
-        );
-      }
-      final parent = current.parent;
-      if (parent.path == current.path) {
-        throw StateError('Persistent storage has no accessible ancestor.');
-      }
-      suffix.insert(
-        0,
-        current.uri.pathSegments.where((part) => part.isNotEmpty).last,
-      );
-      current = parent;
-    }
-    final canonical = Directory(await current.resolveSymbolicLinks());
-    return Directory.fromUri(
-      canonical.uri.resolve(
-        suffix.isEmpty ? '' : '${suffix.map(Uri.encodeComponent).join('/')}/',
-      ),
-    ).path;
-  }
 }

@@ -5,11 +5,12 @@ import 'package:flutter/foundation.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'editor_session.dart';
+import 'managed_notebook_storage.dart';
 import 'notebook_session.dart';
 
 typedef OpenCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
-  String? expectedNotebookId,
+  String expectedNotebookId,
 );
 typedef OpenNote = Future<NotebookCore> Function(
   ManagedNotebookPaths paths,
@@ -66,26 +67,25 @@ class NotebookWorkspaceState {
   bool get canMutate => canBrowse && directory != null && !stale;
 }
 
-/// The sole owner of the managed notebook: catalog OR selected-note session.
-/// Every factory call after discovery is pinned to the observed notebook UUID.
+/// Owns one selected notebook: catalog OR selected-note session.
+/// Every factory call is pinned to the identity observed by the library.
 class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   NotebookWorkspace({
-    Future<ManagedNotebookPaths> Function()? obtainPaths,
+    required this._paths,
+    required this._notebookId,
     OpenCatalog? openCatalog,
     OpenNote? openNote,
-  }) : _obtainPaths = obtainPaths ?? ManagedNotebookPaths.obtain,
-       _openCatalog = openCatalog ?? _managedCatalog,
+  }) : _openCatalog = openCatalog ?? _managedCatalog,
        _openNote = openNote ?? _managedNote,
        super(const NotebookWorkspaceState());
 
-  final Future<ManagedNotebookPaths> Function() _obtainPaths;
+  final ManagedNotebookPaths _paths;
+  final String _notebookId;
   final OpenCatalog _openCatalog;
   final OpenNote _openNote;
-  ManagedNotebookPaths? _paths;
   CatalogCore? _catalog;
   NotebookSession? _session;
   CoreDirectory? _directory;
-  String? _notebookId;
   String? _folderId;
   String? _error;
   NotebookMutationResult? _mutation;
@@ -122,19 +122,17 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   Future<void> _openBrowser() async {
     if (_session != null) throw StateError('The selected note is still open.');
-    _paths ??= await _obtainPaths();
     if (_shuttingDown) return;
     if (_catalog == null) {
-      final catalog = await _openCatalog(_paths!, _notebookId);
+      final catalog = await _openCatalog(_paths, _notebookId);
       _catalog = catalog;
       if (_shuttingDown) return;
       final root = catalog.initialDirectory;
-      if (_notebookId != null && _notebookId != root.notebookId) {
+      if (_notebookId != root.notebookId) {
         throw StateError(
           'The managed notebook identity changed. It was not recreated.',
         );
       }
-      _notebookId ??= root.notebookId;
       if (_folderId == null || _folderId == root.folderId) {
         _accept(root);
         return;
@@ -366,7 +364,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       _catalog = null;
       if (_shuttingDown) return false;
       final session = NotebookSession(
-        openCore: () => _openNote(_paths!, _notebookId!, nodeId),
+        openCore: () => _openNote(_paths, _notebookId, nodeId),
       );
       _session = session;
       await session.initialize();
@@ -434,6 +432,12 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     (catalog, directory) => catalog.createFolder(directory.folderId, name),
   );
 
+  Future<NotebookMutationResult?> renameNotebook(String name) =>
+      _mutate((catalog, _) async {
+        await catalog.renameNotebook(name);
+        return null;
+      });
+
   Future<NotebookMutationResult?> rename(CoreEntry entry, String name) =>
       _mutate((catalog, _) async {
         await catalog.rename(entry.id, name);
@@ -455,7 +459,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       }, entry: entry);
 
   Future<NotebookMutationResult?> _mutate(
-    Future<String> Function(CatalogCore, CoreDirectory) operation, {
+    Future<String?> Function(CatalogCore, CoreDirectory) operation, {
     CoreEntry? entry,
   }) async {
     if (!value.canMutate ||
@@ -600,12 +604,11 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   static Future<CatalogCore> _managedCatalog(
     ManagedNotebookPaths paths,
-    String? expectedNotebookId,
+    String expectedNotebookId,
   ) => CoreNotebook.openCatalog(
     appDataPath: paths.app,
     localDataPath: paths.local,
     notebookPath: paths.notebook,
-    notebookName: 'Personal',
     expectedNotebookId: expectedNotebookId,
   );
 

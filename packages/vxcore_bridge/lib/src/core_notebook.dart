@@ -108,6 +108,7 @@ abstract interface class CatalogCore {
   Future<String> createNote(String folderId, String name);
   Future<String> createFolder(String folderId, String name);
   Future<void> rename(String nodeId, String name);
+  Future<void> renameNotebook(String name);
   Future<void> move(String nodeId, String destinationFolderId);
   Future<void> delete(String nodeId);
   Future<CoreSearchResult> search(
@@ -468,14 +469,26 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     required String appDataPath,
     required String localDataPath,
     required String notebookPath,
-    required String notebookName,
     String? expectedNotebookId,
   }) => _open(
     appDataPath: appDataPath,
     localDataPath: localDataPath,
     notebookPath: notebookPath,
-    notebookName: notebookName,
     expectedNotebookId: expectedNotebookId,
+    mode: native.VXM_MODE_CATALOG,
+  );
+
+  static Future<CoreNotebook> createCatalog({
+    required String appDataPath,
+    required String localDataPath,
+    required String notebookPath,
+    required String notebookName,
+  }) => _open(
+    appDataPath: appDataPath,
+    localDataPath: localDataPath,
+    notebookPath: notebookPath,
+    notebookName: notebookName,
+    createNotebook: true,
     mode: native.VXM_MODE_CATALOG,
   );
 
@@ -498,6 +511,7 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     required String localDataPath,
     required String notebookPath,
     required int mode,
+    bool createNotebook = false,
     String? notebookName,
     String? expectedNotebookId,
     String? nodeId,
@@ -529,7 +543,8 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
               ? nullptr
               : _option(arena, expectedNotebookId)
           ..node_id = nodeId == null ? nullptr : _option(arena, nodeId)
-          ..mode = mode;
+          ..mode = mode
+          ..create_notebook = createNotebook ? 1 : 0;
         final out = arena<Pointer<native.VxmHost>>();
         final code = native.vxm_host_create(
           options,
@@ -689,6 +704,15 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
   @override
   Future<void> rename(String nodeId, String name) async {
     await _mutate(native.VXM_RENAME, nodeId, name: name);
+  }
+
+  @override
+  Future<void> renameNotebook(String name) async {
+    await _mutate(
+      native.VXM_RENAME_NOTEBOOK,
+      initialDirectory.folderId,
+      name: name,
+    );
   }
 
   @override

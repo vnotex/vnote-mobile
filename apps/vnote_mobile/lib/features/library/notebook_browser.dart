@@ -12,12 +12,14 @@ class NotebookBrowser extends StatefulWidget {
     required this.workspace,
     required this.dark,
     required this.onThemeChanged,
+    required this.onShowNotebooks,
     super.key,
   });
 
   final NotebookWorkspace workspace;
   final bool dark;
   final ValueChanged<bool> onThemeChanged;
+  final VoidCallback onShowNotebooks;
 
   @override
   State<NotebookBrowser> createState() => _NotebookBrowserState();
@@ -41,10 +43,15 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
     required String title,
     String initial = '',
     bool note = false,
+    bool notebook = false,
   }) => showDialog<String>(
     context: context,
-    builder: (context) =>
-        _NameDialog(title: title, initial: initial, note: note),
+    builder: (context) => _NameDialog(
+      title: title,
+      initial: initial,
+      note: note,
+      notebook: notebook,
+    ),
   );
 
   Future<void> _create({required bool folder}) async {
@@ -59,6 +66,17 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
     } else {
       await _workspace.createNote(name);
     }
+  }
+
+  Future<void> _renameNotebook(CoreDirectory directory) async {
+    if (!_stillCurrent(directory)) return;
+    final name = await _nameDialog(
+      title: 'Rename notebook',
+      initial: directory.notebookName,
+      notebook: true,
+    );
+    if (name == null || !_stillCurrent(directory)) return;
+    await _workspace.renameNotebook(name);
   }
 
   Future<void> _action(CoreEntry entry, String action) async {
@@ -148,8 +166,20 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
         },
         child: Scaffold(
           appBar: AppBar(
-            title: Text(directory?.notebookName ?? 'Personal'),
+            title: Text(directory?.notebookName ?? 'Notebook'),
+            leading: IconButton(
+              tooltip: 'Notebooks',
+              onPressed: state.canBrowse ? widget.onShowNotebooks : null,
+              icon: const Icon(Icons.library_books_outlined),
+            ),
             actions: [
+              IconButton(
+                tooltip: 'Rename notebook',
+                onPressed: state.canMutate
+                    ? () => _renameNotebook(directory!)
+                    : null,
+                icon: const Icon(Icons.drive_file_rename_outline),
+              ),
               IconButton(
                 tooltip: 'Search notebook',
                 onPressed: state.canMutate && !_showSearch
@@ -790,11 +820,13 @@ class _NameDialog extends StatefulWidget {
     required this.title,
     required this.initial,
     required this.note,
+    this.notebook = false,
   });
 
   final String title;
   final String initial;
   final bool note;
+  final bool notebook;
 
   @override
   State<_NameDialog> createState() => _NameDialogState();
@@ -827,12 +859,15 @@ class _NameDialogState extends State<_NameDialog> {
         autocorrect: false,
         decoration: InputDecoration(
           labelText: 'Name',
+          helperMaxLines: widget.notebook ? 3 : null,
           helperText: widget.note
               ? 'Include .md (Markdown) or .txt (plain text).'
+              : widget.notebook
+              ? 'Display name only. The notebook folder is not renamed.'
               : null,
         ),
         validator: (value) =>
-            value == null || value.isEmpty ? 'Enter a name.' : null,
+            value == null || value.trim().isEmpty ? 'Enter a name.' : null,
         onFieldSubmitted: (_) => _submit(),
       ),
     ),

@@ -1,6 +1,6 @@
 # ADR 0002: Native ownership, execution and cancellation
 
-Status: the serialized owner host for managed notebook operations is implemented; later search/network execution remains a design, not a verified concurrency claim. Phase 1 covers context/notebook/folder/file/buffer create-save-reopen; search and WebDAV rows define later integration, not permission to omit them from the complete release.
+Status: the serialized owner host, managed multi-notebook library, notebook search and tags are implemented. Network-worker coordination remains a design, not a verified concurrency claim; iOS and physical-device gates remain open.
 
 ## Evidence and decisions
 
@@ -67,12 +67,43 @@ Dart retains NativeCallable.listener while the owner runs. Close retires admissi
 
 ### Catalog and editor ownership
 
-Catalog mode owns a context/notebook but no buffer. Note mode requires the expected
-notebook and node IDs, resolves the current path through core, and never creates a
-missing notebook or note. Catalog mutations are rejected in note mode; note reads
-and writes are rejected in catalog mode. The Flutter workspace drains one owner
-before opening the other. All later catalog opens retain the first observed
-notebook UUID, including failed-note-open recovery.
+The library owns either one selected workspace or one short-lived discovery/create
+catalog. It closes/joins each discovery host before the next, because contexts
+share app/local session namespaces even when their notebook roots differ. It
+lists immediate directory candidates under the existing `notebooks/` parent,
+including `Personal` unchanged; no second notebook registry or saved active
+selection is required. Names/UUIDs come from core, not a Dart metadata parser.
+Canonical parent checks, no-follow candidate handling and native reparse guards
+precede metadata access. More than 1,000 candidates fails the complete listing;
+malformed/unsafe entries and duplicate observed UUIDs remain visibly unavailable.
+
+Catalog mode owns a context/notebook but no buffer. `openCatalog` requires an
+existing root; `createCatalog` sets the explicit native creation flag and requires
+an absent root, checked before core create (which otherwise can reopen an existing
+notebook or create into an existing directory). Creation never falls back from an
+open failure. New roots are opaque `notebooks/nb-<128-bit hex>/` siblings, not display
+names. This is app-owned storage admission, not an atomic interprocess reservation
+against an outside writer. Failed creation does not authorize deletion, automatic
+retry or repair of a partially created root.
+
+The workspace receives explicit paths and a known notebook UUID from the library;
+every catalog open, including its first and failed-note-open recovery, is pinned.
+Note mode additionally requires a node ID and resolves its current path through
+core. Neither mode recreates missing content. Catalog mutations are rejected in
+note mode; note reads/writes are rejected in catalog mode. The workspace drains
+one owner before opening the other. Returning to the library requires the exact
+current workspace token, no editor session and no active operation, then awaits
+shutdown/join. The existing editor Write/Discard/Cancel barrier is never bypassed.
+Library rows/dialogs and browser/editor widgets retain identity-bound lifetimes.
+
+Notebook rename is a separate root-only catalog operation. Fetch the complete
+current notebook configuration, change only `name`, then submit through
+`vxcore_notebook_update_config`: that API replaces known fields, it does not merge
+an arbitrary partial update. Preserve UUIDs, custom metadata, tags, layout and
+other settings; never rename the storage directory or use node basename rules.
+Creation and rename share bounded nonblank/control-free UTF-8 display-name checks.
+Refresh follows attempted mutation, including partial-error cases; a failed refresh
+cannot undo or hide an applied change.
 
 `vxcore_node_get_path_by_id` is a cache lookup, not an absence proof. The root
 folder UUID is anchored through core metadata. Cache misses or contradictory cache hits use core folder
@@ -123,4 +154,4 @@ Rejected: raw handles in Riverpod/widgets, arbitrary Dart isolates for affinity,
 - Rapid revisions, external modification, disk-full and cancel-after-mutation retain correct dirty/draft state; stale results never revive a closed session.
 - Zero external search drainers return ordered complete simple results; cancellation and explicit result caps work without a volatile data race. Large single-chunk allocation is addressed before release.
 - Sync/owner simultaneous failure paths exercise the upstream error-storage fix; teardown during stage/network/reservation/refresh releases all resources with no use-after-free/deadlock.
-- See [verification](../verification.md) for exercised owner/FFI/storage cases; search and network-worker gates remain unpassed.
+- See [verification](../verification.md) for exercised owner/FFI/storage cases; network-worker and remaining device gates remain unpassed.

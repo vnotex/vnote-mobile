@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app browses the managed **Personal** bundled notebook through the real native core. Create Markdown/plain-text notes and folders, rename/move/delete nodes, then open a selected note by its stable ID. Search saved notebook text, filter by tag, and create/assign tags from note actions. Existing notebooks and Welcome.md are preserved; a fresh installation starts with an empty notebook. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning to the browser requires Write/Discard/Cancel, and catalog/editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
+The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning from the editor requires Write/Discard/Cancel before **Notebooks** can switch the selected notebook. Library discovery, catalog and editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
 
 ## Development
 
@@ -72,9 +72,17 @@ result limits are disclosed. Tags are stored by core APIs in portable metadata;
 existing undefined assignments remain visible and are preserved unless removed.
 Tag loading is complete-or-error. Tag-tree deletion/reparenting is not exposed.
 
-This slice covers the current managed notebook. Multi-notebook management,
-managed import/export and attachment editing remain planned offline work; preview, autosave/recovery and sync remain later gates. No iOS or physical-
-device completion follows from Android/host verification.
+The library lists immediate children of the existing managed `notebooks/` root.
+New notebooks use opaque sibling directories; Rename changes only their display
+name through a full core configuration update. Missing, malformed, linked or
+duplicate-UUID entries are not silently recreated, repaired or merged. Discovery
+is capped at 1,000 candidate notebooks and fails rather than publishing a partial
+library. A failed create may leave an unavailable owned entry for inspection;
+failure is not proof of rollback. There is no notebook-removal UI in this slice.
+
+Managed import/export and attachment editing remain planned offline work;
+preview, autosave/recovery and sync remain later gates. No iOS or physical-device
+completion follows from Android/host verification.
 
 ## License
 

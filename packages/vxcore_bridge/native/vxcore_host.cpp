@@ -105,6 +105,24 @@ void basename(const std::string &name) {
   for (const auto *digit : {u8"¹", u8"²", u8"³"})
     require(stem != std::string("com") + digit && stem != std::string("lpt") + digit);
 }
+// input_string has already validated UTF-8 and bounded this metadata string.
+void display_name(const std::string &name) {
+  bool nonblank = false;
+  for (size_t i = 0; i < name.size();) {
+    uint32_t value = static_cast<uint8_t>(name[i++]);
+    unsigned continuation = 0;
+    if (value >= 0xf0) { continuation = 3; value &= 7; }
+    else if (value >= 0xe0) { continuation = 2; value &= 15; }
+    else if (value >= 0xc0) { continuation = 1; value &= 31; }
+    while (continuation--) value = (value << 6) | (static_cast<uint8_t>(name[i++]) & 63);
+    require(value >= 32 && !(value >= 0x7f && value <= 0x9f));
+    const bool space = value == 0x20 || value == 0xa0 || value == 0x1680 ||
+        (value >= 0x2000 && value <= 0x200a) || value == 0x2028 || value == 0x2029 ||
+        value == 0x202f || value == 0x205f || value == 0x3000 || value == 0xfeff;
+    nonblank |= !space;
+  }
+  require(nonblank);
+}
 void source_valid(const uint8_t *data, uint64_t size) {
   require(size <= kSource, VXCORE_ERR_INVALID_PARAM);
   require(data || !size, VXCORE_ERR_NULL_POINTER);
@@ -389,6 +407,7 @@ struct VxmHost {
   std::string app_path, local_path, notebook_path, notebook_name, note_path;
   std::string expected_notebook_id;
   int32_t mode = 0;
+  bool create_notebook = false;
   int32_t editor_type = 0;
   std::string assets = "vx_assets", recycle = "vx_notebook/recycle_bin";
   fs::path owned_root;
@@ -414,7 +433,7 @@ struct VxmHost {
     notify(token);
   }
   struct Node { std::string id, path; bool folder; Json config; };
-  void notebook_config() {
+  Json notebook_config() {
     CoreString value;
     check(vxcore_notebook_get_config(context, notebook_id.c_str(), &value.value));
     auto config = value.json();
@@ -423,6 +442,7 @@ struct VxmHost {
     require(notebook_name.size() <= kString, VXCORE_ERR_INVALID_STATE);
     assets = config.at(vxcore::kJsonKeyAssetsFolder).get<std::string>();
     recycle = config.at(vxcore::kJsonKeyRecycleBinFolder).get<std::string>();
+    return config;
   }
   void ordinary(const std::string &path) {
     if (path == ".") return;
@@ -708,6 +728,7 @@ struct VxmHost {
   }
   void list_catalog(Request &request) {
     require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
+    notebook_config();
     const auto folder = resolve(request.node, true);
     require(folder.folder, VXCORE_ERR_INVALID_PARAM);
     auto &out = *request.result;
@@ -727,13 +748,28 @@ struct VxmHost {
   void mutate_catalog(Request &request) {
     require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
     layout();
-    const auto target = resolve(request.node, false, request.operation == VXM_DELETE);
-    if (target.path != ".")
-      for (const auto &part : fs::u8path(target.path)) basename(part.u8string());
+    const auto operation = request.operation;
+    if (operation == VXM_RENAME_NOTEBOOK) require(request.node == root_id);
+    const auto target = resolve(request.node, false, operation == VXM_DELETE);
     auto &out = *request.result;
     copy_field(out.node, target.id);
+    if (operation == VXM_RENAME_NOTEBOOK) {
+      require(target.path == ".");
+      auto config = notebook_config();
+      config[vxcore::kJsonKeyName] = request.name;
+      const auto json = config.dump();
+      require(json.size() <= kJson);
+      const auto result = vxcore_notebook_update_config(context, notebook_id.c_str(), json.c_str());
+      // Core can apply metadata before a later store fails. Reload even on error;
+      // the mutation retains its original outcome and a separate list is fresh.
+      try { notebook_config(); }
+      catch (...) { check(result); throw; }
+      check(result);
+      return;
+    }
+    if (target.path != ".")
+      for (const auto &part : fs::u8path(target.path)) basename(part.u8string());
     const auto root = fs::u8path(notebook_path);
-    const auto operation = request.operation;
     if (operation == VXM_CREATE_NOTE || operation == VXM_CREATE_FOLDER) {
       require(target.folder);
       basename(request.name);
@@ -1061,6 +1097,8 @@ struct VxmHost {
     require(root.is_absolute());
     const auto status = fs::symlink_status(root);
     const bool exists = fs::exists(status);
+    require(create_notebook ? !exists : exists,
+            create_notebook ? VXCORE_ERR_ALREADY_EXISTS : VXCORE_ERR_NOT_FOUND);
     confined(root, ".");
     confined(root, "vx_notebook/config.json");
     safe_tree(root / "vx_notebook");
@@ -1075,17 +1113,16 @@ struct VxmHost {
     check(vxcore_context_create_with_paths(nullptr, app_path.c_str(), local_path.c_str(), &context));
     check(vxcore_context_update_config(context, "{\"search\":{\"backends\":[\"simple\"]}}"));
     CoreString notebook;
-    if (exists) {
-      require(fs::is_directory(status), VXCORE_ERR_IO);
-      check(vxcore_notebook_open(context, notebook_path.c_str(), &notebook.value));
-    } else {
-      require(mode == VXM_MODE_CATALOG && expected_notebook_id.empty(), VXCORE_ERR_NOT_FOUND);
+    if (create_notebook) {
       const auto config = Json{{vxcore::kJsonKeyName, notebook_name}}.dump();
       check(vxcore_notebook_create(context, notebook_path.c_str(), config.c_str(), VXCORE_NOTEBOOK_BUNDLED, &notebook.value));
+    } else {
+      require(fs::is_directory(status), VXCORE_ERR_IO);
+      check(vxcore_notebook_open(context, notebook_path.c_str(), &notebook.value));
     }
     notebook_id = notebook.take();
     require(expected_notebook_id.empty() || notebook_id == expected_notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
-    notebook_config();
+    if (mode == VXM_MODE_NOTE) notebook_config();
     root_id = load_node(".").id;
     if (mode == VXM_MODE_CATALOG) {
       list_catalog(request);
@@ -1267,9 +1304,10 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     auto destination_value = optional_string(destination);
     require(node_value.size() < 128 && destination_value.size() < 128);
     if (kind == VXM_EVENT_MUTATE) {
-      require(operation >= VXM_CREATE_NOTE && operation <= VXM_DELETE && !node_value.empty());
-      const bool named = operation == VXM_CREATE_NOTE || operation == VXM_CREATE_FOLDER || operation == VXM_RENAME;
+      require(operation >= VXM_CREATE_NOTE && operation <= VXM_RENAME_NOTEBOOK && !node_value.empty());
+      const bool named = operation == VXM_CREATE_NOTE || operation == VXM_CREATE_FOLDER || operation == VXM_RENAME || operation == VXM_RENAME_NOTEBOOK;
       require(named == !name_value.empty() && (operation == VXM_MOVE) == !destination_value.empty());
+      if (operation == VXM_RENAME_NOTEBOOK) display_name(name_value);
     }
     std::lock_guard<std::mutex> lock(host.mutex);
     require(!host.stopping && generation == host.generation && id > host.last_request && id <= kMaxRevision, VXCORE_ERR_INVALID_STATE);
@@ -1328,6 +1366,7 @@ int32_t vxm_host_create(const VxmOpenOptions *options, VxmNotify notify, int64_t
   std::unique_ptr<VxmHost> host;
   try {
     require(options->mode == VXM_MODE_NOTE || options->mode == VXM_MODE_CATALOG);
+    require(options->create_notebook == 0 || options->create_notebook == 1);
     host = std::make_unique<VxmHost>();
     host->notify = notify;
     host->token = token;
@@ -1335,12 +1374,17 @@ int32_t vxm_host_create(const VxmOpenOptions *options, VxmNotify notify, int64_t
     host->local_path = input_string(options->local_data_path);
     host->notebook_path = input_string(options->notebook_path);
     host->mode = options->mode;
+    host->create_notebook = options->create_notebook == 1;
     host->notebook_name = optional_string(options->notebook_name);
     host->expected_notebook_id = optional_string(options->expected_notebook_id);
     host->node_id = optional_string(options->node_id);
     require(host->expected_notebook_id.size() < 128 && host->node_id.size() < 128);
+    if (host->create_notebook) {
+      require(host->mode == VXM_MODE_CATALOG && host->expected_notebook_id.empty());
+      display_name(host->notebook_name);
+    } else require(host->notebook_name.empty());
     if (host->mode == VXM_MODE_NOTE) require(!host->expected_notebook_id.empty() && !host->node_id.empty());
-    else require(!host->notebook_name.empty() && host->node_id.empty());
+    else require(host->node_id.empty());
     const auto cost = host->app_path.size() + host->local_path.size() + host->notebook_path.size() + host->notebook_name.size() + host->expected_notebook_id.size() + host->node_id.size();
     const auto kind = host->mode == VXM_MODE_NOTE ? VXM_EVENT_OPEN : VXM_EVENT_CATALOG_OPEN;
     const auto code = admit(*host, kind, 1, host->generation, 0, nullptr, nullptr, 0, cost);

@@ -435,3 +435,76 @@ Remaining offline work includes multi-notebook management, import/export and
 attachment editing. Tag-tree deletion/reparenting, editor preview, autosave/draft
 recovery and WebDAV are not included. No iOS, physical-device, Qt UI, power-loss,
 release-signing or publication claim follows from this verification.
+
+
+## Managed multi-notebook library
+
+The library now discovers the existing `notebooks/` children, creates named blank
+notebooks in opaque sibling roots, selects/reopens by observed UUID, and renames
+through full core configuration updates. Existing Personal storage is unchanged.
+Fresh installations require explicit creation. Missing open is never create;
+existing-root create returns an error, including for non-notebook directories,
+files and links. Unavailable or duplicate-UUID roots are visible, not repaired.
+Core remains pinned at `64237fb`; no upstream changes were needed for this slice.
+
+### Executed verification
+
+- Native host Release real-storage suite passed. New cases reject absent open
+  and every existing create target, validate display names, and preserve the full
+  notebook configuration and non-config bytes through rename/reopen.
+- All **47 bridge tests** passed, including desktop-fixture rename with unchanged
+  IDs, tags, metadata, assets, other configuration and note bodies; expected-ID
+  mismatch; Windows junction rejection; and read-only rename failure.
+- Flutter and bridge analysis reported no issues. All **112 Flutter tests** passed.
+  New cases exercise independent same-name notes across notebooks, restart
+  discovery, existing Personal preservation, duplicate UUIDs, stale rows and
+  workspace callbacks, replaced/missing roots, active-editor refusal, close/join
+  ordering, close-error recovery, shutdown during discovery, visible partial
+  creation and the storage candidate limit/link guards.
+- Generated FFI/core JSON key drift checks passed. The final
+  `node scripts/verify.mjs android` run regenerated/checked offline assets and
+  built both arm64 and x86_64 debug ABIs.
+
+### Actual Android surface
+
+Installed and cold-launched the multi-notebook app on Medium_Phone. The library
+showed the existing Personal notebook. Created a second notebook, added its own
+`Welcome.md`, and entered `LibraryDemoBody` in the WebView. Cancel in the
+return-to-notebook dialog retained the unwritten editor; Write then returned to
+the browser. Renamed that notebook to Projects and selected both notebooks from
+the library: Personal showed its original Welcome source, Projects showed its
+independent saved body. Projects search did not return Personal's content and its
+tag selector did not expose Personal's MobileSearch tag.
+
+Compared on-device bytes and portable metadata: Personal's notebook configuration,
+Welcome body, prior search-demo body and tag assignments were unchanged. Projects
+has a distinct notebook UUID. Installed the final rebuilt APK, cold-launched again,
+and reopened Projects: its name, notebook/node IDs and exact saved body persisted.
+Screenshots verified the actual library and selected editor surfaces. Projects is
+retained for manual testing; the AVD/app remain running on the library screen.
+
+### Verification corrections and limits
+
+- The first native rename fixture populated tags while leaving tagsModifiedUtc at
+  zero, triggering core's existing open-time legacy-tag migration. A valid
+  nonzero fixture timestamp isolates rename preservation; no core behavior was
+  suppressed or changed.
+- The first Flutter test launch overlapped the native test process holding the
+  Windows DLL, so linking failed with LNK1104. Re-ran only after that process
+  completed. Native-execution and Flutter/bridge hook builds were then serialized.
+- Test fixtures initially compared Windows path spelling/trailing separators and
+  passed mixed separators to `mklink`; they now assert filesystem identity and use
+  native command paths. Tooltip finders returned RawTooltip rather than IconButton;
+  the consumer tests now locate the actual ancestor button. These were harness
+  defects, not successful app checks.
+- Rapid synthetic `adb input text` produced a different editor string from the
+  requested injection. Paced entry produced the exact observed/saved/reopened
+  `LibraryDemoBody`. This slice makes no high-rate input/IME or performance claim;
+  the observed synthetic-input limitation remains for the editor/device gates.
+  Automation also needed explicit deletion rather than assuming Ctrl+A selected a
+  Flutter field, and recovered from one failed UI hierarchy dump.
+
+No import/export, notebook removal, attachment editing, draft recovery, preview,
+WebDAV, iOS/physical-device, power-loss, release-signing or publication claim is
+made. Both fixture-based host verification and emulator interaction are recorded;
+neither substitutes for the remaining device gates.

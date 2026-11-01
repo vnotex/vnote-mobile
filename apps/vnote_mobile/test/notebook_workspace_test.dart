@@ -5,7 +5,11 @@ import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vnote_mobile/app/vnote_app.dart';
 import 'package:vnote_mobile/features/library/notebook_browser.dart';
+import 'package:vnote_mobile/features/library/notebook_library_screen.dart';
+import 'package:vnote_mobile/services/managed_notebook_storage.dart';
+import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
@@ -32,12 +36,14 @@ const _folder = CoreEntry(
 
 CoreDirectory _directory({
   String id = 'root-id',
+  String notebookId = 'book-identity',
+  String name = 'Personal',
   String path = '.',
   String? parentId,
   List<CoreEntry> entries = const [_folder, _note],
 }) => CoreDirectory(
-  notebookId: 'book-identity',
-  notebookName: 'Personal',
+  notebookId: notebookId,
+  notebookName: name,
   folderId: id,
   path: path,
   parentId: parentId,
@@ -163,6 +169,11 @@ class _Catalog implements CatalogCore {
   Future<String> createFolder(String folderId, String name) =>
       _change(['folder', folderId, name]);
   @override
+  Future<void> renameNotebook(String name) async {
+    await _change(['renameNotebook', name]);
+  }
+
+  @override
   Future<void> rename(String nodeId, String name) async {
     await _change(['rename', nodeId, name]);
   }
@@ -217,13 +228,13 @@ class _Note implements NotebookCore {
 class _Harness {
   _Harness({bool widgetTest = false}) {
     workspace = NotebookWorkspace(
-      obtainPaths: () async => const ManagedNotebookPaths(
+      notebookId: 'book-identity',
+      paths: const ManagedNotebookPaths(
         app: 'app',
         local: 'local',
         notebook: 'notebook',
       ),
       openCatalog: (paths, expected) async {
-        expectedIds.add(expected);
         if (catalogFactory != null) return catalogFactory!(expected);
         final catalog = _Catalog(owners, _directory());
         catalogs.add(catalog);
@@ -261,9 +272,8 @@ class _Harness {
   final owners = _Owners();
   final catalogs = <_Catalog>[];
   final notes = <_Note>[];
-  final expectedIds = <String?>[];
   final noteIds = <List<String>>[];
-  Future<CatalogCore> Function(String?)? catalogFactory;
+  Future<CatalogCore> Function(String)? catalogFactory;
   Future<NotebookCore> Function()? noteFactory;
   late final NotebookWorkspace workspace;
 
@@ -276,7 +286,583 @@ class _Harness {
   }
 }
 
+Future<String> _createNotebook(ManagedNotebookPaths paths) async {
+  final catalog = await CoreNotebook.createCatalog(
+    appDataPath: paths.app,
+    localDataPath: paths.local,
+    notebookPath: paths.notebook,
+    notebookName: 'Personal',
+  );
+  try {
+    return catalog.initialDirectory.notebookId;
+  } finally {
+    await catalog.close();
+  }
+}
+
+// A presentation driver only: lifecycle/storage proof uses the real library
+// service tests. These callbacks record which snapshot the consumer selected.
+class _Library extends NotebookLibrary {
+  final createdNames = <String>[];
+  final openedEntries = <ManagedNotebookEntry>[];
+  final returnedWorkspaces = <NotebookWorkspace>[];
+  int refreshes = 0;
+
+  @override
+  Future<void> initialize() async {}
+
+  @override
+  Future<bool> refresh() async {
+    refreshes++;
+    return true;
+  }
+
+  @override
+  Future<bool> createNotebook(String name) async {
+    createdNames.add(name);
+    return true;
+  }
+
+  @override
+  Future<bool> openNotebook(ManagedNotebookEntry entry) async {
+    openedEntries.add(entry);
+    return true;
+  }
+
+  @override
+  Future<bool> returnToLibrary(NotebookWorkspace workspace) async {
+    returnedWorkspaces.add(workspace);
+    return false;
+  }
+
+  @override
+  Future<void> shutdown() async {}
+}
+
 void main() {
+  test(
+    'native notebook rename updates the selected title and survives reopen',
+    () async {
+      final root = await Directory.systemTemp.createTemp(
+        'vnote-workspace-rename-',
+      );
+      final paths = ManagedNotebookPaths(
+        app: '${root.path}/app',
+        local: '${root.path}/local',
+        notebook: '${root.path}/book',
+      );
+      final notebookId = await _createNotebook(paths);
+      final workspace = NotebookWorkspace(paths: paths, notebookId: notebookId);
+      NotebookWorkspace? reopened;
+      addTearDown(() async {
+        await workspace.shutdown();
+        workspace.dispose();
+        await reopened?.shutdown();
+        reopened?.dispose();
+        await root.delete(recursive: true);
+      });
+      await workspace.initialize();
+      final rootId = workspace.value.directory!.folderId;
+      final note = (await workspace.createNote('Kept.md'))!;
+      final result = (await workspace.renameNotebook('Research 😀'))!;
+      expect(result.applied, isTrue);
+      expect(result.refreshError, isNull);
+      expect(workspace.value.directory!.notebookName, 'Research 😀');
+      expect(workspace.value.directory!.notebookId, notebookId);
+      expect(workspace.value.directory!.folderId, rootId);
+      expect(workspace.value.directory!.entries.single.id, note.nodeId);
+      expect(await File('${paths.notebook}/Kept.md').exists(), isTrue);
+      await workspace.shutdown();
+      final next = NotebookWorkspace(paths: paths, notebookId: notebookId);
+      reopened = next;
+      await next.initialize();
+      expect(next.value.error, isNull);
+      expect(next.value.directory!.notebookName, 'Research 😀');
+      expect(next.value.directory!.entries.single.id, note.nodeId);
+    },
+  );
+
+  test(
+    'workspace rejects a replacement identity from its initial catalog',
+    () async {
+      final harness = _Harness();
+      harness.catalogFactory = (_) async {
+        final catalog = _Catalog(
+          harness.owners,
+          _directory(notebookId: 'replacement-identity'),
+        );
+        harness.catalogs.add(catalog);
+        return catalog;
+      };
+      await harness.workspace.initialize();
+      expect(harness.workspace.value.directory, isNull);
+      expect(harness.workspace.value.error, contains('identity changed'));
+      expect(harness.workspace.value.canMutate, isFalse);
+      expect(await harness.workspace.openNote(_note), isFalse);
+      expect(await harness.workspace.renameNotebook('Wrong notebook'), isNull);
+    },
+  );
+
+  test(
+    'notebook rename refreshes its title and invalidates search and tag tokens',
+    () async {
+      final harness = _Harness();
+      await harness.workspace.initialize();
+      final catalog = harness.catalogs.single;
+      final tags = await harness.workspace.loadTags(_note);
+      await harness.workspace.search('needle');
+      final search = harness.workspace.value.search!;
+      catalog.onList = (_) async => _directory(name: 'Renamed notebook');
+      final result = (await harness.workspace.renameNotebook(
+        'Renamed notebook',
+      ))!;
+      expect(result.applied, isTrue);
+      expect(result.nodeId, isNull);
+      expect(result.error, isNull);
+      expect(result.refreshError, isNull);
+      expect(
+        harness.workspace.value.directory!.notebookName,
+        'Renamed notebook',
+      );
+      expect(harness.workspace.value.directory!.notebookId, 'book-identity');
+      expect(harness.workspace.value.search, isNull);
+      expect(
+        await harness.workspace.openSearchHit(search, search.matches.single),
+        isFalse,
+      );
+      expect(await harness.workspace.setTags(_note, tags, []), isNull);
+      expect(catalog.tagChanges, isEmpty);
+      expect(catalog.changes, [
+        ['renameNotebook', 'Renamed notebook'],
+      ]);
+      expect(catalog.lists, ['root-id']);
+    },
+  );
+
+  for (final mutationFails in [false, true]) {
+    test(
+      'notebook rename keeps mutation and refresh failures distinct ($mutationFails)',
+      () async {
+        final harness = _Harness();
+        await harness.workspace.initialize();
+        final catalog = harness.catalogs.single;
+        if (mutationFails) {
+          catalog.onMutation = () async =>
+              throw const CoreException(6, 'Rename failed');
+        }
+        catalog.onList = (_) async =>
+            throw const CoreException(8, 'Refresh failed');
+        final result = (await harness.workspace.renameNotebook('New name'))!;
+        expect(result.applied, !mutationFails);
+        expect(
+          result.error,
+          mutationFails ? contains('Rename failed') : isNull,
+        );
+        expect(result.refreshError, contains('Refresh failed'));
+        expect(harness.workspace.value.stale, isTrue);
+        expect(harness.workspace.value.mutation, same(result));
+        expect(catalog.lists, ['root-id']);
+        expect(
+          await harness.workspace.renameNotebook('Retry while stale'),
+          isNull,
+        );
+        expect(catalog.changes.length, 1);
+      },
+    );
+  }
+
+  test('notebook rename is unavailable while an editor exists or shutdown has begun', () async {
+    final harness = _Harness();
+    final session = await harness.edit();
+    protocol.insert(session.value.editor!, 'Keep me');
+    expect(await harness.workspace.renameNotebook('While editing'), isNull);
+    expect(harness.workspace.value.session, same(session));
+    expect(session.value.dirty, isTrue);
+    await harness.workspace.shutdown();
+    expect(await harness.workspace.renameNotebook('After closing'), isNull);
+    expect(harness.catalogs.single.changes, isEmpty);
+  });
+
+  testWidgets(
+    'browser rename rejects stale dialogs and leaves Notebooks available after refresh failure',
+    (tester) async {
+      final harness = _Harness(widgetTest: true);
+      await harness.workspace.initialize();
+      final catalog = harness.catalogs.single;
+      var returns = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookBrowser(
+            workspace: harness.workspace,
+            dark: false,
+            onThemeChanged: (_) {},
+            onShowNotebooks: () => returns++,
+          ),
+        ),
+      );
+      await tester.tap(find.byTooltip('Rename notebook'));
+      await tester.pumpAndSettle();
+      expect(
+        find.text('Display name only. The notebook folder is not renamed.'),
+        findsOneWidget,
+      );
+      await tester.enterText(find.byType(TextFormField), 'Stale name');
+      catalog.onList = (_) async => _directory();
+      await harness.workspace.refresh();
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(catalog.changes, isEmpty);
+      await tester.tap(find.byTooltip('Rename notebook'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), 'Research');
+      catalog.onList = (_) async => _directory(name: 'Research');
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(find.widgetWithText(AppBar, 'Research'), findsOneWidget);
+      expect(catalog.changes.single, ['renameNotebook', 'Research']);
+      await tester.tap(find.byTooltip('Rename notebook'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), 'Applied name');
+      catalog.onList = (_) async => throw const CoreException(6, 'Read failed');
+      await tester.tap(find.widgetWithText(FilledButton, 'Save'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('It was not rolled back.'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.ancestor(
+                of: find.byTooltip('Rename notebook'),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.tap(find.byTooltip('Notebooks'));
+      expect(returns, 1);
+      await harness.workspace.shutdown();
+      await tester.pump();
+      expect(
+        tester
+            .widget<IconButton>(
+              find.ancestor(
+                of: find.byTooltip('Notebooks'),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'failed browser uses a generic title and still offers Notebooks',
+    (tester) async {
+      final harness = _Harness(widgetTest: true);
+      harness.catalogFactory = (_) async =>
+          throw const CoreException(6, 'Unavailable');
+      await harness.workspace.initialize();
+      var returns = 0;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookBrowser(
+            workspace: harness.workspace,
+            dark: false,
+            onThemeChanged: (_) {},
+            onShowNotebooks: () => returns++,
+          ),
+        ),
+      );
+      expect(find.widgetWithText(AppBar, 'Notebook'), findsOneWidget);
+      expect(find.text('Personal'), findsNothing);
+      await tester.tap(find.byTooltip('Notebooks'));
+      expect(returns, 1);
+      await harness.workspace.shutdown();
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'library exposes empty, unavailable and duplicate states and rejects stale rows',
+    (tester) async {
+      final library = _Library()..value = NotebookLibraryState(stale: false);
+      addTearDown(library.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookLibraryScreen(
+            library: library,
+            dark: false,
+            onThemeChanged: (_) {},
+          ),
+        ),
+      );
+      expect(
+        find.text('No notebooks yet. Choose New notebook to create one.'),
+        findsOneWidget,
+      );
+      final available = ManagedNotebookEntry(
+        location: 'private/path/one',
+        notebookId: 'hidden-id-one',
+        name: 'Personal',
+      );
+      final entries = [
+        available,
+        ManagedNotebookEntry(
+          location: 'private/path/bad',
+          name: 'Broken',
+          error: 'Malformed notebook',
+        ),
+        ManagedNotebookEntry(
+          location: 'private/path/copy-a',
+          notebookId: 'duplicate-id',
+          name: 'Copy A',
+          error: 'Duplicate notebook identity',
+        ),
+        ManagedNotebookEntry(
+          location: 'private/path/copy-b',
+          notebookId: 'duplicate-id',
+          name: 'Copy B',
+          error: 'Duplicate notebook identity',
+        ),
+      ];
+      library.value = NotebookLibraryState(entries: entries, stale: false);
+      await tester.pump();
+      expect(
+        find.text('Unavailable: Duplicate notebook identity'),
+        findsNWidgets(2),
+      );
+      expect(find.text('Unavailable: Malformed notebook'), findsOneWidget);
+      expect(find.textContaining('private/path'), findsNothing);
+      expect(find.text('hidden-id-one'), findsNothing);
+      expect(
+        tester.widget<ListTile>(find.widgetWithText(ListTile, 'Copy A')).onTap,
+        isNull,
+      );
+      final staleTap = tester
+          .widget<ListTile>(find.widgetWithText(ListTile, 'Personal'))
+          .onTap!;
+      library.value = NotebookLibraryState(entries: entries, stale: false);
+      staleTap();
+      expect(library.openedEntries, isEmpty);
+      await tester.pump();
+      await tester.tap(find.text('Personal'));
+      expect(library.openedEntries, [same(available)]);
+      await tester.tap(find.byTooltip('Refresh'));
+      expect(library.refreshes, 1);
+      library.value = NotebookLibraryState(
+        entries: entries,
+        busy: true,
+        stale: false,
+      );
+      await tester.pump();
+      expect(
+        tester
+            .widget<IconButton>(
+              find.ancestor(
+                of: find.byTooltip('Refresh'),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byWidgetPredicate((widget) => widget is TextButton),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<ListTile>(find.widgetWithText(ListTile, 'Personal'))
+            .onTap,
+        isNull,
+      );
+      library.value = NotebookLibraryState(
+        entries: entries,
+        error: 'Listing failed',
+      );
+      await tester.pump();
+      expect(find.textContaining('Listing failed'), findsOneWidget);
+      expect(
+        tester
+            .widget<IconButton>(
+              find.ancestor(
+                of: find.byTooltip('Refresh'),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNotNull,
+      );
+      expect(
+        tester
+            .widget<TextButton>(
+              find.byWidgetPredicate((widget) => widget is TextButton),
+            )
+            .onPressed,
+        isNull,
+      );
+      library.value = NotebookLibraryState(entries: entries, closed: true);
+      await tester.pump();
+      expect(
+        find.textContaining('The notebook library is closed.'),
+        findsOneWidget,
+      );
+      expect(
+        tester
+            .widget<IconButton>(
+              find.ancestor(
+                of: find.byTooltip('Refresh'),
+                matching: find.byType(IconButton),
+              ),
+            )
+            .onPressed,
+        isNull,
+      );
+      expect(
+        tester
+            .widget<ListTile>(find.widgetWithText(ListTile, 'Personal'))
+            .onTap,
+        isNull,
+      );
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'library creates named notebooks only from the current dialog snapshot',
+    (tester) async {
+      final library = _Library()..value = NotebookLibraryState(stale: false);
+      addTearDown(library.dispose);
+      bool? dark;
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookLibraryScreen(
+            library: library,
+            dark: false,
+            onThemeChanged: (value) => dark = value,
+          ),
+        ),
+      );
+      await tester.tap(find.byTooltip('Use dark theme'));
+      expect(dark, isTrue);
+      await tester.tap(find.text('New notebook'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), '   ');
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pump();
+      expect(find.text('Enter a name.'), findsOneWidget);
+      await tester.enterText(find.byType(TextFormField), 'Stale name');
+      library.value = NotebookLibraryState(stale: false);
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+      expect(library.createdNames, isEmpty);
+      await tester.tap(find.text('New notebook'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), 'Research 😀');
+      await tester.tap(find.widgetWithText(FilledButton, 'Create'));
+      await tester.pumpAndSettle();
+      expect(library.createdNames, ['Research 😀']);
+      await tester.tap(find.text('New notebook'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(library.createdNames, ['Research 😀']);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'app resets browser state between workspaces and binds exact return tokens',
+    (tester) async {
+      final first = _Harness(widgetTest: true);
+      final second = _Harness(widgetTest: true);
+      await first.workspace.initialize();
+      await second.workspace.initialize();
+      final library = _Library()..value = NotebookLibraryState(stale: false);
+      await tester.pumpWidget(VNoteApp(library: library));
+      expect(find.byType(NotebookLibraryScreen), findsOneWidget);
+      library.value = NotebookLibraryState(
+        workspace: first.workspace,
+        stale: false,
+      );
+      await tester.pump();
+      final staleReturn = tester
+          .widget<IconButton>(
+            find.ancestor(
+              of: find.byTooltip('Notebooks'),
+              matching: find.byType(IconButton),
+            ),
+          )
+          .onPressed!;
+      await tester.tap(find.byTooltip('Search notebook'));
+      await tester.pumpAndSettle();
+      expect(find.text('Back to folders'), findsOneWidget);
+      await first.workspace.shutdown();
+      library.value = NotebookLibraryState(
+        workspace: second.workspace,
+        stale: false,
+      );
+      await tester.pumpAndSettle();
+      expect(find.text('Back to folders'), findsNothing);
+      expect(find.text(_note.name), findsOneWidget);
+      staleReturn();
+      expect(library.returnedWorkspaces, [same(first.workspace)]);
+      expect(second.workspace.value.closed, isFalse);
+      await tester.tap(find.byTooltip('Notebooks'));
+      expect(library.returnedWorkspaces.last, same(second.workspace));
+      await second.workspace.shutdown();
+      library.value = NotebookLibraryState(stale: false);
+      await tester.pump();
+      expect(find.byType(NotebookLibraryScreen), findsOneWidget);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'editor Cancel retains input and Discard returns to the browser before Notebooks',
+    (tester) async {
+      final harness = _Harness(widgetTest: true);
+      await harness.workspace.initialize();
+      final library = _Library()
+        ..value = NotebookLibraryState(
+          workspace: harness.workspace,
+          stale: false,
+        );
+      await tester.pumpWidget(VNoteApp(library: library));
+      final session = await harness.edit();
+      protocol.insert(session.value.editor!, 'Retain on Cancel');
+      await tester.pumpAndSettle();
+      expect(find.byTooltip('Notebooks'), findsNothing);
+      expect(find.byTooltip('Rename notebook'), findsNothing);
+      await tester.tap(find.byTooltip('Return to notebook'));
+      await tester.pumpAndSettle();
+      expect(find.text('Return to notebook?'), findsOneWidget);
+      expect(find.widgetWithText(AlertDialog, 'Write'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(harness.workspace.value.session, same(session));
+      expect(session.value.editor!.value.text, contains('Retain on Cancel'));
+      expect(library.returnedWorkspaces, isEmpty);
+      await tester.tap(find.byTooltip('Return to notebook'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Discard'));
+      await tester.pumpAndSettle();
+      expect(harness.workspace.value.session, isNull);
+      expect(find.byType(NotebookBrowser), findsOneWidget);
+      expect(library.returnedWorkspaces, isEmpty);
+      await tester.tap(find.byTooltip('Notebooks'));
+      expect(library.returnedWorkspaces, [same(harness.workspace)]);
+      await harness.workspace.shutdown();
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
   test('native nested create, write, reopen, move and return preserve notebook and node identities', () async {
     final root = await Directory.systemTemp.createTemp('vnote-workspace-');
     final paths = ManagedNotebookPaths(
@@ -284,20 +870,8 @@ void main() {
       local: '${root.path}/local',
       notebook: '${root.path}/book',
     );
-    final expectedIds = <String?>[];
-    final workspace = NotebookWorkspace(
-      obtainPaths: () async => paths,
-      openCatalog: (paths, expected) {
-        expectedIds.add(expected);
-        return CoreNotebook.openCatalog(
-          appDataPath: paths.app,
-          localDataPath: paths.local,
-          notebookPath: paths.notebook,
-          notebookName: 'Personal',
-          expectedNotebookId: expected,
-        );
-      },
-    );
+    final notebookId = await _createNotebook(paths);
+    final workspace = NotebookWorkspace(paths: paths, notebookId: notebookId);
     addTearDown(() async {
       await workspace.shutdown();
       workspace.dispose();
@@ -305,7 +879,7 @@ void main() {
     });
     await workspace.initialize();
     expect(workspace.value.error, isNull);
-    final notebookId = workspace.value.directory!.notebookId;
+    expect(workspace.value.directory!.notebookId, notebookId);
     final rootId = workspace.value.directory!.folderId;
     expect(workspace.value.directory!.entries, isEmpty);
     final folder = await workspace.createFolder('研究');
@@ -430,8 +1004,6 @@ void main() {
       workspace.value.directory!.entries.any((item) => item.id == entry.id),
       isFalse,
     );
-    expect(expectedIds.first, isNull);
-    expect(expectedIds.skip(1), everyElement(notebookId));
   });
 
   test(
@@ -445,12 +1017,12 @@ void main() {
         local: '${root.path}/local',
         notebook: '${root.path}/book',
       );
-      final expectedIds = <String?>[];
+      final notebookId = await _createNotebook(paths);
       var removeBeforeOpen = false;
       final workspace = NotebookWorkspace(
-        obtainPaths: () async => paths,
+        paths: paths,
+        notebookId: notebookId,
         openCatalog: (paths, expected) async {
-          expectedIds.add(expected);
           if (removeBeforeOpen) {
             removeBeforeOpen = false;
             await Directory(paths.notebook).rename('${root.path}/removed');
@@ -459,7 +1031,6 @@ void main() {
             appDataPath: paths.app,
             localDataPath: paths.local,
             notebookPath: paths.notebook,
-            notebookName: 'Personal',
             expectedNotebookId: expected,
           );
         },
@@ -470,7 +1041,7 @@ void main() {
         await root.delete(recursive: true);
       });
       await workspace.initialize();
-      final notebookId = workspace.value.directory!.notebookId;
+      expect(workspace.value.directory!.notebookId, notebookId);
       await workspace.createNote('Existing.md');
       await workspace.openNote(workspace.value.directory!.entries.single);
       final session = workspace.value.session!;
@@ -489,7 +1060,6 @@ void main() {
       expect(workspace.value.stale, isTrue);
       expect(await workspace.refresh(), isFalse);
       expect(await Directory(paths.notebook).exists(), isFalse);
-      expect(expectedIds.skip(1), everyElement(notebookId));
       await Directory('${root.path}/removed').rename(paths.notebook);
       expect(await workspace.refresh(), isTrue);
       expect(workspace.value.directory!.notebookId, notebookId);
@@ -507,7 +1077,6 @@ void main() {
     expect(harness.workspace.value.error, contains('16'));
     expect(harness.workspace.value.error, contains('Encrypted'));
     expect(harness.workspace.value.stale, isFalse);
-    expect(harness.expectedIds, [null, 'book-identity']);
     expect(harness.catalogs.first.closes, 1);
     expect(harness.owners.active, 1);
   });
@@ -542,7 +1111,6 @@ void main() {
       expect(session.value.dirty, isTrue);
       expect(session.value.error, contains('18'));
       expect(harness.notes.single.core.closes, 0);
-      expect(harness.expectedIds, [null]);
     },
   );
 
@@ -576,7 +1144,6 @@ void main() {
     expect(editor.value.ready, isTrue);
     expect(session.value.dirty, isTrue);
     expect(harness.notes.single.core.closes, 0);
-    expect(harness.expectedIds, [null]);
   });
 
   test('shutdown cancels a pending editor barrier and joins without reopening the catalog', () async {
@@ -593,7 +1160,6 @@ void main() {
     expect(await returning, isFalse);
     await closing;
     expect(harness.notes.single.core.closes, 1);
-    expect(harness.expectedIds, [null]);
   });
 
   test('shutdown drains an admitted native write before releasing the selected owner', () async {
@@ -614,7 +1180,6 @@ void main() {
     expect(await writing, isTrue);
     await closing;
     expect(core.closes, 1);
-    expect(harness.expectedIds, [null]);
   });
 
   test(
@@ -717,7 +1282,6 @@ void main() {
     catalog.closeGate!.complete();
     await harness.workspace.shutdown();
     await harness.workspace.initialize();
-    expect(harness.expectedIds, [null]);
     expect(
       states.every((state) => state.directory == null && state.session == null),
       isTrue,
@@ -771,12 +1335,10 @@ void main() {
       (message) => protocol.answer(firstEditor, message),
     );
     await protocol.turn();
-    expect(harness.expectedIds, [null]);
     expect(await harness.workspace.openNote(_note), isFalse);
     expect(harness.owners.active, 1);
     note.core.closeGate!.complete();
     expect(await returning, isTrue);
-    expect(harness.expectedIds, [null, 'book-identity']);
     expect(await harness.workspace.openNote(_note), isTrue);
     final next = harness.workspace.value.session!;
     expect(
@@ -1006,7 +1568,6 @@ void main() {
       ),
       isTrue,
     );
-    expect(harness.expectedIds, [null, 'book-identity']);
     expect(harness.workspace.value.search, isNull);
     expect(
       await harness.workspace.openSearchHit(result, result.matches.single),
@@ -1033,7 +1594,6 @@ void main() {
       await harness.workspace.openSearchHit(result, result.matches.single),
       isFalse,
     );
-    expect(harness.expectedIds, [null, 'book-identity']);
   });
 
   test('shutdown cancels search but waits for its terminal before closing the owner', () async {
@@ -1180,6 +1740,7 @@ void main() {
             workspace: harness.workspace,
             dark: false,
             onThemeChanged: (_) {},
+            onShowNotebooks: () {},
           ),
         ),
       );
@@ -1253,6 +1814,7 @@ void main() {
             workspace: harness.workspace,
             dark: false,
             onThemeChanged: (_) {},
+            onShowNotebooks: () {},
           ),
         ),
       );
@@ -1315,6 +1877,7 @@ void main() {
             workspace: harness.workspace,
             dark: false,
             onThemeChanged: (_) {},
+            onShowNotebooks: () {},
           ),
         ),
       );
@@ -1396,6 +1959,7 @@ void main() {
             workspace: harness.workspace,
             dark: false,
             onThemeChanged: (_) {},
+            onShowNotebooks: () {},
           ),
         ),
       );
@@ -1471,6 +2035,7 @@ void main() {
             workspace: harness.workspace,
             dark: false,
             onThemeChanged: (_) {},
+            onShowNotebooks: () {},
           ),
         ),
       );
@@ -1532,6 +2097,7 @@ void main() {
             workspace: harness.workspace,
             dark: false,
             onThemeChanged: (_) {},
+            onShowNotebooks: () {},
           ),
         ),
       );

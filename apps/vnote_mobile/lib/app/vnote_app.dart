@@ -6,18 +6,20 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../features/editor/notebook_editor.dart';
 import '../features/library/notebook_browser.dart';
+import '../features/library/notebook_library_screen.dart';
+import '../services/notebook_library.dart';
 import '../services/notebook_workspace.dart';
 
 // A dependency token, not a process-global notebook or native-core singleton.
-final _workspaceProvider = Provider<NotebookWorkspace>(
-  (ref) => throw StateError('NotebookWorkspace must be constructor-injected.'),
+final _libraryProvider = Provider<NotebookLibrary>(
+  (ref) => throw StateError('NotebookLibrary must be constructor-injected.'),
 );
 
-/// Owns the injected workspace for this application lifetime.
+/// Owns the injected notebook library for this application lifetime.
 class VNoteApp extends StatefulWidget {
-  const VNoteApp({required this.workspace, super.key});
+  const VNoteApp({required this.library, super.key});
 
-  final NotebookWorkspace workspace;
+  final NotebookLibrary library;
 
   @override
   State<VNoteApp> createState() => _VNoteAppState();
@@ -29,18 +31,18 @@ class _VNoteAppState extends State<VNoteApp> {
   @override
   void initState() {
     super.initState();
-    unawaited(widget.workspace.initialize());
+    unawaited(widget.library.initialize());
   }
 
   @override
   void dispose() {
-    widget.workspace.dispose();
+    widget.library.dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) => ProviderScope(
-    overrides: [_workspaceProvider.overrideWithValue(widget.workspace)],
+    overrides: [_libraryProvider.overrideWithValue(widget.library)],
     child: MaterialApp(
       title: 'VNote Mobile',
       debugShowCheckedModeBanner: false,
@@ -53,22 +55,40 @@ class _VNoteAppState extends State<VNoteApp> {
       themeMode: _dark ? ThemeMode.dark : ThemeMode.light,
       home: Consumer(
         builder: (context, ref, _) {
-          final workspace = ref.watch(_workspaceProvider);
-          return ValueListenableBuilder<NotebookWorkspaceState>(
-            valueListenable: workspace,
-            builder: (context, state, _) => state.session == null
-                ? NotebookBrowser(
-                    workspace: workspace,
-                    dark: _dark,
-                    onThemeChanged: (dark) => setState(() => _dark = dark),
-                  )
-                : NotebookEditor(
-                    key: ObjectKey(state.session),
-                    workspace: workspace,
-                    session: state.session!,
-                    dark: _dark,
-                    onThemeChanged: (dark) => setState(() => _dark = dark),
-                  ),
+          final library = ref.watch(_libraryProvider);
+          return ValueListenableBuilder<NotebookLibraryState>(
+            valueListenable: library,
+            builder: (context, libraryState, _) {
+              final workspace = libraryState.workspace;
+              if (workspace == null) {
+                return NotebookLibraryScreen(
+                  key: ObjectKey(library),
+                  library: library,
+                  dark: _dark,
+                  onThemeChanged: (dark) => setState(() => _dark = dark),
+                );
+              }
+              return ValueListenableBuilder<NotebookWorkspaceState>(
+                key: ObjectKey(workspace),
+                valueListenable: workspace,
+                builder: (context, state, _) => state.session == null
+                    ? NotebookBrowser(
+                        key: ObjectKey(workspace),
+                        workspace: workspace,
+                        dark: _dark,
+                        onThemeChanged: (dark) => setState(() => _dark = dark),
+                        onShowNotebooks: () =>
+                            unawaited(library.returnToLibrary(workspace)),
+                      )
+                    : NotebookEditor(
+                        key: ObjectKey(state.session),
+                        workspace: workspace,
+                        session: state.session!,
+                        dark: _dark,
+                        onThemeChanged: (dark) => setState(() => _dark = dark),
+                      ),
+              );
+            },
           );
         },
       ),

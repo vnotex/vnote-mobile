@@ -156,7 +156,7 @@ void main() {
     'a reopened editor can write revision one through the real core',
     () async {
       final root = await Directory.systemTemp.createTemp('vnote-coordinator-');
-      final catalog = await CoreNotebook.openCatalog(
+      final catalog = await CoreNotebook.createCatalog(
         appDataPath: '${root.path}/app',
         localDataPath: '${root.path}/local',
         notebookPath: '${root.path}/book',

@@ -18,7 +18,7 @@ final class _Fixture {
 
   Future<CoreNotebook> open({String initial = 'initial\r\n'}) async {
     if (notebookId == null) {
-      final catalog = await CoreNotebook.openCatalog(
+      final catalog = await CoreNotebook.createCatalog(
         appDataPath: path('app'),
         localDataPath: path('local'),
         notebookPath: path('book'),

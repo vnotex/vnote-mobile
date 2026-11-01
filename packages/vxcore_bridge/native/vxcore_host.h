@@ -41,6 +41,7 @@ enum {
   VXM_RENAME = 3,
   VXM_MOVE = 4,
   VXM_DELETE = 5,
+  VXM_RENAME_NOTEBOOK = 6,
   VXM_MAX_CATALOG_BYTES = 8388608,
   VXM_MAX_SOURCE_BYTES = 4194304,
   VXM_MAX_OPERATIONS = 64,
@@ -56,6 +57,7 @@ typedef struct VxmOpenOptions {
   const char *expected_notebook_id;
   const char *node_id;
   int32_t mode;
+  int32_t create_notebook;
 } VxmOpenOptions;
 
 // Immutable terminal event. Pointers are borrowed until vxm_event_free(), which
@@ -84,8 +86,9 @@ typedef struct VxmEvent {
 
 // Copies bounded input and starts an owner thread. OPEN/CATALOG_OPEN is request
 // 1, revision 0. Only one host may own a given storage root until teardown.
-// Only an initial catalog open without an expected UUID may create an absent
-// notebook. Note mode requires existing notebook/node UUIDs and never creates.
+// create_notebook=0 requires an existing notebook, even without an expected UUID.
+// create_notebook=1 is catalog-only, requires a valid display name and no expected
+// UUID, and rejects every existing root entry. Note mode never creates.
 // All returns are actual VxCoreError values. Admission failure produces no event.
 // Success reserves terminal storage before work starts. Notify runs outside the
 // queue mutex and carries only a caller-owned integer token; it must not block.
@@ -97,6 +100,7 @@ VXM_API int32_t vxm_host_write(VxmHost *host, uint64_t request_id, uint64_t gene
                              uint64_t revision, const char *base_hash,
                              const uint8_t *data, uint64_t size);
 // Catalog-only. A null/empty folder ID lists root; mutations require node IDs.
+// RENAME_NOTEBOOK requires the root node ID and changes display metadata only.
 // MUTATE returns the affected/new ID, including any known partial failure ID.
 // Refresh separately after every attempted mutation; failure is not rollback.
 VXM_API int32_t vxm_host_catalog_list(VxmHost *host, uint64_t request_id,

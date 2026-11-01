@@ -192,6 +192,8 @@ const int VXM_MOVE = 4;
 
 const int VXM_RENAME = 3;
 
+const int VXM_RENAME_NOTEBOOK = 6;
+
 sealed class VxCoreError {
   static const VXCORE_OK = 0;
   static const VXCORE_ERR_INVALID_PARAM = 1;
@@ -344,6 +346,9 @@ final class VxmOpenOptions extends ffi.Struct {
   @ffi.Int32()
   external int mode;
 
+  @ffi.Int32()
+  external int create_notebook;
+
   static ffi.Pointer<VxmOpenOptions> $allocate(
     ffi.Allocator $allocator, {
     required ffi.Pointer<ffi.Char> app_data_path,
@@ -353,6 +358,7 @@ final class VxmOpenOptions extends ffi.Struct {
     required ffi.Pointer<ffi.Char> expected_notebook_id,
     required ffi.Pointer<ffi.Char> node_id,
     required int mode,
+    required int create_notebook,
   }) => $allocator<VxmOpenOptions>()
     ..ref.app_data_path = app_data_path
     ..ref.local_data_path = local_data_path
@@ -360,5 +366,6 @@ final class VxmOpenOptions extends ffi.Struct {
     ..ref.notebook_name = notebook_name
     ..ref.expected_notebook_id = expected_notebook_id
     ..ref.node_id = node_id
-    ..ref.mode = mode;
+    ..ref.mode = mode
+    ..ref.create_notebook = create_notebook;
 }

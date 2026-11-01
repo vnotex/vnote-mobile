@@ -15,12 +15,32 @@ final class _Fixture {
   File file(String relative) => File(path('book/$relative'));
 
   Future<CoreNotebook> catalog({String? expected}) async {
+    // Only the first absent test fixture is explicitly created. Once an ID has
+    // been observed, deletion/replacement must exercise existing-only open.
+    if (expected == null &&
+        notebookId == null &&
+        await FileSystemEntity.type(path('book'), followLinks: false) ==
+            FileSystemEntityType.notFound) {
+      final created = await create();
+      await created.close();
+    }
     final core = await CoreNotebook.openCatalog(
       appDataPath: path('app'),
       localDataPath: path('local'),
       notebookPath: path('book'),
-      notebookName: 'Personal',
       expectedNotebookId: expected ?? notebookId,
+    );
+    hosts.add(core);
+    notebookId = core.initialDirectory.notebookId;
+    return core;
+  }
+
+  Future<CoreNotebook> create({String name = 'Personal'}) async {
+    final core = await CoreNotebook.createCatalog(
+      appDataPath: path('app'),
+      localDataPath: path('local'),
+      notebookPath: path('book'),
+      notebookName: name,
     );
     hosts.add(core);
     notebookId = core.initialDirectory.notebookId;
@@ -117,12 +137,254 @@ Future<void> _directoryLink(String link, String target) async {
   }
 }
 
+Future<Map<String, Object>> _snapshot(String path) async {
+  final result = <String, Object>{};
+  Future<void> capture(String entry, String key) async {
+    final type = await FileSystemEntity.type(entry, followLinks: false);
+    if (type == FileSystemEntityType.file) {
+      result[key] = await File(entry).readAsBytes();
+    } else if (type == FileSystemEntityType.link) {
+      result[key] = 'link:${await Link(entry).target()}';
+    } else {
+      expect(type, FileSystemEntityType.directory);
+      result[key] = 'directory';
+    }
+  }
+
+  await capture(path, '.');
+  if (await FileSystemEntity.type(path, followLinks: false) ==
+      FileSystemEntityType.directory) {
+    await for (final entry in Directory(
+      path,
+    ).list(recursive: true, followLinks: false)) {
+      await capture(
+        entry.path,
+        entry.path.substring(path.length + 1).replaceAll('\\', '/'),
+      );
+    }
+  }
+  return result;
+}
+
 void main() {
   late _Fixture fixture;
   setUp(() async {
     fixture = _Fixture(await Directory.systemTemp.createTemp('vnote-catalog-'));
   });
   tearDown(() => fixture.dispose());
+
+  test(
+    'catalog open never creates an absent notebook, with or without an ID',
+    () async {
+      for (final expected in [null, 'missing-notebook']) {
+        await expectLater(
+          CoreNotebook.openCatalog(
+            appDataPath: fixture.path('app'),
+            localDataPath: fixture.path('local'),
+            notebookPath: fixture.path('book'),
+            expectedNotebookId: expected,
+          ),
+          throwsA(_failure),
+        );
+        expect(
+          await FileSystemEntity.type(fixture.path('book'), followLinks: false),
+          FileSystemEntityType.notFound,
+        );
+      }
+      final created = await fixture.create(name: 'Explicit / 研究: 😀');
+      final initial = created.initialDirectory;
+      expect(initial.entries, isEmpty);
+      expect(initial.notebookName, 'Explicit / 研究: 😀');
+      await created.close();
+      final before = await _snapshot(fixture.path('book'));
+      await expectLater(
+        fixture.catalog(expected: 'another-notebook'),
+        throwsA(_code(18)),
+      );
+      expect(await _snapshot(fixture.path('book')), before);
+      final reopened = await CoreNotebook.openCatalog(
+        appDataPath: fixture.path('app'),
+        localDataPath: fixture.path('local'),
+        notebookPath: fixture.path('book'),
+      );
+      fixture.hosts.add(reopened);
+      expect(reopened.initialDirectory.notebookId, initial.notebookId);
+      expect(reopened.initialDirectory.folderId, initial.folderId);
+      expect(reopened.initialDirectory.notebookName, initial.notebookName);
+    },
+  );
+
+  for (final kind in [
+    'notebook',
+    'directory',
+    'file',
+    'link',
+    'dangling link',
+  ]) {
+    test(
+      'explicit create rejects an existing $kind without changing bytes',
+      () async {
+        final path = fixture.path('book');
+        final target = Directory(fixture.path('outside'));
+        final linked = kind == 'link' || kind == 'dangling link';
+        if (kind == 'notebook') {
+          await fixture.desktop();
+        } else if (kind == 'directory') {
+          await Directory(path).create();
+          await fixture
+              .file('sentinel')
+              .writeAsString('ordinary directory data');
+        } else if (kind == 'file') {
+          await File(path).writeAsBytes([0, 255, 17, 93]);
+        } else {
+          await target.create();
+          await File('${target.path}/sentinel').writeAsString('external data');
+          await _directoryLink(path, target.path);
+          if (kind == 'dangling link') await target.delete(recursive: true);
+        }
+        try {
+          final before = await _snapshot(path);
+          final targetBefore = kind == 'link'
+              ? await _snapshot(target.path)
+              : null;
+          await expectLater(
+            fixture.create(name: 'Never replace'),
+            throwsA(_failure),
+          );
+          expect(await _snapshot(path), before);
+          if (targetBefore != null) {
+            expect(await _snapshot(target.path), targetBefore);
+          } else if (kind == 'dangling link') {
+            expect(await target.exists(), isFalse);
+          }
+        } finally {
+          if (linked) await Link(path).delete();
+        }
+      },
+    );
+  }
+
+  test(
+    'create and rename share bounded Unicode display-name validation',
+    () async {
+      final invalid = [
+        '',
+        '   ',
+        '\u00a0\u2003\u3000\ufeff',
+        'bad\u0000name',
+        'bad\nname',
+        'bad\u007fname',
+        'bad\u0085name',
+        String.fromCharCodes([0xd800]),
+        String.fromCharCodes([0xdc00]),
+        'x' * 16385,
+        '😀' * 4097,
+      ];
+      for (final name in invalid) {
+        await expectLater(fixture.create(name: name), throwsA(_failure));
+        expect(await Directory(fixture.path('book')).exists(), isFalse);
+      }
+      final catalog = await fixture.create(name: '😀' * 4096);
+      expect(catalog.initialDirectory.notebookName, '😀' * 4096);
+      final before = await _snapshot(fixture.path('book'));
+      for (final name in invalid) {
+        await expectLater(catalog.renameNotebook(name), throwsA(_failure));
+        expect(await _snapshot(fixture.path('book')), before);
+        expect((await catalog.list()).notebookName, '😀' * 4096);
+      }
+      // These are display metadata, not platform basenames or storage paths.
+      for (final name in ['.', '..', 'CON', ' /:*?<>|"\\ 😀 ', 'x' * 16384]) {
+        await catalog.renameNotebook(name);
+        expect((await catalog.list()).notebookName, name);
+        expect(await Directory(fixture.path('book')).exists(), isTrue);
+      }
+      await catalog.close();
+      final reopened = await fixture.catalog();
+      expect(reopened.initialDirectory.notebookName, 'x' * 16384);
+    },
+  );
+
+  test(
+    'desktop notebook rename preserves full config and all content on reopen',
+    () async {
+      final desktop = await fixture.desktop();
+      final config = await fixture.json('vx_notebook/config.json');
+      config['description'] = 'Desktop description';
+      config['recycleBinFolder'] = 'custom/recycler';
+      config['ignored'] = ['*.private', 'legacy/cache'];
+      config['autoSyncEnabled'] = false;
+      config['syncBackend'] = 'git';
+      config['syncRemoteUrl'] = 'https://example.invalid/never-synced';
+      config['futureDesktopField'] = {
+        'opaque': [7, true, 'retained'],
+      };
+      await fixture.putJson('vx_notebook/config.json', config);
+      final before = await _snapshot(fixture.path('book'));
+      final catalog = await fixture.catalog();
+      final initial = catalog.initialDirectory;
+      const name = 'Desktop / 改名: 😀';
+      await catalog.renameNotebook(name);
+      final current = await catalog.list();
+      expect(current.notebookName, name);
+      expect(current.notebookId, initial.notebookId);
+      expect(current.folderId, initial.folderId);
+      expect(current.path, '.');
+      expect(
+        (await catalog.list(desktop['folderId'] as String)).notebookName,
+        name,
+      );
+      expect((await catalog.tags(desktop['noteId'] as String)).assigned, [
+        'desktop-tag',
+      ]);
+      await catalog.close();
+      expect(await fixture.json('vx_notebook/config.json'), {
+        ...config,
+        'name': name,
+      });
+      final after = await _snapshot(fixture.path('book'));
+      const configKey = 'vx_notebook/config.json';
+      before.remove(configKey);
+      after.remove(configKey);
+      expect(
+        after,
+        before,
+      ); // Includes paths, node metadata, bodies, and asset bytes.
+      final reopened = await fixture.catalog();
+      expect(reopened.initialDirectory.notebookName, name);
+      expect(reopened.initialDirectory.notebookId, desktop['notebookId']);
+      expect(reopened.initialDirectory.folderId, initial.folderId);
+      await reopened.close();
+      final editor = await fixture.note(desktop['noteId'] as String);
+      final note = await editor.read();
+      expect(note.notebookName, name);
+      expect(note.notebookId, desktop['notebookId']);
+      expect(note.nodeId, desktop['noteId']);
+      expect(note.path, desktop['notePath']);
+      expect(
+        await fixture.file(desktop['assetPath'] as String).exists(),
+        isTrue,
+      );
+    },
+  );
+
+  test('readonly notebook rename fails without inventing success or a changed title', () async {
+    final catalog = await fixture.create();
+    final metadata = fixture.file('vx_notebook/config.json');
+    final before = await _snapshot(fixture.path('book'));
+    final locked = await Process.run('attrib', ['+R', metadata.path]);
+    expect(locked.exitCode, 0);
+    try {
+      await expectLater(catalog.renameNotebook('Blocked'), throwsA(_failure));
+      expect(await _snapshot(fixture.path('book')), before);
+      expect((await catalog.list()).notebookName, 'Personal');
+    } finally {
+      final unlocked = await Process.run('attrib', ['-R', metadata.path]);
+      expect(unlocked.exitCode, 0);
+    }
+    await catalog.close();
+    final reopened = await fixture.catalog();
+    expect(reopened.initialDirectory.notebookName, 'Personal');
+  }, skip: !Platform.isWindows);
 
   test(
     'saved nested content and tag search resolve moved hits by stable ID',

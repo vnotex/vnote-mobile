@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <set>
@@ -127,12 +128,13 @@ struct Host {
     fixture.seed(initial);
     VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
                            nullptr, fixture.notebook_id.empty() ? "missing" : fixture.notebook_id.c_str(),
-                           fixture.node_id.empty() ? "missing" : fixture.node_id.c_str(), VXM_MODE_NOTE};
+                           fixture.node_id.empty() ? "missing" : fixture.node_id.c_str(), VXM_MODE_NOTE, 0};
     start(options, hold);
   }
-  Host(Fixture &fixture, int32_t mode, bool hold = false, const char *expected = nullptr) {
+  Host(Fixture &fixture, int32_t mode, bool hold = false, const char *expected = nullptr,
+       bool create = false, const char *name = "Personal") {
     VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
-                           "Personal", expected, nullptr, mode};
+                           create ? name : nullptr, expected, nullptr, mode, create ? 1 : 0};
     start(options, hold);
   }
   void start(const VxmOpenOptions &options, bool hold) {
@@ -186,6 +188,179 @@ struct Host {
     handle = nullptr;
   }
 };
+
+std::map<fs::path, std::string> snapshot(const fs::path &root) {
+  std::map<fs::path, std::string> result;
+  const auto capture = [&](const fs::path &path) {
+    const auto status = fs::symlink_status(path);
+    const auto key = path.lexically_relative(root);
+    if (fs::is_symlink(status)) result[key] = "link:" + fs::read_symlink(path).u8string();
+    else if (fs::is_regular_file(status)) result[key] = "file:" + disk(path);
+    else if (fs::is_directory(status)) result[key] = "directory";
+    else CHECK(false);
+  };
+  capture(root);
+  if (fs::is_directory(fs::symlink_status(root)))
+    for (const auto &entry : fs::recursive_directory_iterator(root)) capture(entry.path());
+  return result;
+}
+
+void catalog_explicit_creation_policy() {
+  Fixture missing;
+  for (const char *expected : {static_cast<const char *>(nullptr), "missing-id"}) {
+    Host host(missing, VXM_MODE_CATALOG, false, expected);
+    CHECK(host.next()->code == VXCORE_ERR_NOT_FOUND);
+    host.close();
+    CHECK(!fs::exists(fs::symlink_status(fs::u8path(missing.notebook))));
+  }
+  for (const int kind : {0, 1, 2}) {
+    Fixture fixture;
+    const auto root = fs::u8path(fixture.notebook);
+    if (kind == 0) fixture.seed("must survive rejected create");
+    else if (kind == 1) {
+      fs::create_directory(root);
+      external_write(root / "sentinel", "ordinary non-notebook directory");
+    } else external_write(root, "ordinary file");
+    const auto before = snapshot(root);
+    Host host(fixture, VXM_MODE_CATALOG, false, nullptr, true);
+    CHECK(host.next()->code == VXCORE_ERR_ALREADY_EXISTS);
+    host.close();
+    CHECK(snapshot(root) == before);
+  }
+#if !defined(_WIN32)
+  // The Dart suite also exercises Windows junction/reparse roots.
+  for (const bool dangling : {false, true}) {
+    Fixture fixture;
+    const auto target = fixture.root / "target";
+    if (!dangling) {
+      fs::create_directory(target);
+      external_write(target / "sentinel", "link target remains unchanged");
+    }
+    const auto root = fs::u8path(fixture.notebook);
+    fs::create_directory_symlink(target, root);
+    const auto before = snapshot(root);
+    Host host(fixture, VXM_MODE_CATALOG, false, nullptr, true);
+    CHECK(host.next()->code == VXCORE_ERR_ALREADY_EXISTS);
+    host.close();
+    CHECK(snapshot(root) == before);
+    if (dangling) CHECK(!fs::exists(target));
+    else CHECK(snapshot(target).size() == 2 && disk(target / "sentinel") == "link target remains unchanged");
+  }
+#endif
+  {
+    Host host(missing, VXM_MODE_CATALOG, false, nullptr, true, u8"Personal / 研究: 😀");
+    auto opened = host.next();
+    CHECK(opened->code == VXCORE_OK);
+    CHECK(std::string(opened->notebook_name) == u8"Personal / 研究: 😀");
+    missing.notebook_id = opened->notebook_id;
+    host.close();
+  }
+  const auto before = snapshot(fs::u8path(missing.notebook));
+  {
+    Host host(missing, VXM_MODE_CATALOG, false, "wrong-id");
+    CHECK(host.next()->code == VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    host.close();
+  }
+  CHECK(snapshot(fs::u8path(missing.notebook)) == before);
+  {
+    Host host(missing, VXM_MODE_CATALOG);
+    auto opened = host.next();
+    CHECK(opened->code == VXCORE_OK && std::string(opened->notebook_id) == missing.notebook_id);
+    host.close();
+  }
+}
+
+void catalog_creation_admission_and_display_names() {
+  Fixture fixture;
+  VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
+                         "Personal", nullptr, nullptr, VXM_MODE_CATALOG, 1};
+  const auto rejected = [&] {
+    VxmHost *host = nullptr;
+    CHECK(vxm_host_create(&options, notify, 7, &host) == VXCORE_ERR_INVALID_PARAM);
+    CHECK(host == nullptr && !fs::exists(fs::u8path(fixture.notebook)));
+  };
+  for (const auto flag : {-1, 2}) { options.create_notebook = flag; rejected(); }
+  options.create_notebook = 1;
+  options.mode = VXM_MODE_NOTE;
+  rejected();
+  options.mode = VXM_MODE_CATALOG;
+  options.expected_notebook_id = "unexpected-id";
+  rejected();
+  options.expected_notebook_id = nullptr;
+  options.notebook_name = nullptr;
+  rejected();
+  const std::vector<std::string> invalid_names{
+      "", "  ", u8"\u00a0\u2003\u3000\ufeff", "bad\nname", "bad\x7f", "bad\xc2\x85",
+      "bad\xc0\xaf", "bad\xed\xa0\x80", std::string(16385, 'x'), std::string(8193, '\xc2')};
+  for (const auto &name : invalid_names) { options.notebook_name = name.c_str(); rejected(); }
+  fixture.seed("rename preserves content");
+  const auto before = snapshot(fs::u8path(fixture.notebook));
+  Host host(fixture, VXM_MODE_CATALOG);
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK);
+  const std::string root = opened->node_id;
+  for (const auto &name : invalid_names)
+    CHECK(host.mutate(2, VXM_RENAME_NOTEBOOK, root, name.c_str()) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(host.mutate(2, VXM_RENAME_NOTEBOOK, fixture.node_id, "Wrong node") == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_ERR_INVALID_PARAM);
+  CHECK(host.mutate(3, VXM_RENAME, root, "Wrong operation") == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_ERR_INVALID_PARAM);
+  CHECK(snapshot(fs::u8path(fixture.notebook)) == before);
+  CHECK(host.mutate(4, VXM_RENAME_NOTEBOOK, root, u8"Notebook / 研究: 😀") == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(vxm_host_catalog_list(host.handle, 5, host.generation, nullptr) == VXCORE_OK);
+  auto refreshed = host.next();
+  CHECK(refreshed->code == VXCORE_OK && std::string(refreshed->notebook_name) == u8"Notebook / 研究: 😀");
+  CHECK(std::string(refreshed->node_id) == root);
+  CHECK(disk(fixture.note()) == "rename preserves content");
+  host.close();
+}
+
+void catalog_rename_preserves_config_and_reopens() {
+  Fixture fixture;
+  fixture.seed("note and custom assets survive rename");
+  const auto root = fs::u8path(fixture.notebook);
+  const auto config_path = root / "vx_notebook" / "config.json";
+  auto config = Json::parse(disk(config_path));
+  config["description"] = "custom notebook description";
+  config["assetsFolder"] = "resources/assets";
+  config["recycleBinFolder"] = "custom/recycle";
+  config["ignored"] = Json::array({"*.private"});
+  config["autoSyncEnabled"] = false;
+  config["metadata"]["custom"] = Json{{"nested", Json::array({1, true, "retained"})}};
+  config["futureField"] = Json{{"keep", "unknown desktop metadata"}};
+  config["tags"] = Json::array({Json{{"name", "preserved"}, {"parent", ""}, {"metadata", Json::object()}}});
+  config["tagsModifiedUtc"] = 1; // A populated tag set must not trigger legacy open-time migration.
+  external_write(config_path, config.dump());
+  const auto asset = root / "resources" / "assets" / fs::u8path(fixture.node_id) / "pixel.bin";
+  fs::create_directories(asset.parent_path());
+  external_write(asset, "custom asset bytes");
+  auto before = snapshot(root);
+  std::string root_id;
+  {
+    Host host(fixture, VXM_MODE_CATALOG, false, fixture.notebook_id.c_str());
+    auto opened = host.next();
+    CHECK(opened->code == VXCORE_OK);
+    root_id = opened->node_id;
+    CHECK(host.mutate(2, VXM_RENAME_NOTEBOOK, root_id, u8"Renamed / 研究: 😀") == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_OK);
+    host.close();
+  }
+  config["name"] = u8"Renamed / 研究: 😀";
+  CHECK(Json::parse(disk(config_path)) == config);
+  auto after = snapshot(root);
+  before.erase(config_path.lexically_relative(root));
+  after.erase(config_path.lexically_relative(root));
+  CHECK(before == after);
+  {
+    Host host(fixture, VXM_MODE_CATALOG, false, fixture.notebook_id.c_str());
+    auto opened = host.next();
+    CHECK(opened->code == VXCORE_OK && std::string(opened->node_id) == root_id);
+    CHECK(std::string(opened->notebook_name) == u8"Renamed / 研究: 😀");
+    CHECK(std::string(opened->notebook_id) == fixture.notebook_id);
+    host.close();
+  }
+}
 
 void round_trip_and_conflict() {
   Fixture fixture;
@@ -411,7 +586,7 @@ void catalog_lifecycle_and_boundaries() {
   Event retained(nullptr, vxm_event_free);
   std::string notebook, folder, note;
   {
-    Host host(fixture, VXM_MODE_CATALOG, true);
+    Host host(fixture, VXM_MODE_CATALOG, true, nullptr, true);
     host.signals.wait_entered();
     auto opened = host.next();
     CHECK(opened->kind == VXM_EVENT_CATALOG_OPEN && opened->code == VXCORE_OK);
@@ -487,7 +662,7 @@ void catalog_lifecycle_and_boundaries() {
 
 void catalog_actual_outcome_and_close() {
   Fixture fixture;
-  Host host(fixture, VXM_MODE_CATALOG);
+  Host host(fixture, VXM_MODE_CATALOG, false, nullptr, true);
   auto opened = host.next();
   CHECK(opened->code == VXCORE_OK);
   const std::string root = opened->node_id;
@@ -513,7 +688,7 @@ void catalog_actual_outcome_and_close() {
 
 void catalog_missing_parent_does_not_create_metadata() {
   Fixture fixture;
-  Host host(fixture, VXM_MODE_CATALOG);
+  Host host(fixture, VXM_MODE_CATALOG, false, nullptr, true);
   auto opened = host.next();
   CHECK(opened->code == VXCORE_OK);
   CHECK(host.mutate(2, VXM_CREATE_FOLDER, opened->node_id, "missing") == VXCORE_OK);
@@ -535,7 +710,7 @@ void catalog_missing_parent_does_not_create_metadata() {
 
 void catalog_completed_output_accounting() {
   Fixture fixture;
-  Host host(fixture, VXM_MODE_CATALOG);
+  Host host(fixture, VXM_MODE_CATALOG, false, nullptr, true);
   std::vector<Event> held;
   held.push_back(host.next());
   CHECK(held.back()->code == VXCORE_OK);
@@ -877,6 +1052,9 @@ int main() {
     completed_mutation_is_not_cancelled();
     malformed_missing_and_encoding();
     line_ending_policy();
+    catalog_explicit_creation_policy();
+    catalog_creation_admission_and_display_names();
+    catalog_rename_preserves_config_and_reopens();
     catalog_lifecycle_and_boundaries();
     catalog_actual_outcome_and_close();
     catalog_missing_parent_does_not_create_metadata();
