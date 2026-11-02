@@ -19,6 +19,14 @@ Encrypted-note editing, raw notebook sync, desktop plugins and unsupported edito
 
 Exact-source editor offsets are UTF-16; native bodies are UTF-8. Opening without editing must not normalize line endings, Unicode or Markdown. CommonMark/GFM, KaTeX and Mermaid rendering are later fixture-gated subsets, not implied by CodeMirror syntax highlighting. The privileged editor has no preview renderer.
 
+Whole-notebook backup remains the identity-preserving interchange format. The
+separate Files and assets ZIP preserves raw content paths/bytes but omits the entire
+`vx_notebook` directory and configured recycle tree, including unknown metadata
+there. It cannot be reopened/imported as a bundled notebook. Protected content
+refuses this profile rather than being decrypted or partially skipped. Unsupported
+ordinary files stay opaque, not converted. Metadata-dependent and external links
+may not work; the content export does not normalize or rewrite source text.
+
 ## Tool/platform selection
 
 [toolchains.json](../toolchains.json) records exact initialization pins. Flutter 3.47.9 / Dart 3.13.7 and Node 24.22.2 / npm 11.19.1 were executed locally. Android native builds select API 36, minimum API 28 (Bionic Iconv availability), NDK 28.2.13676358, Gradle 9.3.1, AGP 9.1.0 and Kotlin 2.4.0 from the pinned Flutter template. iOS selects deployment 15.0 and Xcode 26.6 (17F113), SDK 26.5; the [macOS CI image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md) lists that Xcode. This selection is not iOS build evidence or the completed full-native dependency intersection.

@@ -1052,9 +1052,10 @@ void catalog_tags_are_complete_or_error() {
 
 
 constexpr uint64_t kSnapshotBudget = 4ULL * 1024 * 1024 * 1024 - 128 * 1024;
-int32_t capture(Host &host, uint64_t id, const fs::path &destination, uint64_t budget = kSnapshotBudget) {
+int32_t capture(Host &host, uint64_t id, const fs::path &destination, uint64_t budget = kSnapshotBudget,
+                int32_t format = VXM_EXPORT_NOTEBOOK) {
   const auto path = destination.u8string();
-  return vxm_host_catalog_export(host.handle, id, host.generation, path.c_str(), budget);
+  return vxm_host_catalog_export(host.handle, id, host.generation, format, path.c_str(), budget);
 }
 void seed_encrypted_export(Fixture &fixture) {
   VxCoreContextHandle context = nullptr;
@@ -1115,8 +1116,12 @@ void catalog_export_preserves_portable_tree() {
   fs::create_directories(root / "vx_notebook/vx_import/empty/deeper");
   fs::create_directories(root / "vx_notebook/vx_transfer/empty/deeper");
   const auto before = snapshot(root);
+  CHECK(capture(host, 2, fixture.root / "protected-content", kSnapshotBudget, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  auto protected_result = host.next();
+  CHECK(protected_result->code == VXCORE_ERR_UNSUPPORTED && protected_result->size == 0 && protected_result->data == nullptr);
+  CHECK(!fs::exists(fixture.root / "protected-content") && snapshot(root) == before);
   const auto destination = fixture.root / "snapshot";
-  CHECK(capture(host, 2, destination) == VXCORE_OK);
+  CHECK(capture(host, 3, destination) == VXCORE_OK);
   auto result = host.next();
   CHECK(result->code == VXCORE_OK && result->kind == VXM_EVENT_EXPORT && result->size <= 1024);
   CHECK(std::string(result->notebook_id) == fixture.notebook_id && std::string(result->notebook_name) == "Personal");
@@ -1138,13 +1143,306 @@ void catalog_export_preserves_portable_tree() {
     else { ++files; bytes += entry.file_size(); }
   }
   const auto summary = Json::parse(text(result));
+  CHECK(summary.at("format") == "notebook");
   CHECK(summary.at("bytes") == bytes && summary.at("files") == files && summary.at("directories") == directories);
   CHECK(summary.at("archiveLimit").get<uint64_t>() + bytes <= kSnapshotBudget);
-  CHECK(capture(host, 3, destination) == VXCORE_OK);
+  CHECK(capture(host, 4, destination) == VXCORE_OK);
   CHECK(host.next()->code == VXCORE_ERR_ALREADY_EXISTS);
   CHECK(snapshot(destination) == expected && snapshot(root) == before);
   host.close();
   CHECK(snapshot(root) == before);
+}
+
+void refuse_content(Fixture &fixture, Host &host, uint64_t &id, bool absent = true) {
+  const auto root = fs::u8path(fixture.notebook);
+  const auto before = snapshot(root);
+  const auto destination = fixture.root / ("refused-content-" + std::to_string(id));
+  CHECK(capture(host, id++, destination, kSnapshotBudget, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  auto result = host.next();
+  CHECK(result->kind == VXM_EVENT_EXPORT && result->code != VXCORE_OK);
+  CHECK(result->size == 0 && result->data == nullptr);
+  if (absent) CHECK(!fs::exists(destination));
+  CHECK(snapshot(root) == before);
+}
+void catalog_content_export_projects_exact_bytes() {
+  Fixture fixture;
+  fixture.seed(u8"\xef\xbb\xbf# Welcome 界\r\n[asset](resources/assets/picture)\r\n");
+  const auto root = fs::u8path(fixture.notebook);
+  const auto config_path = root / "vx_notebook/config.json";
+  auto config = Json::parse(disk(config_path));
+  config["assetsFolder"] = "resources/assets";
+  config["recycleBinFolder"] = "custom/recycle";
+  config["ignored"] = Json::array({"*.opaque", ".hidden"});
+  external_write(config_path, config.dump());
+  auto metadata = Json::parse(disk(root_metadata(fixture)));
+  const auto prototype = metadata.at("files").front();
+  const std::string nested_id = "00000000-0000-4000-8000-000000000001";
+  const std::string lazy_id = "00000000-0000-4000-8000-000000000002";
+  auto nested = metadata;
+  nested["id"] = "00000000-0000-4000-8000-000000000003";
+  nested["name"] = "Nested";
+  nested["files"][0]["id"] = nested_id;
+  nested["files"][0]["name"] = u8"深い.md";
+  nested["files"][0]["attachments"] = Json::array({"nested.bin"});
+  auto lazy = prototype;
+  lazy["id"] = lazy_id;
+  lazy["name"] = "lazy.txt";
+  nested["files"].push_back(lazy);
+  metadata["folders"].push_back("Nested");
+  metadata["files"][0]["attachments"] = Json::array({"resources/assets/" + fixture.node_id + "/root.bin"});
+  for (const auto &path : {std::string("vx_notebook/contents/Nested"), std::string(".hidden/empty"),
+       std::string("custom/recycle/old"), std::string("unindexed/vx_sync"),
+       "resources/assets/" + fixture.node_id, "Nested/resources/assets/" + nested_id})
+    fs::create_directories(root / fs::u8path(path));
+  external_write(root_metadata(fixture), metadata.dump());
+  external_write(root / "vx_notebook/contents/Nested/vx.json", nested.dump());
+  external_write(root / fs::u8path(u8"Nested/深い.md"), u8"# Nested\r\n[附件](resources/assets/blob)\r\n");
+  external_write(root / "Nested/lazy.txt", "VNOTEE1"); // Seven-byte prefix is not an encrypted envelope.
+  const std::string opaque("\0\xff\xfe\r\n", 5);
+  for (const auto &path : {std::string(".hidden/data.opaque"), std::string("unindexed/vx_sync/user.data"),
+       std::string(".DS_Store"), std::string("scratch.tmp"),
+       "resources/assets/" + fixture.node_id + "/root.bin", "Nested/resources/assets/" + nested_id + "/nested.bin"})
+    external_write(root / fs::u8path(path), opaque);
+  external_write(root / "custom/recycle/old/secret.VNE", std::string("VNOTEE1\0old", 11));
+  external_write(root / "vx_notebook/unknown-user-data", std::string(32768, 'x'));
+  const auto before = snapshot(root);
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(snapshot(root) == before);
+  auto expected = before;
+  for (auto it = expected.begin(); it != expected.end();) {
+    const auto path = it->first.generic_u8string();
+    if (path == "vx_notebook" || path.compare(0, 12, "vx_notebook/") == 0 ||
+        path == "custom/recycle" || path.compare(0, 15, "custom/recycle/") == 0)
+      it = expected.erase(it);
+    else ++it;
+  }
+  const auto destination = fixture.root / "content";
+  CHECK(capture(host, 2, destination, kSnapshotBudget, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  auto result = host.next();
+  if (result->code != VXCORE_OK)
+    std::cerr << "Content snapshot failure: " << result->code << ": " << result->message << '\n';
+  CHECK(result->code == VXCORE_OK);
+  CHECK(snapshot(destination) == expected);
+  const auto summary = Json::parse(text(result));
+  CHECK(summary.at("format") == "filesAndAssets");
+  uint64_t bytes = 0, files = 0, directories = 0;
+  for (const auto &entry : expected) {
+    if (entry.first == ".") continue;
+    if (entry.second == "directory") ++directories;
+    else { ++files; bytes += entry.second.size() - 5; }
+  }
+  CHECK(summary.at("bytes") == bytes && summary.at("files") == files && summary.at("directories") == directories);
+  const auto exact_budget = bytes + summary.at("archiveLimit").get<uint64_t>();
+  CHECK(capture(host, 3, fixture.root / "selected-budget", exact_budget, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(snapshot(fixture.root / "selected-budget") == expected);
+  CHECK(!fs::exists(root / "Nested/resources/assets" / lazy_id));
+  CHECK(capture(host, 4, fixture.root / "full-backup") == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_OK);
+  auto full = before;
+  for (auto it = full.begin(); it != full.end();) {
+    const auto path = it->first.generic_u8string();
+    bool excluded = false;
+    for (const auto *name : {"vx_notebook/vx_sync", "vx_notebook/vx_import", "vx_notebook/vx_transfer"}) {
+      const std::string prefix(name);
+      excluded |= path == prefix || path.compare(0, prefix.size() + 1, prefix + "/") == 0;
+    }
+    if (excluded) it = full.erase(it); else ++it;
+  }
+  CHECK(snapshot(fixture.root / "full-backup") == full);
+  CHECK(snapshot(root) == before);
+  host.close();
+  CHECK(snapshot(root) == before);
+}
+void catalog_content_export_refuses_protection_disagreements() {
+  for (int kind = 0; kind < 10; ++kind) {
+    Fixture fixture;
+    fixture.seed("plaintext remains unchanged");
+    const auto root = fs::u8path(fixture.notebook);
+    Host host(fixture, ExportOnly{});
+    CHECK(host.next()->code == VXCORE_OK);
+    auto metadata = Json::parse(disk(root_metadata(fixture)));
+    if (kind < 4) {
+      auto &file = metadata["files"][0];
+      file["encrypted"] = kind != 1;
+      file["metadata"]["encrypted"] = kind == 1;
+      if (kind == 2) fs::remove(fixture.note());
+      if (kind == 3) file["encrypted"] = "false";
+      external_write(root_metadata(fixture), metadata.dump());
+    } else if (kind == 4) {
+      metadata["metadata"]["encrypted"] = true;
+      external_write(root_metadata(fixture), metadata.dump());
+    } else if (kind == 5) {
+      const auto path = root / "vx_notebook/config.json";
+      auto config = Json::parse(disk(path));
+      config["encrypted"] = true;
+      external_write(path, config.dump());
+    } else if (kind == 6) external_write(root / "opaque.VNE", "not actually an envelope");
+    else if (kind == 7) external_write(fixture.note(), std::string("VNOTEE1\0cipher", 14));
+    else if (kind == 8) external_write(root / "opaque.bin", std::string("VNEKEY1\0key", 11));
+    else {
+      metadata["files"][0]["metadata"]["encrypted"] = "false";
+      external_write(root_metadata(fixture), metadata.dump());
+    }
+    uint64_t id = 2;
+    refuse_content(fixture, host, id, kind != 7 && kind != 8);
+    // Streaming refusal has no successful summary; partial files remain private
+    // to the caller. Full backup must still preserve these exact protected bytes.
+    const auto before = snapshot(root);
+    CHECK(capture(host, id++, fixture.root / "full") == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(snapshot(root) == before);
+    if (fs::exists(fixture.note())) CHECK(disk(fixture.root / "full/Welcome.md") == disk(fixture.note()));
+    if (kind == 6) CHECK(disk(fixture.root / "full/opaque.VNE") == "not actually an envelope");
+    if (kind == 8) CHECK(disk(fixture.root / "full/opaque.bin") == std::string("VNEKEY1\0key", 11));
+    host.close();
+  }
+}
+void catalog_content_export_requires_complete_metadata() {
+  for (const auto *kind : {"orphan", "protected-orphan", "missing-file", "missing-folder", "files-shape", "folders-shape",
+                           "duplicate-id", "unsafe-id", "unsafe-name", "missing-attachment", "unsafe-attachment",
+                           "root-vx-alias", "extra-vx-alias", "unicode-vx-alias", "unicode-folder-alias"}) {
+    Fixture fixture;
+    fixture.seed("original content");
+    const auto root = fs::u8path(fixture.notebook);
+    Host host(fixture, ExportOnly{});
+    CHECK(host.next()->code == VXCORE_OK);
+    auto metadata = Json::parse(disk(root_metadata(fixture)));
+    const std::string scenario(kind);
+    if (scenario == "orphan" || scenario == "protected-orphan") {
+      auto orphan = metadata;
+      orphan["id"] = "00000000-0000-4000-8000-000000000001";
+      orphan["name"] = "Ghost";
+      orphan["files"] = Json::array();
+      if (scenario == "protected-orphan") orphan["encrypted"] = true;
+      fs::create_directories(root / "Ghost");
+      fs::create_directories(root / "vx_notebook/contents/Ghost");
+      external_write(root / "vx_notebook/contents/Ghost/vx.json", orphan.dump());
+    } else if (scenario == "missing-file") fs::remove(fixture.note());
+    else if (scenario == "missing-folder") metadata["folders"].push_back("Absent");
+    else if (scenario == "files-shape") metadata["files"] = Json::object();
+    else if (scenario == "folders-shape") metadata["folders"] = Json::object();
+    else if (scenario == "duplicate-id") metadata["files"][0]["id"] = metadata.at("id");
+    else if (scenario == "unsafe-id") metadata["files"][0]["id"] = "../escape";
+    else if (scenario == "unsafe-name") metadata["files"][0]["name"] = "../Welcome.md";
+    else if (scenario == "missing-attachment") metadata["files"][0]["attachments"] = Json::array({"missing.png"});
+    else if (scenario == "unsafe-attachment") {
+      fs::create_directories(root / "vx_assets" / fixture.node_id);
+      metadata["files"][0]["attachments"] = Json::array({"../Welcome.md"});
+    } else if (scenario == "root-vx-alias") {
+      fs::rename(root_metadata(fixture), root_metadata(fixture).parent_path() / "temporary.json");
+      fs::rename(root_metadata(fixture).parent_path() / "temporary.json", root_metadata(fixture).parent_path() / "VX.JSON");
+    } else if (scenario == "extra-vx-alias") {
+      const auto alias = root_metadata(fixture).parent_path() / "VX.JSON";
+      if (fs::exists(alias)) {
+        std::cout << "Skipping coexisting VX.JSON alias: filesystem aliases the exact filename\n";
+        host.close();
+        continue;
+      }
+      external_write(alias, metadata.dump());
+    } else if (scenario == "unicode-vx-alias") {
+      external_write(root_metadata(fixture).parent_path() / fs::u8path(u8"vx.jſon"), metadata.dump());
+    } else if (scenario == "unicode-folder-alias") {
+      metadata["folders"] = Json::array({u8"Café", u8"Café"});
+      for (const auto *name : {u8"Café", u8"Café"}) fs::create_directory(root / fs::u8path(name));
+    }
+    if (scenario != "root-vx-alias") external_write(root_metadata(fixture), metadata.dump());
+    uint64_t id = 2;
+    refuse_content(fixture, host, id);
+    host.close();
+  }
+}
+void catalog_content_export_validates_assets_and_recycle_selection() {
+  for (const auto *kind : {"live-file", "live-folder", "note-assets", "metadata-assets", "absent-recycled-assets",
+                           "existing-asset-ancestor", "recycle-alias-leak", "live-folder-alias-drop",
+                           "asset-alias-drop", "lazy-asset-alias-drop"}) {
+    Fixture fixture;
+    fixture.seed("original content");
+    const auto root = fs::u8path(fixture.notebook);
+    Host host(fixture, ExportOnly{});
+    CHECK(host.next()->code == VXCORE_OK);
+    const auto config_path = root / "vx_notebook/config.json";
+    auto config = Json::parse(disk(config_path));
+    auto metadata = Json::parse(disk(root_metadata(fixture)));
+    const std::string scenario(kind);
+    if (scenario == "live-file") config["recycleBinFolder"] = "Welcome.md";
+    else if (scenario == "metadata-assets") config["assetsFolder"] = "vx_notebook/resources";
+    else if (scenario == "note-assets" || scenario == "absent-recycled-assets") {
+      config["recycleBinFolder"] = "vx_assets/" + fixture.node_id;
+      if (scenario == "note-assets") fs::create_directories(root / "vx_assets" / fixture.node_id);
+    } else if (scenario == "existing-asset-ancestor") {
+      config["assetsFolder"] = "custom/resources";
+      config["recycleBinFolder"] = "custom";
+      fs::create_directory(root / "custom");
+    } else if (scenario == "live-folder") {
+      config["recycleBinFolder"] = "Live";
+      metadata["folders"].push_back("Live");
+      fs::create_directory(root / "Live");
+    } else {
+      const bool asset_alias = scenario == "asset-alias-drop" || scenario == "lazy-asset-alias-drop";
+      const std::string actual = asset_alias ? "ASSETS" : "RECYCLE";
+      fs::create_directory(root / actual);
+      std::error_code error;
+      if (!fs::equivalent(root / actual, root / (asset_alias ? "assets" : "recycle"), error)) {
+        std::cout << "Skipping " << scenario << ": filesystem does not resolve case aliases\n";
+        host.close();
+        continue;
+      }
+      external_write(root / actual / "private.bin", "must neither leak nor silently drop live data");
+      config["recycleBinFolder"] = actual;
+      if (scenario == "recycle-alias-leak") config["recycleBinFolder"] = "recycle";
+      else if (scenario == "live-folder-alias-drop") {
+        metadata["folders"].push_back("recycle");
+        auto folder = metadata;
+        folder["id"] = "00000000-0000-4000-8000-000000000001";
+        folder["name"] = "recycle";
+        folder["folders"] = Json::array();
+        folder["files"][0]["id"] = "00000000-0000-4000-8000-000000000002";
+        fs::create_directories(root / "vx_notebook/contents/recycle");
+        external_write(root / "vx_notebook/contents/recycle/vx.json", folder.dump());
+        external_write(root / actual / "Welcome.md", "indexed live body must not silently disappear");
+      } else {
+        config["assetsFolder"] = "assets";
+        if (scenario == "asset-alias-drop") {
+          fs::create_directory(root / actual / fixture.node_id);
+          external_write(root / actual / fixture.node_id / "image.png", "selected live asset must not disappear");
+        } // The lazy case instead exercises an absent UUID below an excluded alias.
+      }
+    }
+    external_write(config_path, config.dump());
+    external_write(root_metadata(fixture), metadata.dump());
+    uint64_t id = 2;
+    refuse_content(fixture, host, id);
+    host.close();
+  }
+}
+void catalog_content_export_accepts_empty_and_lazy_assets() {
+  Fixture fixture;
+  fixture.seed("normal note has no materialized assets");
+  const auto root = fs::u8path(fixture.notebook);
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(!fs::exists(root / "vx_assets" / fixture.node_id));
+  const auto before = snapshot(root);
+  CHECK(capture(host, 2, fixture.root / "lazy-assets", kSnapshotBudget, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(disk(fixture.root / "lazy-assets/Welcome.md") == "normal note has no materialized assets");
+  CHECK(snapshot(root) == before);
+  auto metadata = Json::parse(disk(root_metadata(fixture)));
+  metadata["files"] = Json::array();
+  external_write(root_metadata(fixture), metadata.dump());
+  for (const auto &entry : fs::directory_iterator(root))
+    if (entry.path().filename() != "vx_notebook") fs::remove_all(entry.path());
+  const auto empty_before = snapshot(root);
+  CHECK(capture(host, 3, fixture.root / "empty", 1024, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  auto result = host.next();
+  CHECK(result->code == VXCORE_OK && fs::is_directory(fixture.root / "empty") && fs::is_empty(fixture.root / "empty"));
+  const auto summary = Json::parse(text(result));
+  CHECK(summary.at("format") == "filesAndAssets" && summary.at("bytes") == 0 &&
+        summary.at("files") == 0 && summary.at("directories") == 0 && summary.at("archiveLimit") == 1024);
+  CHECK(snapshot(root) == empty_before);
+  host.close();
 }
 void catalog_export_refuses_credentials_and_recovery() {
   Fixture fixture;
@@ -1265,6 +1563,9 @@ void catalog_export_guards_and_limits() {
   };
   CHECK(capture(host, id, fixture.root / "invalid", 0) == VXCORE_ERR_INVALID_PARAM);
   CHECK(capture(host, id, fixture.root / "invalid", kSnapshotBudget + 1) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(capture(host, id, fixture.root / "invalid", kSnapshotBudget, -1) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(capture(host, id, fixture.root / "invalid", kSnapshotBudget, 2) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(!fs::exists(fixture.root / "invalid"));
   reject(root / "inside");
   reject(fs::u8path(fixture.app) / "inside");
   reject(fs::u8path(fixture.local) / "inside");
@@ -1448,6 +1749,14 @@ void catalog_export_entry_limit() {
   CHECK(std::string(result->message).find("100000-entry") != std::string::npos);
   CHECK(!fs::exists(fixture.root / "over-entry-limit"));
   CHECK(disk(fixture.note()) == "unchanged");
+  // Excluded metadata is inspected and charged to the same entry cap, not hidden
+  // by pruning the tree or exempted because none of its bytes would be copied.
+  fs::rename(directory, fs::u8path(fixture.notebook) / "vx_notebook/many");
+  CHECK(capture(host, 3, fixture.root / "excluded-entry-limit", kSnapshotBudget, VXM_EXPORT_FILES_AND_ASSETS) == VXCORE_OK);
+  result = host.next(std::chrono::seconds(120));
+  CHECK(result->code == VXCORE_ERR_UNSUPPORTED && result->size == 0);
+  CHECK(std::string(result->message).find("100000-entry") != std::string::npos);
+  CHECK(!fs::exists(fixture.root / "excluded-entry-limit") && disk(fixture.note()) == "unchanged");
   host.close();
 }
 
@@ -1609,6 +1918,11 @@ int main() {
     catalog_tags_preserve_orphans_and_mutation_outcome();
     catalog_tags_are_complete_or_error();
     catalog_export_preserves_portable_tree();
+    catalog_content_export_projects_exact_bytes();
+    catalog_content_export_refuses_protection_disagreements();
+    catalog_content_export_requires_complete_metadata();
+    catalog_content_export_validates_assets_and_recycle_selection();
+    catalog_content_export_accepts_empty_and_lazy_assets();
     catalog_export_refuses_credentials_and_recovery();
     catalog_export_open_does_not_recover_or_migrate();
     catalog_export_guards_and_limits();

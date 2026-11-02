@@ -5,8 +5,12 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:archive/archive.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
+import 'package:vnote_mobile/features/library/notebook_library_screen.dart';
+import 'package:vnote_mobile/services/managed_notebook_storage.dart';
+import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
@@ -88,6 +92,32 @@ Future<void> _copyTree(String source, String destination) async {
   }
 }
 
+Future<Map<String, Object>> _treeSnapshot(String root) async {
+  final entries = <String, Object>{};
+  await for (final entity in Directory(root).list(
+    recursive: true,
+    followLinks: false,
+  )) {
+    final name = p.split(p.relative(entity.path, from: root)).join('/');
+    if (entity is Directory) {
+      entries['$name/'] = 'directory';
+    } else if (entity is File) {
+      entries[name] = await entity.readAsBytes();
+    } else {
+      fail('Unexpected linked fixture entry.');
+    }
+  }
+  return entries;
+}
+
+Future<Map<String, Object>> _zipSnapshot(String path) async => {
+  for (final entry in ZipDecoder().decodeBytes(
+    await File(path).readAsBytes(),
+    verify: true,
+  ))
+    entry.name: entry.isDirectory ? 'directory' : entry.content,
+};
+
 void main() {
   late Directory temp;
   late String root;
@@ -97,6 +127,63 @@ void main() {
   const notebookName = '研究 notebook';
   const syntheticId = 'c77e9c39-cdd3-40e6-a944-e57a07d818bd';
   final exporters = <NotebookExporter>[];
+  final libraries = <NotebookLibrary>[];
+
+  NotebookLibrary makeLibrary() {
+    final library = NotebookLibrary(
+      obtainStorage: () async => ManagedNotebookStorage(
+        app: p.join(temp.path, 'core', 'app'),
+        local: p.join(temp.path, 'core', 'local'),
+        root: p.join(temp.path, 'notebooks'),
+      ),
+      createExporter: (root, admission) => NotebookExporter(
+        root: root,
+        platform: platform,
+        checkAdmission: admission,
+      ),
+    );
+    libraries.add(library);
+    return library;
+  }
+
+  Widget screen(NotebookLibrary library) => MaterialApp(
+    home: NotebookLibraryScreen(
+      library: library,
+      dark: false,
+      onThemeChanged: (_) {},
+    ),
+  );
+
+  Future<void> finishUiExport(
+    WidgetTester tester,
+    NotebookLibrary library,
+    Finder action,
+  ) async {
+    await tester.runAsync(() async {
+      // The completion must belong to the real IO zone too; a fake-zone
+      // Completer schedules its completion on microtasks that runAsync pauses.
+      final settled = Completer<void>();
+      final expectedSaves = platform.saves + 1;
+      void changed() {
+        final state = library.value;
+        if (!state.busy && !state.exportState.busy && !settled.isCompleted) {
+          if (state.exportState.error != null) {
+            settled.completeError(StateError(state.exportState.error!));
+          } else if (platform.saves == expectedSaves) {
+            settled.complete();
+          }
+        }
+      }
+      library.addListener(changed);
+      try {
+        await tester.tap(action);
+        await settled.future.timeout(const Duration(seconds: 20));
+      } finally {
+        library.removeListener(changed);
+      }
+    });
+    await tester.pumpAndSettle();
+  }
 
   NotebookExporter makeExporter({
     DocumentTransferPlatform? adapter,
@@ -132,7 +219,7 @@ void main() {
     }
   }
 
-  Future<CoreExportSnapshot> capture(
+  ExportSnapshotCapture capture(CoreExportFormat format) => (
     String destination,
     int budget,
     ExportCancellation cancellation,
@@ -148,20 +235,22 @@ void main() {
       return await catalog.exportSnapshot(
         destination,
         stagingBudgetBytes: budget,
+        format: format,
       );
     } finally {
       await catalog.close();
       cancellation.onCancel = null;
     }
-  }
+  };
 
-  Future<PreparedNotebookExport> prepare() async {
+  Future<PreparedNotebookExport> prepare({required CoreExportFormat format}) async {
     await makeNotebook();
     await exporter.initialize();
     final ready = await exporter.prepare(
       notebookId: notebookId!,
       notebookName: notebookName,
-      capture: capture,
+      format: format,
+      capture: capture(format),
     );
     expect(ready, isNotNull, reason: exporter.value.error);
     return ready!;
@@ -178,6 +267,7 @@ void main() {
     return const CoreExportSnapshot(
       notebookId: syntheticId,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       bytes: 4,
       files: 1,
       directories: 0,
@@ -206,6 +296,11 @@ void main() {
   });
 
   tearDown(() async {
+    for (final library in libraries) {
+      await library.shutdown();
+      library.dispose();
+    }
+    libraries.clear();
     for (final item in exporters) {
       await item.shutdown();
       item.dispose();
@@ -244,6 +339,7 @@ void main() {
     final ready = await exporter.prepare(
       notebookId: notebookId!,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       capture: (destination, budget, cancellation) async {
         expect(
           await File(p.join(p.dirname(destination), 'request.json')).exists(),
@@ -251,7 +347,11 @@ void main() {
         );
         expect(await Directory(destination).exists(), isFalse);
         expect(budget, 4 * 1024 * 1024 * 1024 - 128 * 1024);
-        final snapshot = await capture(destination, budget, cancellation);
+        final snapshot = await capture(CoreExportFormat.notebook)(
+          destination,
+          budget,
+          cancellation,
+        );
         ownerJoined = true;
         return snapshot;
       },
@@ -309,7 +409,7 @@ void main() {
   test(
     'cancelled, failed and unavailable saves retain the exact ZIP for retry',
     () async {
-      final artifact = await prepare();
+      final artifact = await prepare(format: CoreExportFormat.notebook);
       final before = await File(artifact.path).readAsBytes();
       for (final status in [
         DocumentExportStatus.cancelled,
@@ -338,10 +438,11 @@ void main() {
     },
   );
 
+  for (final format in CoreExportFormat.values) {
   test(
-    'provider cancellation acknowledgement does not release the source lease',
+    '${format.name} provider cancellation acknowledgement does not release the source lease',
     () async {
-      final artifact = await prepare();
+      final artifact = await prepare(format: format);
       platform.pending = Completer<DocumentExportResult>();
       final saving = exporter.save(artifact);
       await platform.entered.future;
@@ -366,6 +467,7 @@ void main() {
       exporter = makeExporter();
       await exporter.initialize();
       expect(exporter.value.prepared!.sha256, artifact.sha256);
+      expect(exporter.value.prepared!.format, format);
       expect(exporter.value.message, contains('previous external copy'));
       await exporter.discard(exporter.value.prepared!);
       expect(await Directory(root).list().isEmpty, isTrue);
@@ -373,9 +475,9 @@ void main() {
   );
 
   test(
-    'success is cleaned only after the provider terminal completion',
+    '${format.name} success is cleaned only after the provider terminal completion',
     () async {
-      final artifact = await prepare();
+      final artifact = await prepare(format: format);
       platform.pending = Completer<DocumentExportResult>();
       final saving = exporter.save(artifact);
       await platform.entered.future;
@@ -395,18 +497,25 @@ void main() {
   );
 
   test(
-    'shutdown joins capture before cleaning its partial or completed snapshot',
+    '${format.name} shutdown joins capture before cleaning its partial or completed snapshot',
     () async {
       await makeNotebook();
       await exporter.initialize();
+      final book = p.join(temp.path, 'notebooks', 'book');
+      final before = await _treeSnapshot(book);
       final captured = Completer<String>();
       final releaseOwner = Completer<void>();
       var cancellationDelivered = false;
       final preparing = exporter.prepare(
         notebookId: notebookId!,
         notebookName: notebookName,
+        format: format,
         capture: (destination, budget, cancellation) async {
-          final snapshot = await capture(destination, budget, cancellation);
+          final snapshot = await capture(format)(
+            destination,
+            budget,
+            cancellation,
+          );
           captured.complete(destination);
           await releaseOwner.future;
           // A callback installed after cancel still observes the cancellation.
@@ -430,8 +539,10 @@ void main() {
         await Directory(p.join(temp.path, 'notebooks', 'book')).exists(),
         isTrue,
       );
+      expect(await _treeSnapshot(book), before);
     },
   );
+  }
 
   test('cancel remembered at worker startup closes output and removes interrupted staging', () async {
     await exporter.initialize();
@@ -443,6 +554,7 @@ void main() {
     final result = await exporter.prepare(
       notebookId: syntheticId,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       capture: syntheticCapture,
     );
     expect(result, isNull);
@@ -459,6 +571,7 @@ void main() {
     final result = await exporter.prepare(
       notebookId: syntheticId,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       capture: syntheticCapture,
     );
     expect(result, isNull);
@@ -480,6 +593,7 @@ void main() {
     final preparing = exporter.prepare(
       notebookId: syntheticId,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       capture: (destination, budget, cancellation) async {
         await Directory(destination).create();
         final input = await File(p.join(destination, 'stream.bin'))
@@ -505,6 +619,7 @@ void main() {
         return const CoreExportSnapshot(
           notebookId: syntheticId,
           notebookName: notebookName,
+          format: CoreExportFormat.notebook,
           bytes: sourceBytes,
           files: 1,
           directories: 0,
@@ -532,7 +647,7 @@ void main() {
   });
 
   test('dispose suppresses late provider notifications without deleting a leased ZIP', () async {
-    final artifact = await prepare();
+    final artifact = await prepare(format: CoreExportFormat.notebook);
     platform.pending = Completer<DocumentExportResult>();
     var notifications = 0;
     exporter.addListener(() => notifications++);
@@ -556,12 +671,13 @@ void main() {
   test(
     'ready export survives restart and rejects stale prepared handles',
     () async {
-      final artifact = await prepare();
+      final artifact = await prepare(format: CoreExportFormat.notebook);
       expect(
         () => exporter.prepare(
           notebookId: notebookId!,
           notebookName: notebookName,
-          capture: capture,
+          format: CoreExportFormat.notebook,
+          capture: capture(CoreExportFormat.notebook),
         ),
         throwsStateError,
       );
@@ -579,8 +695,548 @@ void main() {
     },
   );
 
+  test('files and assets ZIP projects exact bytes and leaves the full source intact', () async {
+    await makeNotebook();
+    final book = p.join(temp.path, 'notebooks', 'book');
+    final catalog = await CoreNotebook.openCatalog(
+      appDataPath: p.join(temp.path, 'core', 'app'),
+      localDataPath: p.join(temp.path, 'core', 'local'),
+      notebookPath: book,
+      expectedNotebookId: notebookId!,
+    );
+    late String noteId;
+    try {
+      final folder = await catalog.createFolder(
+        catalog.initialDirectory.folderId,
+        '研究',
+      );
+      noteId = await catalog.createNote(folder, 'notes.md');
+      await catalog.createNote(catalog.initialDirectory.folderId, 'plain.txt');
+      await catalog.createTag('private tag');
+      await catalog.setTags(noteId, ['private tag']);
+    } finally {
+      await catalog.close();
+    }
+    await rewriteMarker(p.join(book, 'vx_notebook', 'config.json'), (config) {
+      config['assetsFolder'] = 'resources/assets';
+      config['recycleBinFolder'] = 'custom/recycle';
+    });
+    final files = <String, List<int>>{
+      '研究/notes.md': [
+        0xef, 0xbb, 0xbf,
+        ...utf8.encode('# saved\r\n![asset](resources/assets/$noteId/raw.bin)\r\n'),
+      ],
+      'plain.txt': utf8.encode('not converted\r\n'),
+      '研究/resources/assets/$noteId/raw.bin': [0, 255, 254, 13, 10],
+      '.hidden/opaque.future': [0, 1, 255, 0],
+      'vx_notebook/unknown/user.bin': [9, 8, 7],
+      'custom/recycle/deleted.md': utf8.encode('recycle must not escape'),
+    };
+    for (final entry in files.entries) {
+      final file = File(p.joinAll([book, ...entry.key.split('/')]));
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(entry.value);
+    }
+    await Directory(p.join(book, '.hidden', 'empty')).create();
+    final before = await _treeSnapshot(book);
+    final content = await prepare(format: CoreExportFormat.filesAndAssets);
+    expect(content.format, CoreExportFormat.filesAndAssets);
+    expect(p.basename(content.path), 'notebook.zip');
+    final expected = Map<String, Object>.from(before)
+      ..removeWhere(
+        (name, _) => name.startsWith('vx_notebook/') ||
+            name.startsWith('custom/recycle/'),
+      );
+    expect(await _zipSnapshot(content.path), expected);
+    expect(await _treeSnapshot(book), before);
+    await exporter.discard(content);
+    final backup = await prepare(format: CoreExportFormat.notebook);
+    expect(backup.format, CoreExportFormat.notebook);
+    expect(await _zipSnapshot(backup.path), before);
+    expect(await _treeSnapshot(book), before);
+  });
+
+  test('empty files and assets export creates a valid empty ZIP without a manifest', () async {
+    await makeNotebook();
+    final book = p.join(temp.path, 'notebooks', 'book');
+    final before = await _treeSnapshot(book);
+    final artifact = await prepare(format: CoreExportFormat.filesAndAssets);
+    expect(artifact.format, CoreExportFormat.filesAndAssets);
+    expect(await _zipSnapshot(artifact.path), isEmpty);
+    expect(artifact.bytes, 22);
+    expect(await _treeSnapshot(book), before);
+  });
+
+  for (final format in CoreExportFormat.values) {
+    test('${format.name} survives cancelled save and restart without rewriting its ZIP', () async {
+      final artifact = await prepare(format: format);
+      final before = await _treeSnapshot(p.dirname(artifact.path));
+      platform.results.add(
+        const DocumentExportResult(
+          status: DocumentExportStatus.cancelled,
+          externalMayBeIncomplete: false,
+        ),
+      );
+      await exporter.save(artifact);
+      expect(exporter.value.prepared!.format, format);
+      await exporter.shutdown();
+      exporter = makeExporter();
+      await exporter.initialize();
+      final recovered = exporter.value.prepared!;
+      expect(recovered.format, format);
+      expect(recovered.path, artifact.path);
+      expect(recovered.sha256, artifact.sha256);
+      expect(await _treeSnapshot(p.dirname(recovered.path)), before);
+      platform.results.add(
+        const DocumentExportResult(
+          status: DocumentExportStatus.saved,
+          externalMayBeIncomplete: false,
+        ),
+      );
+      await exporter.save(recovered);
+      expect(platform.saves, 2);
+      expect(exporter.value.prepared, isNull);
+      expect(await Directory(root).list().isEmpty, isTrue);
+    });
+  }
+
+  test('exact legacy ready markers recover as notebook without touching stored bytes', () async {
+    final artifact = await prepare(format: CoreExportFormat.notebook);
+    for (final name in ['request.json', 'ready.json']) {
+      await rewriteMarker(p.join(p.dirname(artifact.path), name), (marker) {
+        marker['version'] = 1;
+        marker.remove('format');
+      });
+    }
+    final file = File(artifact.path);
+    await file.setLastModified(DateTime.utc(2020));
+    final modified = (await file.stat()).modified;
+    final before = await _treeSnapshot(p.dirname(artifact.path));
+    await exporter.shutdown();
+    exporter = makeExporter();
+    await exporter.initialize();
+    final recovered = exporter.value.prepared!;
+    expect(recovered.format, CoreExportFormat.notebook);
+    expect(recovered.sha256, artifact.sha256);
+    expect(await _treeSnapshot(p.dirname(recovered.path)), before);
+    expect((await file.stat()).modified, modified);
+    platform.results.add(
+      const DocumentExportResult(
+        status: DocumentExportStatus.cancelled,
+        externalMayBeIncomplete: false,
+      ),
+    );
+    await exporter.save(recovered);
+    expect(platform.saves, 1);
+    expect(await _treeSnapshot(p.dirname(recovered.path)), before);
+    await exporter.discard(recovered);
+    expect(await Directory(root).list().isEmpty, isTrue);
+  });
+
+  final invalidMarkers = <String, void Function(
+    Map<String, dynamic>,
+    Map<String, dynamic>,
+  )>{
+    'unknown request format': (request, _) => request['format'] = 'future',
+    'unknown ready format': (_, ready) => ready['format'] = 'future',
+    'missing request format': (request, _) => request.remove('format'),
+    'missing ready format': (_, ready) => ready.remove('format'),
+    'nonstring format': (request, ready) {
+      request['format'] = 1;
+      ready['format'] = 1;
+    },
+    'format disagreement': (_, ready) => ready['format'] = 'filesAndAssets',
+    'legacy request with current ready': (request, _) {
+      request['version'] = 1;
+      request.remove('format');
+    },
+    'current request with legacy ready': (_, ready) {
+      ready['version'] = 1;
+      ready.remove('format');
+    },
+    'legacy request with added format': (request, ready) {
+      request['version'] = 1;
+      ready['version'] = 1;
+      ready.remove('format');
+    },
+    'legacy ready with added format': (request, ready) {
+      request['version'] = 1;
+      request.remove('format');
+      ready['version'] = 1;
+    },
+    'unknown versions': (request, ready) {
+      request['version'] = 3;
+      ready['version'] = 3;
+    },
+    'noninteger versions': (request, ready) {
+      request['version'] = 2.0;
+      ready['version'] = 2.0;
+    },
+    'additional request key': (request, _) => request['future'] = true,
+    'additional ready key': (_, ready) => ready['future'] = true,
+  };
+  for (final invalid in invalidMarkers.entries) {
+    test('${invalid.key} is retained as unsafe staging, never guessed or saved', () async {
+      final artifact = await prepare(format: CoreExportFormat.notebook);
+      final directory = p.dirname(artifact.path);
+      final requestPath = p.join(directory, 'request.json');
+      final readyPath = p.join(directory, 'ready.json');
+      final request = jsonDecode(await File(requestPath).readAsString())
+          as Map<String, dynamic>;
+      final ready = jsonDecode(await File(readyPath).readAsString())
+          as Map<String, dynamic>;
+      invalid.value(request, ready);
+      await File(requestPath).writeAsString(jsonEncode(request), flush: true);
+      await File(readyPath).writeAsString(jsonEncode(ready), flush: true);
+      final before = await _treeSnapshot(directory);
+      await exporter.save(artifact);
+      expect(platform.saves, 0);
+      expect(exporter.value.error, isNotNull);
+      await exporter.shutdown();
+      exporter = makeExporter();
+      await exporter.initialize();
+      expect(exporter.value.prepared, isNull);
+      expect(exporter.value.leftovers, hasLength(1));
+      expect(await _treeSnapshot(directory), before);
+      expect(
+        () => exporter.prepare(
+          notebookId: notebookId!,
+          notebookName: notebookName,
+          format: CoreExportFormat.filesAndAssets,
+          capture: capture(CoreExportFormat.filesAndAssets),
+        ),
+        throwsStateError,
+      );
+      await exporter.discardLeftover(exporter.value.leftovers.single);
+      expect(await Directory(root).list().isEmpty, isTrue);
+    });
+  }
+
+  test('changing both marker formats cannot silently replace a current prepared handle', () async {
+    final artifact = await prepare(format: CoreExportFormat.filesAndAssets);
+    final before = await File(artifact.path).readAsBytes();
+    for (final name in ['request.json', 'ready.json']) {
+      await rewriteMarker(
+        p.join(p.dirname(artifact.path), name),
+        (marker) => marker['format'] = 'notebook',
+      );
+    }
+    await exporter.save(artifact);
+    expect(platform.saves, 0);
+    expect(exporter.value.prepared, same(artifact));
+    expect(exporter.value.error, contains('no longer current'));
+    expect(await File(artifact.path).readAsBytes(), before);
+    await exporter.discard(artifact);
+    expect(await Directory(root).list().isEmpty, isTrue);
+  });
+
+  for (final mismatch in ['notebookId', 'notebookName', 'format']) {
+    test('native $mismatch mismatch cannot publish a ready artifact or change the source', () async {
+      await makeNotebook();
+      await exporter.initialize();
+      final book = p.join(temp.path, 'notebooks', 'book');
+      final before = await _treeSnapshot(book);
+      final artifact = await exporter.prepare(
+        notebookId: notebookId!,
+        notebookName: notebookName,
+        format: CoreExportFormat.filesAndAssets,
+        capture: (destination, budget, cancellation) async {
+          final snapshot = await capture(CoreExportFormat.filesAndAssets)(
+            destination,
+            budget,
+            cancellation,
+          );
+          return CoreExportSnapshot(
+            notebookId: mismatch == 'notebookId' ? syntheticId : snapshot.notebookId,
+            notebookName: mismatch == 'notebookName' ? 'Other' : snapshot.notebookName,
+            format: mismatch == 'format' ? CoreExportFormat.notebook : snapshot.format,
+            bytes: snapshot.bytes,
+            files: snapshot.files,
+            directories: snapshot.directories,
+            archiveLimit: snapshot.archiveLimit,
+          );
+        },
+      );
+      expect(artifact, isNull);
+      expect(exporter.value.error, contains(mismatch == 'format' ? 'format' : 'identity'));
+      expect(exporter.value.prepared, isNull);
+      expect(await Directory(root).list().isEmpty, isTrue);
+      expect(await _treeSnapshot(book), before);
+    });
+  }
+
+  test('request format changes during capture cannot publish a differently labelled ZIP', () async {
+    await makeNotebook();
+    await exporter.initialize();
+    final book = p.join(temp.path, 'notebooks', 'book');
+    final before = await _treeSnapshot(book);
+    final artifact = await exporter.prepare(
+      notebookId: notebookId!,
+      notebookName: notebookName,
+      format: CoreExportFormat.filesAndAssets,
+      capture: (destination, budget, cancellation) async {
+        final snapshot = await capture(CoreExportFormat.filesAndAssets)(
+          destination,
+          budget,
+          cancellation,
+        );
+        await rewriteMarker(
+          p.join(p.dirname(destination), 'request.json'),
+          (marker) => marker['format'] = 'notebook',
+        );
+        return snapshot;
+      },
+    );
+    expect(artifact, isNull);
+    expect(exporter.value.error, contains('format'));
+    expect(await Directory(root).list().isEmpty, isTrue);
+    expect(await _treeSnapshot(book), before);
+  });
+
+  test('provider exceptions remain redacted even when shaped like native failures', () async {
+    final artifact = await prepare(format: CoreExportFormat.filesAndAssets);
+    final before = await File(artifact.path).readAsBytes();
+    platform.onSave = (_, _, _) => throw const CoreException(
+      1,
+      'private/provider/path and body',
+    );
+    await exporter.save(artifact);
+    expect(platform.saves, 1);
+    expect(exporter.value.error, isNotNull);
+    expect(exporter.value.error, isNot(contains('private/provider/path')));
+    expect(exporter.value.prepared, same(artifact));
+    expect(await File(artifact.path).readAsBytes(), before);
+    await exporter.discard(artifact);
+    expect(await Directory(root).list().isEmpty, isTrue);
+  });
+
+  test('protected source refusal is actionable but capture implementation failures stay redacted', () async {
+    await makeNotebook();
+    final book = p.join(temp.path, 'notebooks', 'book');
+    await File(p.join(book, 'private-name.vne')).writeAsBytes([1, 2, 3]);
+    final before = await _treeSnapshot(book);
+    await exporter.initialize();
+    expect(
+      await exporter.prepare(
+        notebookId: notebookId!,
+        notebookName: notebookName,
+        format: CoreExportFormat.filesAndAssets,
+        capture: capture(CoreExportFormat.filesAndAssets),
+      ),
+      isNull,
+    );
+    expect(exporter.value.error, contains('refuses protected content; use a notebook backup'));
+    expect(exporter.value.error, isNot(contains('private-name')));
+    expect(await Directory(root).list().isEmpty, isTrue);
+    expect(await _treeSnapshot(book), before);
+    final backup = await prepare(format: CoreExportFormat.notebook);
+    expect(await _zipSnapshot(backup.path), before);
+    await exporter.discard(backup);
+    expect(
+      await exporter.prepare(
+        notebookId: notebookId!,
+        notebookName: notebookName,
+        format: CoreExportFormat.filesAndAssets,
+        capture: (_, _, _) async => throw const FormatException('private/body/path'),
+      ),
+      isNull,
+    );
+    expect(exporter.value.error, isNot(contains('private/body/path')));
+    expect(await _treeSnapshot(book), before);
+  });
+
+  for (final (version, format, valid) in [
+    (1, null, true),
+    (2, 'notebook', true),
+    (2, 'filesAndAssets', true),
+    (1, 'notebook', false),
+    (2, null, false),
+    (2, 'unknown', false),
+    (3, 'notebook', false),
+  ]) {
+    test('interrupted schema $version / $format is ${valid ? 'reconciled' : 'retained'} without source access', () async {
+      const id = '44444444444444444444444444444444';
+      final directory = p.join(root, id);
+      await Directory(p.join(directory, 'snapshot')).create(recursive: true);
+      await File(p.join(directory, 'snapshot', 'partial.bin')).writeAsBytes([1, 0, 255]);
+      await File(p.join(directory, 'request.json')).writeAsString(jsonEncode({
+        'version': version,
+        'id': id,
+        'notebookId': syntheticId,
+        'notebookName': notebookName,
+        'format': ?format,
+        'snapshot': 'snapshot',
+        'archive': 'notebook.zip',
+      }));
+      final before = await _treeSnapshot(directory);
+      await exporter.initialize();
+      expect(exporter.value.prepared, isNull);
+      expect(platform.preparations, 0);
+      if (valid) {
+        expect(exporter.value.leftovers, isEmpty);
+        expect(await Directory(root).list().isEmpty, isTrue);
+      } else {
+        expect(exporter.value.leftovers, hasLength(1));
+        expect(await _treeSnapshot(directory), before);
+        await exporter.discardLeftover(exporter.value.leftovers.single);
+        expect(await Directory(root).list().isEmpty, isTrue);
+      }
+    });
+  }
+
+  for (final format in CoreExportFormat.values) {
+    testWidgets('${format.name} selection saves and recovers the actual matching artifact', (tester) async {
+      late NotebookLibrary library;
+      late Map<String, Object> before;
+      await tester.runAsync(() async {
+        await makeNotebook();
+        library = makeLibrary();
+        await library.initialize();
+        before = await _treeSnapshot(p.join(temp.path, 'notebooks', 'book'));
+      });
+      await tester.pumpWidget(screen(library));
+      // The dialog continuation performs real native/isolate IO, so register
+      // its awaited result outside the widget test's fake timer zone.
+      await tester.runAsync(() async {
+        await tester.tap(find.byTooltip('Export $notebookName'));
+      });
+      await tester.pumpAndSettle();
+      if (format == CoreExportFormat.filesAndAssets) {
+        await tester.tap(find.byType(DropdownButton<CoreExportFormat>));
+        await tester.pumpAndSettle();
+        await tester.tap(find.text('Files and assets').last);
+        await tester.pumpAndSettle();
+      }
+      platform.results.add(
+        const DocumentExportResult(
+          status: DocumentExportStatus.cancelled,
+          externalMayBeIncomplete: false,
+        ),
+      );
+      await finishUiExport(tester, library, find.text('Export ZIP'));
+      final artifact = library.value.exportState.prepared!;
+      expect(artifact.format, format);
+      final expected = Map<String, Object>.from(before);
+      if (format == CoreExportFormat.filesAndAssets) {
+        expected.removeWhere((name, _) => name.startsWith('vx_notebook/'));
+      }
+      late List<int> bytes;
+      await tester.runAsync(() async {
+        expect(await _zipSnapshot(artifact.path), expected);
+        expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before);
+        bytes = await File(artifact.path).readAsBytes();
+        await library.shutdown();
+        library = makeLibrary();
+        await library.initialize();
+        expect(await File(artifact.path).readAsBytes(), bytes);
+      });
+      await tester.pumpWidget(screen(library));
+      await tester.pumpAndSettle();
+      final recovered = library.value.exportState.prepared!;
+      expect(recovered.format, format);
+      expect(recovered.sha256, artifact.sha256);
+      expect(recovered.path, artifact.path);
+      expect(
+        find.text('${format == CoreExportFormat.notebook ? 'Notebook backup' : 'Files and assets'}: $notebookName'),
+        findsOneWidget,
+      );
+      expect(
+        find.textContaining('Not a notebook backup.'),
+        format == CoreExportFormat.filesAndAssets ? findsOneWidget : findsNothing,
+      );
+      platform.onSave = (_, path, _) {
+        expect(path, artifact.path);
+        expect(File(path).readAsBytesSync(), bytes);
+      };
+      platform.results.add(
+        const DocumentExportResult(
+          status: DocumentExportStatus.saved,
+          externalMayBeIncomplete: false,
+        ),
+      );
+      await finishUiExport(tester, library, find.text('Save export as…'));
+      expect(library.value.exportState.prepared, isNull);
+      await tester.runAsync(() async {
+        expect(await Directory(root).list().isEmpty, isTrue);
+        expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before);
+      });
+    });
+  }
+
+  testWidgets('legacy notebook recovery stays a backup through displayed Save As', (tester) async {
+    late NotebookLibrary library;
+    late PreparedNotebookExport artifact;
+    late Map<String, Object> before;
+    await tester.runAsync(() async {
+      artifact = await prepare(format: CoreExportFormat.notebook);
+      for (final name in ['request.json', 'ready.json']) {
+        await rewriteMarker(p.join(p.dirname(artifact.path), name), (marker) {
+          marker['version'] = 1;
+          marker.remove('format');
+        });
+      }
+      before = await _treeSnapshot(p.dirname(artifact.path));
+      await exporter.shutdown();
+      library = makeLibrary();
+      await library.initialize();
+      expect(await _treeSnapshot(p.dirname(artifact.path)), before);
+    });
+    await tester.pumpWidget(screen(library));
+    expect(library.value.exportState.prepared!.format, CoreExportFormat.notebook);
+    expect(find.text('Notebook backup: $notebookName'), findsOneWidget);
+    expect(find.textContaining('Not a notebook backup.'), findsNothing);
+    platform.onSave = (_, path, name) {
+      expect(path, artifact.path);
+      expect(name, 'vnote-${artifact.id}.zip');
+      expect(File(path).readAsBytesSync(), before['notebook.zip']);
+    };
+    platform.results.add(
+      const DocumentExportResult(
+        status: DocumentExportStatus.saved,
+        externalMayBeIncomplete: false,
+      ),
+    );
+    await finishUiExport(tester, library, find.text('Save export as…'));
+    expect(library.value.exportState.prepared, isNull);
+    await tester.runAsync(() async {
+      expect(await Directory(root).list().isEmpty, isTrue);
+    });
+  });
+
+  testWidgets('a stale format dialog cannot export a newly discovered library row', (tester) async {
+    late NotebookLibrary library;
+    late Map<String, Object> before;
+    await tester.runAsync(() async {
+      await makeNotebook();
+      library = makeLibrary();
+      await library.initialize();
+      before = await _treeSnapshot(p.join(temp.path, 'notebooks', 'book'));
+    });
+    await tester.pumpWidget(screen(library));
+    final captured = library.value;
+    await tester.tap(find.byTooltip('Export $notebookName'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byType(DropdownButton<CoreExportFormat>));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('Files and assets').last);
+    await tester.pumpAndSettle();
+    await tester.runAsync(() async {
+      expect(await library.refresh(), isTrue);
+    });
+    expect(identical(library.value, captured), isFalse);
+    await tester.tap(find.text('Export ZIP'));
+    await tester.pumpAndSettle();
+    expect(platform.preparations, 0);
+    expect(platform.saves, 0);
+    expect(library.value.exportState.prepared, isNull);
+    await tester.runAsync(() async {
+      expect(await Directory(root).list().isEmpty, isTrue);
+      expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before);
+    });
+  });
+
   test('same-size archive corruption is refused before provider and remains discardable', () async {
-    final artifact = await prepare();
+    final artifact = await prepare(format: CoreExportFormat.notebook);
     final damaged = await File(artifact.path).readAsBytes();
     damaged[0] ^= 0xff;
     await File(artifact.path).writeAsBytes(damaged, flush: true);
@@ -598,7 +1254,7 @@ void main() {
   });
 
   test('missing ZIP is still explicitly discardable after restart', () async {
-    final artifact = await prepare();
+    final artifact = await prepare(format: CoreExportFormat.notebook);
     await File(artifact.path).delete();
     await exporter.shutdown();
     exporter = makeExporter();
@@ -620,6 +1276,7 @@ void main() {
       final result = await exporter.prepare(
         notebookId: syntheticId,
         notebookName: notebookName,
+        format: CoreExportFormat.notebook,
         capture: (destination, budget, cancellation) async {
           called = true;
           return syntheticCapture(destination, budget, cancellation);
@@ -633,6 +1290,7 @@ void main() {
       final artifact = await exporter.prepare(
         notebookId: syntheticId,
         notebookName: notebookName,
+        format: CoreExportFormat.notebook,
         capture: syntheticCapture,
       );
       expect(artifact, isNotNull);
@@ -655,7 +1313,7 @@ void main() {
       'snapshot': 'snapshot',
       'archive': 'notebook.zip',
     };
-    for (final (id, version) in [(interruptedId, 1), (invalidId, 2)]) {
+    for (final (id, version) in [(interruptedId, 1), (invalidId, 3)]) {
       final child = p.join(root, id);
       await Directory(p.join(child, 'snapshot')).create(recursive: true);
       await File(p.join(child, 'snapshot', 'partial.bin'))
@@ -682,7 +1340,7 @@ void main() {
   test(
     'unexpected transaction entries are not automatically deleted',
     () async {
-      final artifact = await prepare();
+      final artifact = await prepare(format: CoreExportFormat.notebook);
       final unknown = File(
         p.join(p.dirname(artifact.path), 'unrecognized.txt'),
       );
@@ -699,7 +1357,7 @@ void main() {
   );
 
   test('multiple ready markers are visible and discarding an extra recovers the remaining ZIP', () async {
-    final artifact = await prepare();
+    final artifact = await prepare(format: CoreExportFormat.notebook);
     const otherId = '33333333333333333333333333333333';
     final other = p.join(root, otherId);
     await _copyTree(p.dirname(artifact.path), other);
@@ -762,7 +1420,7 @@ void main() {
   test(
     'ready marker path tampering is preserved as an explicit cleanup item',
     () async {
-      final artifact = await prepare();
+      final artifact = await prepare(format: CoreExportFormat.notebook);
       final readyMarker = p.join(p.dirname(artifact.path), 'ready.json');
       await rewriteMarker(
         readyMarker,
@@ -789,11 +1447,13 @@ void main() {
       final result = await exporter.prepare(
         notebookId: syntheticId,
         notebookName: notebookName,
+        format: CoreExportFormat.notebook,
         capture: (destination, budget, cancellation) async {
           await syntheticCapture(destination, budget, cancellation);
           return const CoreExportSnapshot(
             notebookId: syntheticId,
             notebookName: notebookName,
+            format: CoreExportFormat.notebook,
             bytes: 4,
             files: 1,
             directories: 0,
@@ -813,11 +1473,13 @@ void main() {
     final result = await exporter.prepare(
       notebookId: syntheticId,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       capture: (destination, budget, cancellation) async {
         await syntheticCapture(destination, budget, cancellation);
         return const CoreExportSnapshot(
           notebookId: syntheticId,
           notebookName: notebookName,
+          format: CoreExportFormat.notebook,
           bytes: 4,
           files: 2,
           directories: 0,
@@ -835,12 +1497,14 @@ void main() {
     final result = await exporter.prepare(
       notebookId: syntheticId,
       notebookName: notebookName,
+      format: CoreExportFormat.notebook,
       capture: (destination, budget, cancellation) async {
         await Directory(destination).create();
         await File(p.join(destination, r'bad\name')).writeAsBytes([1]);
         return const CoreExportSnapshot(
           notebookId: syntheticId,
           notebookName: notebookName,
+          format: CoreExportFormat.notebook,
           bytes: 1,
           files: 1,
           directories: 0,

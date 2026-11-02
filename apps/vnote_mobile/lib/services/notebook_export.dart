@@ -29,6 +29,7 @@ class PreparedNotebookExport {
     required this.id,
     required this.notebookId,
     required this.notebookName,
+    required this.format,
     required this.path,
     required this.bytes,
     required this.sha256,
@@ -36,6 +37,7 @@ class PreparedNotebookExport {
   final String id;
   final String notebookId;
   final String notebookName;
+  final CoreExportFormat format;
   final String path;
   final int bytes;
   final String sha256;
@@ -213,6 +215,7 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
   Future<PreparedNotebookExport?> prepare({
     required String notebookId,
     required String notebookName,
+    required CoreExportFormat format,
     required ExportSnapshotCapture capture,
   }) {
     _checkAdmission?.call();
@@ -231,23 +234,39 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
         cancellation.check();
         final transaction = await _job(
           'allocate',
-          arguments: {'notebookId': notebookId, 'notebookName': notebookName},
+          arguments: {
+            'notebookId': notebookId,
+            'notebookName': notebookName,
+            'format': format.name,
+          },
         );
         id = transaction['id'] as String;
         cancellation.check();
         // Request marker is already flushed/renamed. Capture is the only code
         // allowed to create snapshot/, and its future is the source lease.
-        final snapshot = await capture(
-          transaction['destination'] as String,
-          _stagingBudget - _markerAllowance,
-          cancellation,
-        );
+        final CoreExportSnapshot snapshot;
+        try {
+          snapshot = await capture(
+            transaction['destination'] as String,
+            _stagingBudget - _markerAllowance,
+            cancellation,
+          );
+        } on CoreException catch (error) {
+          // Host export reasons are static and redacted. Codec/platform errors
+          // outside capture still use the generic failure message.
+          throw _ExportFailure('Core error ${error.code}: ${error.message}');
+        }
         cancellation.onCancel = null;
         cancellation.check();
         if (snapshot.notebookId != notebookId ||
             snapshot.notebookName != notebookName) {
           throw const _ExportFailure(
             'The notebook identity changed during export.',
+          );
+        }
+        if (snapshot.format != format) {
+          throw const _ExportFailure(
+            'The snapshot format does not match the requested export.',
           );
         }
         _publish(
@@ -257,6 +276,7 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
           'archive',
           arguments: {
             'id': id,
+            'format': format.name,
             'sourceBytes': snapshot.bytes,
             'files': snapshot.files,
             'directories': snapshot.directories,
@@ -353,7 +373,9 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
         final result = await _platform.save(
           operationId: prepared.id,
           path: prepared.path,
-          suggestedName: 'vnote-${prepared.id}.zip',
+          suggestedName: prepared.format == CoreExportFormat.filesAndAssets
+              ? 'vnote-files-assets-${prepared.id}.zip'
+              : 'vnote-${prepared.id}.zip',
         );
         _providerId = null;
         if (result.status == DocumentExportStatus.saved) {
@@ -494,6 +516,7 @@ PreparedNotebookExport _prepared(Map<String, Object?> map) =>
       id: map['id'] as String,
       notebookId: map['notebookId'] as String,
       notebookName: map['notebookName'] as String,
+      format: _exportFormat(map['format'])!,
       path: map['path'] as String,
       bytes: map['bytes'] as int,
       sha256: map['sha256'] as String,
@@ -503,6 +526,7 @@ Map<String, Object?> _preparedMap(PreparedNotebookExport prepared) => {
   'id': prepared.id,
   'notebookId': prepared.notebookId,
   'notebookName': prepared.notebookName,
+  'format': prepared.format.name,
   'path': prepared.path,
   'bytes': prepared.bytes,
   'sha256': prepared.sha256,
@@ -604,6 +628,19 @@ bool _text(Object? value, int maximum) {
 bool _keys(Map<String, Object?> map, Set<String> expected) =>
     map.length == expected.length && map.keys.every(expected.contains);
 
+CoreExportFormat? _exportFormat(Object? value) => switch (value) {
+  'notebook' => CoreExportFormat.notebook,
+  'filesAndAssets' => CoreExportFormat.filesAndAssets,
+  _ => null,
+};
+
+// Only exact historical schema-1 markers qualify for this interpretation;
+// callers validate their version-specific keys before returning an artifact.
+CoreExportFormat? _markerFormat(Map<String, Object?> marker) =>
+    marker['version'] == 1
+    ? CoreExportFormat.notebook
+    : _exportFormat(marker['format']);
+
 class _ExportStore {
   _ExportStore(this.root, this.cancellation);
   final String root;
@@ -688,7 +725,8 @@ class _ExportStore {
 
   bool _identity(Map<String, Object?> marker, String id) =>
       marker['version'] is int &&
-      marker['version'] == 1 &&
+      (marker['version'] == 1 || marker['version'] == 2) &&
+      _markerFormat(marker) != null &&
       marker['id'] == id &&
       _text(marker['notebookId'], 127) &&
       _text(marker['notebookName'], 16384);
@@ -701,6 +739,7 @@ class _ExportStore {
           'id',
           'notebookId',
           'notebookName',
+          if (marker['version'] == 2) 'format',
           'snapshot',
           'archive',
         }) ||
@@ -719,6 +758,8 @@ class _ExportStore {
   ) async {
     final marker = await _readMarker(directory, 'ready.json');
     if (!_identity(marker, p.basename(directory)) ||
+        marker['version'] != request['version'] ||
+        _markerFormat(marker) != _markerFormat(request) ||
         marker['notebookId'] != request['notebookId'] ||
         marker['notebookName'] != request['notebookName'] ||
         !_keys(marker, {
@@ -726,6 +767,7 @@ class _ExportStore {
           'id',
           'notebookId',
           'notebookName',
+          if (marker['version'] == 2) 'format',
           'archive',
           'bytes',
           'sha256',
@@ -836,7 +878,8 @@ class _ExportStore {
 
   Future<Map<String, Object?>> allocate(Map<String, Object?> arguments) async {
     if (!_text(arguments['notebookId'], 127) ||
-        !_text(arguments['notebookName'], 16384)) {
+        !_text(arguments['notebookName'], 16384) ||
+        _exportFormat(arguments['format']) == null) {
       throw const _ExportFailure('Notebook export metadata is invalid.');
     }
     // Recheck the root: another process or unrecognized residue must not be
@@ -858,10 +901,11 @@ class _ExportStore {
     }
     await Directory(directory).create();
     await _publishMarker(directory, 'request.json', {
-      'version': 1,
+      'version': 2,
       'id': id,
       'notebookId': arguments['notebookId'],
       'notebookName': arguments['notebookName'],
+      'format': arguments['format'],
       'snapshot': 'snapshot',
       'archive': 'notebook.zip',
     });
@@ -875,6 +919,7 @@ class _ExportStore {
     'id': marker['id'],
     'notebookId': marker['notebookId'],
     'notebookName': marker['notebookName'],
+    'format': _markerFormat(marker)!.name,
     'path': p.join(directory, 'notebook.zip'),
     'bytes': marker['bytes'],
     'sha256': marker['sha256'],
@@ -1046,6 +1091,11 @@ class _ExportStore {
     _summary(summary);
     final directory = _transaction(summary['id'] as String);
     final request = await _request(directory);
+    if (request['version'] != 2 || summary['format'] != request['format']) {
+      throw const _ExportFailure(
+        'The snapshot format does not match the requested export.',
+      );
+    }
     await _layout(directory, ready: false);
     final snapshot = p.join(directory, 'snapshot');
     await _directory(snapshot);
@@ -1174,10 +1224,11 @@ class _ExportStore {
     cancellation.check();
     await File(temporary).rename(archive);
     final marker = <String, Object?>{
-      'version': 1,
+      'version': 2,
       'id': request['id'],
       'notebookId': request['notebookId'],
       'notebookName': request['notebookName'],
+      'format': request['format'],
       'archive': 'notebook.zip',
       'bytes': output.length,
       'sha256': hash,

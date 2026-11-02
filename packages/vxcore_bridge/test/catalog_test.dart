@@ -186,6 +186,69 @@ void main() {
   });
   tearDown(() => fixture.dispose());
 
+  test('files/assets snapshot retains source paths and bytes without becoming a notebook backup', () async {
+    final desktop = await fixture.desktop();
+    final config = await fixture.json('vx_notebook/config.json');
+    config['assetsFolder'] = 'resources/assets';
+    config['recycleBinFolder'] = 'custom/recycle';
+    await fixture.putJson('vx_notebook/config.json', config);
+    await Directory(fixture.file('研究/resources').path).create();
+    await Directory(fixture.file('研究/vx_assets').path)
+        .rename(fixture.file('研究/resources/assets').path);
+    final notePath = desktop['notePath'] as String;
+    await fixture.file(notePath).writeAsBytes([
+      0xef, 0xbb, 0xbf,
+      ...utf8.encode('# Export Cafe\u0301 🌍\r\n![pixel](resources/assets/${desktop['noteId']}/pixel.png)\r\n'),
+    ]);
+    for (final entry in {
+      '.hidden/opaque.bin': [0, 255, 17],
+      '研究/resources/assets/${desktop['noteId']}/.sidecar': [0, 128, 33],
+      'custom/recycle/deleted.md': [35, 32, 111, 108, 100],
+      'vx_notebook/future-private.data': [7, 0, 255],
+    }.entries) {
+      final file = fixture.file(entry.key);
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(entry.value);
+    }
+    final before = await _snapshot(fixture.path('book'));
+    final catalog = await fixture.exportCatalog();
+    final content = fixture.path('content');
+    final summary = await catalog.exportSnapshot(content,
+        stagingBudgetBytes: _exportBudget, format: CoreExportFormat.filesAndAssets);
+    final expected = Map<String, Object>.from(before)..removeWhere((path, _) =>
+      path == 'vx_notebook' || path.startsWith('vx_notebook/') ||
+      path == 'custom/recycle' || path.startsWith('custom/recycle/'));
+    expect(await _snapshot(content), expected);
+    expect(summary.format, CoreExportFormat.filesAndAssets);
+    expect(summary.notebookId, desktop['notebookId']);
+    expect(summary.files, expected.values.whereType<List<int>>().length);
+    expect(summary.bytes, expected.values.whereType<List<int>>()
+        .fold<int>(0, (total, bytes) => total + bytes.length));
+    final backup = fixture.path('backup');
+    await catalog.exportSnapshot(backup,
+        stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook);
+    expect(await _snapshot(backup), before);
+    await catalog.close();
+    expect(await _snapshot(fixture.path('book')), before);
+  });
+
+  test('empty notebook content is a real empty snapshot without fabricated files', () async {
+    final created = await fixture.catalog();
+    await created.close();
+    final before = await _snapshot(fixture.path('book'));
+    final catalog = await fixture.exportCatalog();
+    final destination = fixture.path('empty-content');
+    final summary = await catalog.exportSnapshot(destination,
+        stagingBudgetBytes: _exportBudget, format: CoreExportFormat.filesAndAssets);
+    expect(summary.format, CoreExportFormat.filesAndAssets);
+    expect(summary.bytes, 0);
+    expect(summary.files, 0);
+    expect(summary.directories, 0);
+    expect(await Directory(destination).list().toList(), isEmpty);
+    await catalog.close();
+    expect(await _snapshot(fixture.path('book')), before);
+  });
+
   test('collector is the exact unique disk set on a guarded owner', () async {
     final catalog = await fixture.catalog();
     final root = catalog.initialDirectory.folderId;
@@ -308,7 +371,7 @@ void main() {
       final destination = fixture.path('snapshot');
       final summary = await catalog.exportSnapshot(
         destination,
-        stagingBudgetBytes: _exportBudget,
+        stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
       );
       expect(summary.notebookId, fixture.notebookId);
       expect(summary.notebookName, config['name']);
@@ -347,7 +410,7 @@ void main() {
         throwsA(_failure),
       );
       await expectLater(
-        catalog.exportSnapshot(destination, stagingBudgetBytes: _exportBudget),
+        catalog.exportSnapshot(destination, stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook),
         throwsA(_failure),
       );
       expect(await _snapshot(destination), expected);
@@ -366,7 +429,7 @@ void main() {
       await expectLater(
         catalog.exportSnapshot(
           fixture.path('budget'),
-          stagingBudgetBytes: budget,
+          stagingBudgetBytes: budget, format: CoreExportFormat.notebook,
         ),
         throwsA(_failure),
       );
@@ -380,7 +443,7 @@ void main() {
       'relative',
     ]) {
       await expectLater(
-        catalog.exportSnapshot(path, stagingBudgetBytes: _exportBudget),
+        catalog.exportSnapshot(path, stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook),
         throwsA(_failure),
       );
     }
@@ -459,7 +522,7 @@ void main() {
             await expectLater(
               catalog.exportSnapshot(
                 fixture.path('refused'),
-                stagingBudgetBytes: _exportBudget,
+                stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
               ),
               throwsA(_failure),
             );
@@ -491,7 +554,7 @@ void main() {
         await expectLater(
           catalog.exportSnapshot(
             fixture.path('linked-export'),
-            stagingBudgetBytes: _exportBudget,
+            stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
           ),
           throwsA(_failure),
         );
@@ -574,7 +637,7 @@ void main() {
     final catalog = await fixture.exportCatalog();
     final capture = catalog.exportSnapshot(
       fixture.path('cancelled'),
-      stagingBudgetBytes: _exportBudget,
+      stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
     );
     final cancelled = capture.then<Object>(
       (value) => value,
@@ -583,7 +646,7 @@ void main() {
     final duplicate = expectLater(
       catalog.exportSnapshot(
         fixture.path('duplicate'),
-        stagingBudgetBytes: _exportBudget,
+        stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
       ),
       throwsA(_code(10)),
     );
@@ -593,12 +656,12 @@ void main() {
     expect(await cancelled, anyOf(isA<CoreExportSnapshot>(), _code(20)));
     final retry = await catalog.exportSnapshot(
       fixture.path('retry'),
-      stagingBudgetBytes: _exportBudget,
+      stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
     );
     expect(retry.bytes, greaterThanOrEqualTo(8 * 1024 * 1024));
     final closing = catalog.exportSnapshot(
       fixture.path('closing'),
-      stagingBudgetBytes: _exportBudget,
+      stagingBudgetBytes: _exportBudget, format: CoreExportFormat.notebook,
     );
     final settled = closing.then<Object>(
       (value) => value,

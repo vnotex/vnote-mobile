@@ -602,7 +602,10 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   void _exportChanged() => _transferChanged();
 
-  Future<void> exportNotebook(ManagedNotebookEntry entry) async {
+  Future<void> exportNotebook(
+    ManagedNotebookEntry entry, {
+    required CoreExportFormat format,
+  }) async {
     final exporter = _exporter;
     if (_workspace != null ||
         _stale ||
@@ -630,6 +633,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       final prepared = await exporter.prepare(
         notebookId: entry.notebookId!,
         notebookName: entry.name,
+        format: format,
         capture: (destination, budget, cancellation) async {
           cancellation.check();
           if (_stopping) throw StateError('The notebook library is closing.');
@@ -642,6 +646,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
             return await core.exportSnapshot(
               destination,
               stagingBudgetBytes: budget,
+              format: format,
             );
           } finally {
             cancellation.onCancel = null;

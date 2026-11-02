@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import 'package:flutter/material.dart';
+import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import '../../services/notebook_library.dart';
 import '../../services/notebook_export.dart';
@@ -51,27 +52,64 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
     ManagedNotebookEntry entry,
   ) async {
     if (!_isCurrent(library, snapshot)) return;
-    final confirmed = await showDialog<bool>(
+    var selected = CoreExportFormat.notebook;
+    final format = await showDialog<CoreExportFormat>(
       context: context,
-      builder: (context) => AlertDialog(
-        title: Text('Export “${entry.name}”?'),
-        content: const Text(
-          'Save a ZIP copy of the saved notebook, including attachments and recycle content. The ZIP itself is not encrypted. Local sync history/state is excluded; the notebook is not changed.',
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: Text('Export “${entry.name}”?'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                DropdownButton<CoreExportFormat>(
+                  value: selected,
+                  isExpanded: true,
+                  items: const [
+                    DropdownMenuItem(
+                      value: CoreExportFormat.notebook,
+                      child: Text('Notebook backup'),
+                    ),
+                    DropdownMenuItem(
+                      value: CoreExportFormat.filesAndAssets,
+                      child: Text('Files and assets'),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    if (value != null) {
+                      setDialogState(() => selected = value);
+                    }
+                  },
+                ),
+                const SizedBox(height: 12),
+                Text(
+                  selected == CoreExportFormat.notebook
+                      ? 'Save a ZIP copy of the saved notebook, including attachments and recycle content. Local sync history/state is excluded.'
+                      : 'Save raw files and assets with their original hierarchy and unchanged bytes. Unsupported files stay opaque. The entire vx_notebook directory, including unknown files stored there, and configured recycle data are omitted. Notebook identity, tags and configuration are not backed up. This is not a notebook backup. Protected content requires Notebook backup; nothing is decrypted or converted. Links are not rewritten; references to omitted or external data and VNote IDs may not work.',
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  'Only saved content is exported. The ZIP itself is not encrypted. The notebook is not changed.',
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, selected),
+              child: const Text('Export ZIP'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            child: const Text('Export ZIP'),
-          ),
-        ],
       ),
     );
-    if (confirmed == true && _isCurrent(library, snapshot)) {
-      await library.exportNotebook(entry);
+    if (format != null && _isCurrent(library, snapshot)) {
+      await library.exportNotebook(entry, format: format);
     }
   }
 
@@ -482,7 +520,13 @@ class _ExportPanel extends StatelessWidget {
               }),
             ],
             if (prepared != null) ...[
-              Text('Prepared export: ${prepared.notebookName}'),
+              Text(
+                '${prepared.format == CoreExportFormat.notebook ? 'Notebook backup' : 'Files and assets'}: ${prepared.notebookName}',
+              ),
+              if (prepared.format == CoreExportFormat.filesAndAssets)
+                const Text(
+                  'Not a notebook backup. The entire vx_notebook directory (including unknown files), notebook identity, tags, configuration and configured recycle data are omitted.',
+                ),
               Text(
                 '${prepared.bytes} bytes · retained until saved or discarded',
               ),

@@ -148,6 +148,7 @@ class _Catalog implements CatalogCore {
   Future<CoreExportSnapshot> exportSnapshot(
     String destination, {
     required int stagingBudgetBytes,
+    required CoreExportFormat format,
   }) async =>
       throw StateError('Export snapshot requires the real storage fixture.');
   @override
@@ -341,7 +342,7 @@ class _Library extends NotebookLibrary {
   final savedExports = <PreparedNotebookExport>[];
   int exportCancellations = 0;
   @override
-  Future<void> exportNotebook(ManagedNotebookEntry entry) async {
+  Future<void> exportNotebook(ManagedNotebookEntry entry, {required CoreExportFormat format}) async {
     exportedEntries.add(entry);
   }
 
@@ -510,6 +511,7 @@ void main() {
     'retained export cleanup rejects stale confirmation and active provider lease',
     (tester) async {
       final prepared = PreparedNotebookExport(
+        format: CoreExportFormat.notebook,
         id: 'a' * 32,
         notebookId: 'book-id',
         notebookName: 'Personal',
@@ -518,6 +520,7 @@ void main() {
         sha256: 'a' * 64,
       );
       final replacement = PreparedNotebookExport(
+        format: CoreExportFormat.notebook,
         id: 'b' * 32,
         notebookId: 'other-id',
         notebookName: 'Other',

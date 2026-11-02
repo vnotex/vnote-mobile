@@ -101,8 +101,13 @@ final class CoreTags {
   final List<String> assigned;
 }
 
+/// Files/assets retains raw content paths, but omits notebook metadata/recycle.
+/// It is not a notebook backup and never decrypts protected content.
+enum CoreExportFormat { notebook, filesAndAssets }
+
 final class CoreExportSnapshot {
   const CoreExportSnapshot({
+    required this.format,
     required this.notebookId,
     required this.notebookName,
     required this.bytes,
@@ -111,6 +116,7 @@ final class CoreExportSnapshot {
     required this.archiveLimit,
   });
 
+  final CoreExportFormat format;
   final String notebookId;
   final String notebookName;
   final int bytes;
@@ -151,6 +157,7 @@ abstract interface class CatalogCore {
   Future<CoreExportSnapshot> exportSnapshot(
     String destination, {
     required int stagingBudgetBytes,
+    required CoreExportFormat format,
   });
   void cancelExport();
   Future<void> close();
@@ -401,6 +408,11 @@ CoreExportSnapshot _exportSnapshot(native.VxmEvent event) {
   );
   if (event.size <= 0 || event.size > 1024) malformed();
   final json = _queryObject(event);
+  final format = switch (json['format']) {
+    'notebook' => CoreExportFormat.notebook,
+    'filesAndAssets' => CoreExportFormat.filesAndAssets,
+    _ => malformed(),
+  };
   final bytes = json['bytes'];
   final files = json['files'];
   final directories = json['directories'];
@@ -409,9 +421,10 @@ CoreExportSnapshot _exportSnapshot(native.VxmEvent event) {
       bytes < 0 ||
       bytes > 1024 * 1024 * 1024 ||
       files is! int ||
-      files < 1 ||
+      files < 0 ||
       directories is! int ||
-      directories < 1 ||
+      directories < 0 ||
+      (format == CoreExportFormat.notebook && (files < 1 || directories < 1)) ||
       files + directories > 100000 ||
       archiveLimit is! int ||
       archiveLimit < bytes + 1024 ||
@@ -419,6 +432,7 @@ CoreExportSnapshot _exportSnapshot(native.VxmEvent event) {
     malformed();
   }
   return CoreExportSnapshot(
+    format: format,
     notebookId: _queryString(
       event.notebook_id.cast<Utf8>().toDartString(),
       maximum: 127,
@@ -965,6 +979,7 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
   Future<CoreExportSnapshot> exportSnapshot(
     String destination, {
     required int stagingBudgetBytes,
+    required CoreExportFormat format,
   }) async {
     _requireMode(native.VXM_MODE_CATALOG);
     final handle = _usableHandle();
@@ -991,6 +1006,10 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
         handle,
         id,
         _generation,
+        switch (format) {
+          CoreExportFormat.notebook => native.VXM_EXPORT_NOTEBOOK,
+          CoreExportFormat.filesAndAssets => native.VXM_EXPORT_FILES_AND_ASSETS,
+        },
         _option(arena, destination),
         stagingBudgetBytes,
       ),
@@ -1002,7 +1021,8 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     _exportRequest = id;
     try {
       final result = await pending.completer.future as CoreExportSnapshot;
-      if (result.notebookId != initialDirectory.notebookId ||
+      if (result.format != format ||
+          result.notebookId != initialDirectory.notebookId ||
           result.bytes + result.archiveLimit > stagingBudgetBytes) {
         throw const CoreException(
           _unusable,

@@ -27,6 +27,7 @@ external int vxm_host_cancel(
     ffi.Pointer<VxmHost>,
     ffi.Uint64,
     ffi.Uint64,
+    ffi.Int32,
     ffi.Pointer<ffi.Char>,
     ffi.Uint64,
   )
@@ -35,6 +36,7 @@ external int vxm_host_catalog_export(
   ffi.Pointer<VxmHost> host,
   int request_id,
   int generation,
+  int format,
   ffi.Pointer<ffi.Char> destination,
   int staging_budget_bytes,
 );
@@ -243,6 +245,10 @@ const int VXM_EVENT_READ = 2;
 const int VXM_EVENT_TAG = 9;
 
 const int VXM_EVENT_WRITE = 3;
+
+const int VXM_EXPORT_FILES_AND_ASSETS = 1;
+
+const int VXM_EXPORT_NOTEBOOK = 0;
 
 const int VXM_MAX_CATALOG_BYTES = 8388608;
 

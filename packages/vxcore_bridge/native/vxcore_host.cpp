@@ -10,6 +10,7 @@
 #include <cstring>
 #include <filesystem>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -389,10 +390,12 @@ Json export_json(const fs::path &path, const ExportIdentity &expected,
   require(json.is_object(), VXCORE_ERR_JSON_PARSE);
   return json;
 }
-void export_resources(const fs::path &root, const Json &config) {
+struct ExportResources { std::string assets = "vx_assets", recycle = "vx_notebook/recycle_bin"; };
+ExportResources export_resources(const fs::path &root, const Json &config) {
+  ExportResources result;
   for (const auto *key : {vxcore::kJsonKeyAssetsFolder, vxcore::kJsonKeyRecycleBinFolder}) {
     const auto found = config.find(key);
-    std::string resource = key == vxcore::kJsonKeyAssetsFolder ? "vx_assets" : "vx_notebook/recycle_bin";
+    auto &resource = key == vxcore::kJsonKeyAssetsFolder ? result.assets : result.recycle;
     if (found != config.end()) {
       require(found->is_string(), VXCORE_ERR_JSON_PARSE);
       if (key == vxcore::kJsonKeyAssetsFolder || !found->get_ref<const std::string &>().empty())
@@ -408,6 +411,7 @@ void export_resources(const fs::path &root, const Json &config) {
     const auto status = fs::symlink_status(root / fs::u8path(resource));
     export_require(!fs::exists(status) || fs::is_directory(status), "Export requires self-contained resource directories");
   }
+  return result;
 }
 
 bool export_within(const fs::path &path, const fs::path &root) {
@@ -564,6 +568,186 @@ const std::string &json_string(const Json &value, bool empty = false,
           utf8(reinterpret_cast<const uint8_t *>(text.data()), text.size()), code);
   return text;
 }
+
+bool export_under(std::string_view path, std::string_view prefix) {
+  return path == prefix || (path.size() > prefix.size() &&
+      path.compare(0, prefix.size(), prefix) == 0 && path[prefix.size()] == '/');
+}
+bool export_overlap(std::string_view path, std::string_view excluded) {
+  return export_under(path, excluded) || export_under(excluded, path);
+}
+void export_unprotected(const Json &record) {
+  require(record.is_object(), VXCORE_ERR_JSON_PARSE);
+  const auto flag = [](const Json &object) {
+    const auto value = object.find(vxcore::kJsonKeyEncrypted);
+    if (value == object.end()) return;
+    require(value->is_boolean(), VXCORE_ERR_JSON_PARSE);
+    export_require(!value->get<bool>(), "Files and assets export refuses protected content; use a notebook backup");
+  };
+  flag(record);
+  const auto metadata = record.find(vxcore::kJsonKeyMetadata);
+  if (metadata != record.end()) {
+    require(metadata->is_object(), VXCORE_ERR_JSON_PARSE);
+    flag(*metadata);
+  }
+}
+struct ExportEntry { std::string relative; ExportIdentity identity; bool selected; };
+// Reuse the import boundary's pure Unicode keys, not a second folding policy.
+// Buffers are reused for every path; only retained collision keys allocate.
+struct ExportPathKeys {
+  std::array<uint8_t, 16384> nfc, nfd;
+  std::string_view composed, decomposed;
+  void set(const std::string &path) {
+    uint64_t nfc_size = 0, nfd_size = 0;
+    check(static_cast<VxCoreError>(vxm_import_path_keys(
+        reinterpret_cast<const uint8_t *>(path.data()), path.size(),
+        nfc.data(), nfc.size(), &nfc_size, nfd.data(), nfd.size(), &nfd_size)));
+    composed = {reinterpret_cast<const char *>(nfc.data()), static_cast<size_t>(nfc_size)};
+    decomposed = {reinterpret_cast<const char *>(nfd.data()), static_cast<size_t>(nfd_size)};
+  }
+};
+void export_content_metadata(const fs::path &root, const std::vector<ExportEntry> &entries,
+                             const ExportResources &resources, const std::string &notebook_id,
+                             const std::atomic<bool> *cancelled) {
+  std::map<std::string_view, const ExportEntry *, std::less<>> inventory;
+  for (const auto &entry : entries) inventory.emplace(entry.relative, &entry);
+  // Missing lazy assets are allowed, but aliases and omitted ancestors are not.
+  // The same classified inventory authorizes live files, folders and attachments.
+  const auto selected = [&](const std::string &path, bool directory, bool optional = false,
+                            bool resource_root = false) {
+    export_relative(path);
+    export_require(!export_overlap(path, "vx_notebook") && !export_under(path, resources.recycle) &&
+                       (resource_root || !export_under(resources.recycle, path)),
+                   "Files and assets export refuses live content overlapping omitted metadata or recycle data");
+    size_t end = 0;
+    for (;;) {
+      export_cancelled(cancelled);
+      end = path.find('/', end);
+      const auto component = std::string_view(path).substr(0, end);
+      const auto found = inventory.find(component);
+      if (found == inventory.end()) {
+        const auto relative = std::string(component);
+        export_confined(root, relative);
+        export_require(!fs::exists(fs::symlink_status(root / fs::u8path(relative))),
+                       "Files and assets export refuses differently spelled live content or asset paths");
+        export_require(optional, "Files and assets export requires every declared live file, folder and attachment");
+      } else {
+        export_require(found->second->selected && found->second->identity.directory ==
+                           (end == std::string::npos ? directory : true),
+                       "Files and assets export requires selected live content and asset ancestors");
+      }
+      if (end == std::string::npos) return;
+      ++end;
+    }
+  };
+  // Validate configured assets even for an empty notebook. Its root can contain
+  // a separate recycle subtree, but cannot itself be omitted or alias metadata.
+  selected(resources.assets, true, true, true);
+  ExportPathKeys keys;
+  std::set<std::string> metadata_nfc, metadata_nfd;
+  std::set<std::string_view> physical_metadata;
+  constexpr std::string_view contents = "vx_notebook/contents";
+  for (const auto &entry : entries) {
+    export_cancelled(cancelled);
+    if (!export_under(entry.relative, "vx_notebook")) continue;
+    keys.set(entry.relative);
+    if (!export_under(keys.composed, contents)) continue;
+    export_require(export_under(entry.relative, contents),
+                   "Files and assets export refuses aliased notebook metadata paths");
+    export_require(metadata_nfc.emplace(keys.composed).second && metadata_nfd.emplace(keys.decomposed).second,
+                   "Files and assets export refuses case or Unicode aliases in notebook metadata");
+    const auto name = fs::u8path(entry.relative).filename().u8string();
+    keys.set(name);
+    if (keys.composed != "vx.json" && keys.decomposed != "vx.json") continue;
+    export_require(name == "vx.json" && !entry.identity.directory,
+                   "Files and assets export refuses aliased or invalid vx.json metadata");
+    physical_metadata.insert(entry.relative);
+  }
+  std::set<std::string> declared_metadata{"vx_notebook/contents/vx.json"};
+  std::set<std::string> ids;
+  size_t records = 0;
+  const auto node_id = [&](const Json &record) -> const std::string & {
+    const auto &id = json_string(record.at(vxcore::kJsonKeyId));
+    basename(id);
+    require(id.size() < 128 && id != notebook_id && ids.insert(id).second, VXCORE_ERR_JSON_PARSE);
+    export_require(++records <= kExportEntries, "Files and assets export exceeds the metadata record limit");
+    return id;
+  };
+  for (const auto &path : physical_metadata) {
+    export_cancelled(cancelled);
+    const auto &entry = *inventory.at(path);
+    export_confined(root, entry.relative);
+    const auto record = export_json(root / fs::u8path(path), entry.identity, cancelled);
+    export_unprotected(record);
+    node_id(record);
+    // Every raw record is checked, including orphans. Safe child basenames make
+    // edges strictly deeper; equality of incoming and physical records below
+    // therefore proves the complete graph is reachable from its sole root.
+    const auto folder_prefix = std::string(path.substr(contents.size() + 1,
+        path.size() - contents.size() - 1 - std::string_view("vx.json").size()));
+    const auto folder = folder_prefix.empty() ? std::string() : folder_prefix.substr(0, folder_prefix.size() - 1);
+    const auto &name = json_string(record.at(vxcore::kJsonKeyName), folder.empty());
+    if (!folder.empty()) {
+      require(name == fs::u8path(folder).filename().u8string(), VXCORE_ERR_JSON_PARSE);
+      selected(folder, true);
+    }
+    const auto &files = record.at(vxcore::kJsonKeyFiles);
+    const auto &folders = record.at(vxcore::kJsonKeyFolders);
+    require(files.is_array() && folders.is_array(), VXCORE_ERR_JSON_PARSE);
+    export_require(files.size() <= kExportEntries && folders.size() <= kExportEntries,
+                   "Files and assets export exceeds the metadata record limit");
+    std::set<std::string> names_nfc, names_nfd;
+    const auto child_name = [&](const Json &value) -> const std::string & {
+      const auto &child = json_string(value);
+      basename(child);
+      keys.set(child);
+      export_require(names_nfc.emplace(keys.composed).second && names_nfd.emplace(keys.decomposed).second,
+                     "Files and assets export refuses case or Unicode aliases in declared content");
+      return child;
+    };
+    for (const auto &file : files) {
+      export_cancelled(cancelled);
+      export_unprotected(file);
+      const auto &id = node_id(file);
+      const auto &file_name = child_name(file.at(vxcore::kJsonKeyName));
+      selected(folder_prefix + file_name, false);
+      const auto asset = resources.assets + "/" + id;
+      const auto assets_path = folder_prefix + asset;
+      const auto attachments = file.find(vxcore::kJsonKeyAttachments);
+      if (attachments != file.end()) require(attachments->is_array(), VXCORE_ERR_JSON_PARSE);
+      const bool required = attachments != file.end() && !attachments->empty();
+      selected(assets_path, true, !required);
+      if (!required) continue;
+      std::set<std::string> attachment_names;
+      for (const auto &attachment : *attachments) {
+        export_cancelled(cancelled);
+        const auto &reference = json_string(attachment);
+        export_relative(reference);
+        const auto slash = reference.rfind('/');
+        const auto attachment_name = reference.substr(slash == std::string::npos ? 0 : slash + 1);
+        basename(attachment_name);
+        require(attachment_names.insert(attachment_name).second, VXCORE_ERR_JSON_PARSE);
+        export_require(slash == std::string::npos || reference == asset + "/" + attachment_name,
+                       "Files and assets export refuses attachments outside their note asset directory");
+        selected(assets_path + "/" + attachment_name, false);
+      }
+    }
+    for (const auto &child : folders) {
+      export_cancelled(cancelled);
+      const auto &child_value = child_name(child);
+      const auto child_path = folder_prefix + child_value;
+      selected(child_path, true);
+      export_relative(child_path);
+      export_require(declared_metadata.size() < kExportEntries,
+                     "Files and assets export exceeds the metadata record limit");
+      require(declared_metadata.insert(std::string(contents) + "/" + child_path + "/vx.json").second,
+              VXCORE_ERR_JSON_PARSE);
+    }
+  }
+  export_require(declared_metadata.size() == physical_metadata.size() &&
+                 std::equal(declared_metadata.begin(), declared_metadata.end(), physical_metadata.begin()),
+                 "Files and assets export refuses missing or orphan notebook metadata");
+}
 void tag_names(const Json &tags, int32_t code = VXCORE_ERR_JSON_PARSE) {
   require(tags.is_array() && tags.size() <= 10000, code);
   std::set<std::string_view> names;
@@ -706,6 +890,7 @@ struct Request {
   std::string expected_hash;
   std::string node, name, destination;
   int32_t operation = 0;
+  int32_t export_format = VXM_EXPORT_NOTEBOOK;
   size_t input_cost = 0;
   uint64_t staging_budget = 0;
   bool cancelled = false;
@@ -1421,12 +1606,34 @@ struct VxmHost {
     }
     export_require(!fs::exists(fs::symlink_status(destination)), "Export staging already exists", VXCORE_ERR_ALREADY_EXISTS);
     export_journals(source, &read_cancelled);
-    struct Entry { std::string relative; ExportIdentity identity; };
-    std::vector<Entry> entries;
+    const bool content = request.export_format == VXM_EXPORT_FILES_AND_ASSETS;
+    constexpr const char *config_relative = "vx_notebook/config.json";
+    export_confined(source, config_relative);
+    const auto config_identity = export_identity(source / config_relative);
+    const auto config = export_json(source / config_relative, config_identity, &read_cancelled);
+    require(identity(config) == notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    export_credentials(config);
+    notebook_name = json_string(config.at(vxcore::kJsonKeyName));
+    const auto resources = export_resources(source, config);
+    std::vector<std::pair<std::string, ExportIdentity>> excluded_roots;
+    if (content) {
+      export_unprotected(config);
+      export_require(!export_under(resources.assets, "vx_notebook"),
+                     "Files and assets export refuses assets stored in omitted notebook metadata");
+      for (const auto &path : {std::string("vx_notebook"), resources.recycle}) {
+        export_confined(source, path);
+        if (fs::exists(fs::symlink_status(source / fs::u8path(path))))
+          excluded_roots.emplace_back(path, export_identity(source / fs::u8path(path)));
+      }
+    }
+    std::vector<ExportEntry> entries;
+    std::array<bool, 32> excluded_ancestors{};
     uint64_t bytes = 0, files = 0, directories = 0, archive_limit = 1024;
     size_t runtime_entries = 0;
+    bool found_config = false;
     // Inspect runtime paths for unsafe links before the public sync guard reads
-    // them. Their bytes are never copied. There is no ignore/suffix filter.
+    // them. Their bytes are never copied. Content exclusions retain identities
+    // and consume the same inventory cap; no subtree is pruned in that profile.
     for (auto it = fs::recursive_directory_iterator(source); it != fs::recursive_directory_iterator(); ++it) {
       check_read_cancelled();
       auto relative = it->path().lexically_relative(source).generic_u8string();
@@ -1434,27 +1641,52 @@ struct VxmHost {
       export_reserved_spelling(source, relative);
       export_confined(source, relative);
       const auto info = export_identity(it->path());
-      if (relative == "vx_notebook/vx_import" || relative == "vx_notebook/vx_transfer") {
-        it.disable_recursion_pending(); // Already proved directory-only residue.
-        continue;
+      bool selected = true;
+      if (content) {
+        bool excluded = export_under(relative, "vx_notebook") || export_under(relative, resources.recycle) ||
+                        (it.depth() > 0 && excluded_ancestors[static_cast<size_t>(it.depth() - 1)]);
+        for (const auto &root : excluded_roots) {
+          if (info.same_object(root.second)) {
+            export_require(relative == root.first,
+                           "Files and assets export refuses differently spelled omitted directory aliases");
+            excluded = true;
+          }
+          if (relative == root.first) require(info == root.second, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        }
+        excluded_ancestors[static_cast<size_t>(it.depth())] = excluded;
+        selected = !excluded;
+      } else {
+        if (relative == "vx_notebook/vx_import" || relative == "vx_notebook/vx_transfer") {
+          it.disable_recursion_pending(); // Already proved directory-only residue.
+          continue;
+        }
+        if (export_under(relative, "vx_notebook/vx_sync")) {
+          export_require(++runtime_entries <= kExportEntries, "Export synchronization inspection exceeds the entry limit");
+          continue;
+        }
       }
-      if (relative == "vx_notebook/vx_sync" || relative.compare(0, sizeof("vx_notebook/vx_sync/") - 1, "vx_notebook/vx_sync/") == 0) {
-        export_require(++runtime_entries <= kExportEntries, "Export synchronization inspection exceeds the entry limit");
-        continue;
-      }
-      export_require(lower_ascii(it->path().filename().u8string()) != ".git",
+      export_require(!selected || lower_ascii(it->path().filename().u8string()) != ".git",
                      "Export refuses unclassified Git working-copy data");
       export_require(entries.size() < kExportEntries, "Export exceeds the 100000-entry limit");
-      if (info.directory) ++directories;
-      else {
-        export_require(info.size <= kExportSource - bytes, "Export exceeds the 1 GiB source limit");
-        bytes += info.size;
-        archive_limit += info.size + info.size / 64 + 4096;
-        ++files;
+      if (relative == config_relative) {
+        require(info == config_identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        found_config = true;
       }
-      archive_limit += 2 * relative.size() + 256;
-      entries.push_back({std::move(relative), info});
+      if (selected) {
+        if (info.directory) ++directories;
+        else {
+          export_require(!content || lower_ascii(it->path().extension().u8string()) != ".vne",
+                         "Files and assets export refuses protected content; use a notebook backup");
+          export_require(info.size <= kExportSource - bytes, "Export exceeds the 1 GiB source limit");
+          bytes += info.size;
+          archive_limit += info.size + info.size / 64 + 4096;
+          ++files;
+        }
+        archive_limit += 2 * relative.size() + 256;
+      }
+      entries.push_back({std::move(relative), info, selected});
     }
+    export_require(found_config, "Export notebook configuration is missing or differently spelled");
     const auto check_sync = [&] {
       check_read_cancelled();
       const auto code = vxcore_sync_check_reconfiguration(context, notebook_id.c_str());
@@ -1464,22 +1696,9 @@ struct VxmHost {
     export_require(bytes + archive_limit <= request.staging_budget,
                    "Export snapshot and ZIP exceed the staging budget");
     std::array<uint8_t, kExportChunk> buffer;
-    bool found_config = false;
-    for (const auto &entry : entries) {
-      if (entry.relative != "vx_notebook/config.json") continue;
-      found_config = true;
-      export_require(!entry.identity.directory && entry.identity.size <= kJson,
-                     "Export notebook configuration is oversized or invalid");
-      const auto path = source / fs::u8path(entry.relative);
-      export_confined(source, entry.relative);
-      auto config = export_json(path, entry.identity, &read_cancelled);
-      require(identity(config) == notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
-      export_credentials(config);
-      notebook_name = json_string(config.at(vxcore::kJsonKeyName));
-      export_resources(source, config);
-      break;
-    }
-    export_require(found_config, "Export notebook configuration is missing");
+    if (content) export_content_metadata(source, entries, resources, notebook_id, &read_cancelled);
+    export_confined(source, config_relative);
+    require(export_identity(source / config_relative) == config_identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
     const auto space = [&](uint64_t remaining) {
       check_read_cancelled();
       const auto available = fs::space(destination.parent_path()).available;
@@ -1493,6 +1712,7 @@ struct VxmHost {
     uint64_t copied = 0;
     for (const auto &entry : entries) {
       check_read_cancelled();
+      if (!entry.selected) continue;
       export_confined(source, entry.relative);
       export_confined(destination, entry.relative);
       require(export_identity(destination).same_object(destination_identity), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
@@ -1505,8 +1725,26 @@ struct VxmHost {
       space(bytes - copied);
       ExportFile input(source / fs::u8path(entry.relative));
       require(input.identity() == entry.identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
-      ExportFile output(output_path, true);
       uint64_t remaining = entry.identity.size;
+      size_t prefix = 0;
+      if (content) {
+        const auto prefix_size = static_cast<size_t>(std::min<uint64_t>(remaining, 8));
+        while (prefix < prefix_size) {
+          check_read_cancelled();
+          const auto count = input.read(buffer.data() + prefix, prefix_size - prefix);
+          require(count != 0, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+          prefix += count;
+        }
+        export_require(prefix < 8 || (std::memcmp(buffer.data(), "VNOTEE1", 8) != 0 &&
+                                     std::memcmp(buffer.data(), "VNEKEY1", 8) != 0),
+                       "Files and assets export refuses protected content; use a notebook backup");
+      }
+      ExportFile output(output_path, true);
+      if (prefix) {
+        output.write(buffer.data(), prefix);
+        remaining -= prefix;
+        copied += prefix;
+      }
       while (remaining) {
         check_read_cancelled();
         const auto count = input.read(buffer.data(), static_cast<size_t>(std::min<uint64_t>(remaining, buffer.size())));
@@ -1529,13 +1767,15 @@ struct VxmHost {
     }
     confined(source, ".");
     require(export_identity(source) == source_identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    require(export_identity(source / config_relative) == config_identity, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
     export_journals(source, &read_cancelled);
     check_sync();
     space(0);
     auto &out = *request.result;
     copy_field(out.notebook, notebook_id);
     copy_field(out.title, notebook_name);
-    const auto summary = Json{{"bytes", bytes}, {"files", files}, {"directories", directories},
+    const auto summary = Json{{"format", content ? "filesAndAssets" : "notebook"},
+                              {"bytes", bytes}, {"files", files}, {"directories", directories},
                               {"archiveLimit", archive_limit}}.dump();
     require(summary.size() <= kExportSummary, VXCORE_ERR_INVALID_STATE);
     std::memcpy(out.body.get(), summary.data(), summary.size());
@@ -1874,12 +2114,13 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
               uint64_t revision, const char *hash, const uint8_t *data, uint64_t size,
               size_t metadata_cost = 0, int32_t operation = 0,
               const char *node = nullptr, const char *name = nullptr, const char *destination = nullptr,
-              uint64_t staging_budget = 0) {
+              uint64_t staging_budget = 0, int32_t export_format = VXM_EXPORT_NOTEBOOK) {
   try {
     require(revision <= kMaxRevision);
     source_valid(data, size);
     if (kind == VXM_EVENT_WRITE) require(valid_hash(hash));
     const bool exporting = kind == VXM_EVENT_EXPORT;
+    require(!exporting || export_format == VXM_EXPORT_NOTEBOOK || export_format == VXM_EXPORT_FILES_AND_ASSETS);
     require(!exporting || host.export_only, VXCORE_ERR_INVALID_STATE);
     require(!host.export_only || (kind != VXM_EVENT_MUTATE && kind != VXM_EVENT_TAG && kind != VXM_EVENT_WRITE),
             VXCORE_ERR_INVALID_STATE);
@@ -1918,6 +2159,7 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     request->operation = operation;
     request->input_cost = input_cost;
     request->staging_budget = staging_budget;
+    request->export_format = export_format;
     result.capacity = host.capacity;
     result.reserved_output = output_cost;
     result.event.request_id = id;
@@ -2012,10 +2254,10 @@ int32_t vxm_host_catalog_query(VxmHost *host, uint64_t id, uint64_t generation, 
 int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t id, uint64_t generation, const char *json) {
   return admit_catalog_json(host, VXM_EVENT_TAG, id, generation, json);
 }
-int32_t vxm_host_catalog_export(VxmHost *host, uint64_t id, uint64_t generation,
+int32_t vxm_host_catalog_export(VxmHost *host, uint64_t id, uint64_t generation, int32_t format,
                                 const char *destination, uint64_t staging_budget_bytes) {
   return host ? admit(*host, VXM_EVENT_EXPORT, id, generation, 0, nullptr, nullptr, 0,
-                       0, 0, nullptr, nullptr, destination, staging_budget_bytes) : VXCORE_ERR_NULL_POINTER;
+                       0, 0, nullptr, nullptr, destination, staging_budget_bytes, format) : VXCORE_ERR_NULL_POINTER;
 }
 int32_t vxm_host_cancel(VxmHost *host, uint64_t id, uint64_t generation) {
   if (!host) return VXCORE_ERR_NULL_POINTER;

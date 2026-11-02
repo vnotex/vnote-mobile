@@ -36,6 +36,8 @@ enum {
   VXM_EVENT_EXPORT = 10,
   VXM_MODE_NOTE = 1,
   VXM_MODE_CATALOG = 2,
+  VXM_EXPORT_NOTEBOOK = 0,
+  VXM_EXPORT_FILES_AND_ASSETS = 1,
   VXM_EDITOR_MARKDOWN = 1,
   VXM_EDITOR_TEXT = 2,
   VXM_CREATE_NOTE = 1,
@@ -128,19 +130,24 @@ VXM_API int32_t vxm_host_catalog_query(VxmHost *host, uint64_t request_id,
                                      uint64_t generation, const char *json);
 VXM_API int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t request_id,
                                    uint64_t generation, const char *json);
-// Export-only catalog snapshot into an exclusively new absolute destination, outside
-// notebook/app/local roots. Complete portable bytes, not a regenerated catalog.
+// Export-only catalog snapshot into an exclusively new absolute destination,
+// outside notebook/app/local roots. Preserves original bytes, not regenerated
+// metadata. FILES_AND_ASSETS omits the entire vx_notebook and configured recycle
+// trees, and refuses protected data.
 // Requires an owner created with export_only=1, mode=VXM_MODE_CATALOG,
 // create_notebook=0, and a nonempty expected_notebook_id. Ordinary catalog
 // owners reject export admission with VXCORE_ERR_INVALID_STATE.
-// Limit: 1 GiB source, 100000 entries, depth 32, component 255/path 1024 UTF-8 bytes.
+// Limit: 1 GiB selected bytes, 100000 entries, depth 32, component 255/path 1024
+// UTF-8 bytes. Content format charges excluded entries to the inspection cap too.
 // staging_budget_bytes reserves snapshot + conservative ZIP bound, at most
 // 4 GiB - 128 KiB marker allowance; 64 MiB free-space headroom is separate.
-// EXPORT data is <=1024 bytes: {bytes,files,directories,archiveLimit}; notebook
-// identity/name use event metadata. Caller owns any partial destination and must
-// wait for the terminal/close before removing it. Never modifies the live tree.
+// EXPORT data is <=1024 bytes: {format,bytes,files,directories,archiveLimit}; format
+// is "notebook" or "filesAndAssets". Empty content snapshots are valid. Notebook
+// identity/name use event metadata. Caller owns any private partial destination and
+// must wait for the terminal/close before removing it; publish only on success.
+// Never modifies the live tree. Invalid formats do not consume request IDs.
 VXM_API int32_t vxm_host_catalog_export(VxmHost *host, uint64_t request_id,
-                                       uint64_t generation, const char *destination,
+                                       uint64_t generation, int32_t format, const char *destination,
                                        uint64_t staging_budget_bytes);
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
 // Cancel affects pending requests and the matching active read-only search/export,

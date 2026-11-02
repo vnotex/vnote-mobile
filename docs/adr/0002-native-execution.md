@@ -149,7 +149,10 @@ source-changing recovery residue, malformed/unsafe required metadata and tag
 migration cases. The user must complete normal open/recovery first. The public
 sync reconfiguration guard runs after the proven-clean core open.
 
-`vxm_host_catalog_export` inventories and copies the full portable tree on O under
+`vxm_host_catalog_export` takes an explicit notebook or files/assets format,
+rejecting invalid values before request ID/credit consumption. Its bounded summary
+includes that format; Dart correlates it with the requested snapshot and the
+persistent artifact. It inventories and copies the selected portable tree on O under
 the core gate into an absent owned staging directory, using 256 KiB reusable copy
 storage and no-follow file handles. Root/relative link checks and file identities
 are revalidated; ordinary source changes fail instead of returning a truncated
@@ -157,6 +160,15 @@ snapshot. Absolute ancestors are checked at phase boundaries, with root and
 relative components checked at each access; this is not an adversarial filesystem
 snapshot against a foreign writer. An export result reserves only a 1 KiB summary
 plus existing bounded metadata, never a source-sized transport payload.
+
+The content profile uses the same inventory to classify omitted metadata/recycle
+and authorize every declared live file, folder and asset. Exact spelling and
+excluded-directory identities both matter; an alias is never treated as missing.
+All raw contents metadata records are checked, including orphans and aliased names.
+Protected metadata/suffixes and streamed envelope signatures refuse without
+producing a successful artifact. Excluded entries retain identity checks even
+though their bytes are not copied. The full-backup profile retains its original
+preservation contract. No serializer, renderer or second native owner is introduced.
 
 Search and snapshot share the mutex-linearized active read-only cancellation
 mechanism. Accepted cancellation cannot become late success; close cancels/drains

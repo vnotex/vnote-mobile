@@ -720,3 +720,94 @@ actual disk-full/provider-revocation or OEM backup/transfer behavior. iOS coordi
 picker/security-scope/backup code is implemented but has no Xcode build or device
 runtime proof here. Share-in, Markdown/assets-only cohorts, attachment editing,
 preview/recovery, WebDAV and publication remain later work.
+
+
+## Files and assets ZIP export
+
+Added a second explicit export profile through the existing native snapshot,
+worker archive and system Save As pipeline. Notebook backup remains the default;
+content export retains raw hierarchy/bytes but omits the entire `vx_notebook` tree
+and configured recycle data. Format is persisted/correlated, never inferred from
+the destination filename. Core remains at `64237fb`; no dependency or platform
+adapter changed.
+
+### Executed device and compatibility checks
+
+- Both Android ABIs packaged successfully through `scripts/verify.mjs android`,
+  including locked dependencies and rebuilt/checked offline assets.
+- Actual Medium_Phone dialog exposes Notebook backup and Files and assets. The
+  content confirmation visibly discloses the entire metadata-tree omission,
+  protected-content refusal and link/backup limitations.
+- Exported Desktop fixture as content through the real Save As picker. Cancelling
+  retained one schema-2 `filesAndAssets` artifact. Force-stop/cold-start retained
+  the exact ready marker and showed the format/non-backup warning visually. The
+  accessibility dump omitted some ordinary Text labels; a screenshot verified the
+  rendered warning rather than treating that automation timeout as an app failure.
+- Retried Save As. External ZIP bytes exactly matched the retained private ZIP.
+  Independent Python CRC and entry/body checks matched every selected source file,
+  including nested Unicode Markdown, plaintext, opaque bytes and the managed PNG;
+  no `vx_notebook` entry was present.
+- Exported the same source with the default Notebook backup choice. Every portable
+  file matched the baseline. The independent default desktop SDK reopened/read/
+  closed the backup with the original notebook/node IDs and edited source intact.
+- Attempted bundled-notebook import of the metadata-free content ZIP. Preparation
+  refused it with a missing notebook-root explanation; no live root was published.
+  Explicit discard removed only staging. `/proc/<app-pid>/fd` showed zero retained
+  private transfer file descriptors after both export modes and refusal cleanup.
+
+- Created an independent encrypted notebook through ordinary desktop-core APIs,
+  imported it through Android's real ZIP picker, then selected Files and assets.
+  The UI refused protected content with the notebook-backup alternative and no
+  remaining export staging. Notebook backup then preserved every ciphertext,
+  key and metadata byte exactly. The owned Protected export fixture remains in the
+  AVD library for manual refusal/backup checks; no user notebook was encrypted.
+
+### Native verification and corrections
+
+**99 bridge tests** and **18 editor protocol tests** passed, along with bridge
+analysis, TypeScript checking, generated FFI/JSON-key drift and locked asset gates.
+The final app analysis reported no issues and **322 Flutter tests passed**, with
+the two existing Windows skips (POSIX provider-file symlink and literal-backslash
+export filename). Real-storage widget checks cover both format selections,
+retry/restart and legacy schema-1 backup recovery.
+
+Their first run exposed a test-harness issue: the completion `Completer` was created
+in the fake widget zone while its native/worker work ran in `tester.runAsync`.
+The operation completed, but its completion microtask waited in the paused fake
+zone until timeout. Moving that completion into the real IO zone fixed all three
+focused cases; the full suite then passed without extending the timeout.
+
+The MSVC Release native real-storage suite passed. It covers both profiles,
+selected-only budget accounting, encrypted flags/suffix/signatures, complete raw
+metadata graphs, omitted-directory aliases, missing and lazy assets, and empty
+content. Windows live-data DROP and omitted-data LEAK cases were exercised. The
+coexisting `VX.JSON`-beside-`vx.json` case was skipped because this filesystem aliases
+those names; that case is not counted as executed.
+
+The first positive projection fixture accidentally created lowercase `nested`
+before declaring live `Nested` on Windows. The new exact-spelling guard correctly
+refused it. The fixture's unrelated runtime-lookalike data now uses `unindexed/`,
+leaving deliberate alias-refusal fixtures intact; the full native rerun passed.
+
+### Scale and final installation
+
+A throwaway real-native/controller/worker scenario exported **10,000 nested Unicode
+Markdown notes**, a managed binary attachment, BOM/CRLF/combining-mark/emoji source,
+hidden opaque data and a custom recycle tree. Independent Python ZIP reads checked
+all 10,000 bodies, every selected file/directory, CRC and UTF-8 flags against the
+original inputs; metadata/recycle omissions were exact and every source byte stayed
+unchanged. The observed host run was about 4 minutes 29 seconds, not a mobile
+performance guarantee. Its first attempt used an incorrectly prefixed absolute
+temporary path and failed before opening a notebook; correcting the test path to
+repo-relative fixed the probe. Temporary harness and host fixture/ZIP artifacts
+were removed after proof.
+
+All 22 preexisting managed files, including Personal/Projects and the prior desktop
+fixtures, remained byte-for-byte unchanged. Final installed APK SHA-256 matched the
+built package. Import/export staging was empty, no transfer descriptors remained,
+and the app was cold-started and left running on the Medium_Phone library. The new
+owned encrypted fixture and external ZIP copies remain available for manual checks.
+
+No iOS build/runtime, physical-device, actual power-loss or OEM backup/transfer
+claim follows from these checks. Standalone Markdown/assets import, share-in,
+attachment editing, durable drafts/preview, WebDAV and release gates remain open.

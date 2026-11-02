@@ -127,8 +127,9 @@ class _Catalog implements CatalogCore {
   Future<CoreExportSnapshot> exportSnapshot(
     String destination, {
     required int stagingBudgetBytes,
+    required CoreExportFormat format,
   }) =>
-      core.exportSnapshot(destination, stagingBudgetBytes: stagingBudgetBytes);
+      core.exportSnapshot(destination, stagingBudgetBytes: stagingBudgetBytes, format: format);
   @override
   void cancelExport() => core.cancelExport();
   @override
@@ -343,7 +344,7 @@ void main() {
           ),
         ),
       ]);
-      await library.exportNotebook(existing);
+      await library.exportNotebook(existing, format: CoreExportFormat.notebook);
       expect(
         await Directory(await storage.obtainExportRoot()).list().isEmpty,
         isTrue,
@@ -436,7 +437,7 @@ void main() {
     await library.createNotebook('Export source');
     await library.returnToLibrary(library.value.workspace!);
     final entry = library.value.entries.single;
-    final exporting = library.exportNotebook(entry);
+    final exporting = library.exportNotebook(entry, format: CoreExportFormat.notebook);
     final archive = await Future.any([
       provider.entered.future,
       exporting.then<String>(
@@ -492,7 +493,7 @@ void main() {
       final entered = Completer<void>();
       owners.closeGate = gate;
       owners.closeEntered = entered;
-      final exporting = library.exportNotebook(library.value.entries.single);
+      final exporting = library.exportNotebook(library.value.entries.single, format: CoreExportFormat.notebook);
       try {
         await Future.any([
           entered.future,

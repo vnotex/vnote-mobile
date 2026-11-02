@@ -1,6 +1,6 @@
 # ADR 0006: Managed import, share transactions and privacy
 
-Status: whole-notebook ZIP/folder import, ZIP export, retained-artifact recovery and system picker adapters are implemented; Android is exercised. iOS build/runtime and actual backup/transfer artifacts remain unverified. Share-in and Markdown/assets-only import/export remain selected designs, not implemented paths.
+Status: whole-notebook ZIP/folder import, notebook-backup and files/assets ZIP export, retained-artifact recovery and system picker adapters are implemented; Android is exercised. iOS build/runtime and actual backup/transfer artifacts remain unverified. Share-in and standalone Markdown/assets import remain selected designs, not implemented paths.
 
 Scope: [mobile plan sections 5.3 and 5.7](../mobile-client-plan.md). Retain the full first-release import/export/share boundary, including opaque content preservation. Related boundaries: editor drafts in [ADR 0003](0003-editor-protocol-and-durability.md), preview resources in [ADR 0004](0004-rendering-security.md), and the native host's owner-thread/notebook gate.
 
@@ -169,6 +169,58 @@ actual `notebook.zip`, because this API has no suggested-name argument. It retai
 the picker/delegate/source through completion or dismissal. Post-presentation
 non-success, including scene loss, reports possible incomplete external output.
 The iOS adapter has no runtime/build evidence on this Windows workstation.
+
+### Files and assets export profile
+
+The library offers a second explicit format for saved Markdown/plain-text
+interchange. It is a raw content bundle, not a renderer or a notebook backup.
+Every portable file outside the entire root `vx_notebook` tree and configured
+recycle tree is retained at its original relative path. Hidden and unsupported
+files remain opaque; no extension filter drops them. Unknown data inside the
+omitted metadata tree is also omitted, as the confirmation states. No synthetic
+README, renamed assets or rewritten Markdown is introduced. Ordinary relative
+paths between exported files stay intact; links to omitted/external data and
+VNote-ID links remain source text and may not resolve outside VNote.
+
+The pinned [desktop export controller](https://raw.githubusercontent.com/vnotex/vnote/f8026adb4c43f78d90251148e24b6e72ca28f3d7/src/controllers/exportcontroller.cpp)
+and [exporter](https://raw.githubusercontent.com/vnotex/vnote/f8026adb4c43f78d90251148e24b6e72ca28f3d7/src/export/exporter.cpp)
+select source notes and assets but do not establish hierarchy-preserving link
+rewrites for flattened batches. Mobile deliberately keeps the notebook-relative
+layout. The core plaintext-link rewriting API is not used because it transforms
+source bytes. Asset-folder getters that lazily create directories are not used in
+read-only capture.
+
+Native selection and live-data admission share the classified inventory. Omitted
+directory identities and inherited exclusion are retained; case/normalization
+aliases cannot count as absence or silently remove live data. Every declared live
+file/folder and existing per-note asset directory must be selected. A genuinely
+absent lazy asset directory is allowed only with safe selected ancestors and no
+required attachment; it is not created. Metadata is inspected in full: all actual
+contents `vx.json` records, Unicode aliases, declared edges and orphan records.
+Malformed/incomplete graphs, missing declared content, unsafe attachments and
+resource/recycle overlap refuse before creating the destination.
+
+Top-level and nested protection flags, included `.vne` files and the core's
+`VNOTEE1`/`VNEKEY1` envelope signatures refuse the entire content export. The
+streamed prefix check handles short reads; no unlock/decryption/plaintext fallback
+exists. Full notebook backup still preserves those opaque files and their metadata.
+This is not a scanner for arbitrary secrets in otherwise ordinary user files.
+
+The shared limits remain 1 GiB of selected source bytes, 100,000 inspected entries,
+32 components, 255/1,024 UTF-8 component/path bytes, 4 GiB combined staging and
+64 MiB free headroom. Omitted metadata/recycle entries consume the inspection cap,
+but not selected byte/ZIP counts. A notebook with no content yields a valid empty
+ZIP. The same owner join, worker, transfer reservation and provider lease govern
+both formats.
+
+New request and ready markers are schema 2 and both bind the exact format. Native
+summary, request, ready artifact and current handle must agree. Unknown, mixed or
+inconsistent markers stay visible for explicit cleanup. Exact schema-1 records
+mean only the historical notebook-backup format; their valid ZIPs are retained
+without rewriting. Recovery displays the non-backup warning only for files/assets,
+never for a legacy notebook backup. The internal artifact remains `notebook.zip`;
+Android may suggest a `vnote-files-assets-<id>.zip` destination name, while iOS keeps
+its existing source-filename behavior. The format is not inferred from a filename.
 
 ## Archive/provider preflight and quotas
 
