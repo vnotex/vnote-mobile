@@ -1,6 +1,6 @@
 # ADR 0002: Native ownership, execution and cancellation
 
-Status: the serialized owner host, managed multi-notebook library, notebook search/tags and read-only export snapshots are implemented. Network-worker coordination remains a design, not a verified concurrency claim; iOS and physical-device gates remain open.
+Status: the serialized owner host, managed multi-notebook library, notebook search/tags, standalone-cohort transactions, ordinary-note resources and read-only export snapshots are implemented. Network-worker coordination remains a design, not a verified concurrency claim; iOS and physical-device gates remain open.
 
 ## Evidence and decisions
 
@@ -18,6 +18,9 @@ Use one dedicated native owner OS thread per host for context lifetime, metadata
 | `vxcore_notebook_create`, `open`, `open_ex`, `list`, `get_config` | O; root/lifecycle admission; G for create/open | Copy/free IDs and JSON; mutation completes once begun; reject unsupported/read-only writes |
 | `vxcore_folder_create`, `vxcore_file_create`, `vxcore_folder_list_children`, `vxcore_node_get_path_by_id`, `vxcore_node_get_config`, rename/move/delete | Catalog O + G; no live editor owner for the same notebook | Resolve stable IDs at dispatch; cancel before mutation, retain actual result; refresh after every attempt without claiming rollback |
 | `vxcore_notebook_collect_node_ids`, `vxcore_folder_attach_imported`, `vxcore_notebook_recover_imports` | O + G and notebook lifecycle lease; reconcile core import journals and application importing ledger before other mutations/sync | Copy/free returned IDs/JSON; preserve final staged identities for retries. Cancel before attach dispatch, never abandon journaled commit/recovery after mutation. Core attach rechecks collisions and publishes one child-folder cohort; share extensions write only the durable inbox, never the live notebook (ADR 0006) |
+| `vxcore_folder_index_children`, `vxcore_folder_get_share_paths` | Isolated cohort-builder O + G, never the live destination | Preflight caps/classification before ID creation; close/join before sealing immutable content/metadata |
+| Asset/attachment insert, rename/delete and file attachment membership APIs | NOTE or resource-only O + G; reuse the current note owner | Intent before dispatch; exact-name/hash/membership reconciliation after effects; no suffix replay or body decoding during resource-only recovery |
+| `vxm_transfer_run` | Joined filesystem worker, no core context | Closed bounded commands share no-follow helpers and the global moved-attempt quota ledger; borrowed cancellation remains live until worker exit |
 | `vxcore_buffer_open`, `open_by_node_id`, `get`, `get_state`, `get_revision`, `get_content_raw` | O; F and G for open/disk interaction | Raw content pointer is borrowed until modification/close: copy immediately, never send pointer to Dart |
 | `vxcore_buffer_set_content_raw` then `vxcore_buffer_save` | O + F + G as one indivisible scheduled job | Captured editor generation/revision/bytes retained; cancellation only before mutation, then finish save attempt and publish actual result |
 | `vxcore_buffer_reload`, `check_external_changes` | O + F + G; suspend under apply reservation and skip pending/running saves | Never overwrite dirty editor; compare disk/editor bases and report conflict |
@@ -64,6 +67,12 @@ Core log callbacks execute under the logger mutex; events/search callbacks can a
 The current implementation serializes core jobs across host instances with a process-wide mutex because the core UUID generator has unsynchronized shared RNG state. Contexts and storage remain independently owned. Admission/cancellation/event draining and notifications do not take this core-job gate. Remove or narrow that gate only after upstream global state has a proven concurrency contract.
 
 Dart retains NativeCallable.listener while the owner runs. Close retires admission, drains terminal events, nulls the usable event handle, performs native destroy/join on a cleanup isolate, then closes the callable. Reopen creates a fresh native host as well as a fresh editor generation: the native write-revision watermark cannot be reused after an editor resets to revision zero.
+
+### Cohort and resource ownership
+
+The host adds COHORT_BUILDER and RESOURCES modes with metadata-only opening events. `vxm_host_resource` admits both NOTE and RESOURCES; creating a second owner for the same notebook remains forbidden. Resource-only opening uses fresh recovery namespaces and refuses persisted session restoration and protected targets before buffer open; it does not call reload/content getters. Existing ordinary NOTE opening retains its original missing/unsupported-content errors.
+
+Cohort/resource request JSON is bounded to 16 KiB. Resource listings reserve 8 MiB (at most 10,000 rows); transaction summaries reserve 16 KiB. Build/list/export may cancel between bounded work; mutation/recovery drains its actual outcome once dispatched. Binary export uses bounded no-follow streaming rather than whole-resource vector APIs. Library shutdown drains provider/worker/controller leases before retiring workspace/native owners. Native allocation, filesystem authority and volatile editor insertion are distinct lifetimes.
 
 ### Catalog and editor ownership
 

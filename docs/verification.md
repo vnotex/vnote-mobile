@@ -811,3 +811,134 @@ owned encrypted fixture and external ZIP copies remain available for manual chec
 No iOS build/runtime, physical-device, actual power-loss or OEM backup/transfer
 claim follows from these checks. Standalone Markdown/assets import, share-in,
 attachment editing, durable drafts/preview, WebDAV and release gates remain open.
+
+
+## Standalone cohorts and ordinary-note resources
+
+The mobile integration consumes reviewed local core prerequisite `a334ea0` (not
+pushed). It adds raw file/ZIP/folder cohorts, retained attachment/image operations,
+resource Save As and revision/selection-bound source insertion. The core prerequisite
+was independently reviewed before this mobile plan; both mobile workflows share
+one staging reservation and actual-state recovery boundary.
+
+### Executed host and editor checks
+
+- Full real-native Dart bridge suite: **111 tests passed**. Full Flutter suite:
+  **382 passed**, with the two existing Windows platform skips. Bridge and app
+  analysis reported no issues. Native MSVC Release host built, and the complete
+  real-storage C++ executable passed through ctest. Generated FFI/JSON-key drift
+  checks matched the public headers.
+- TypeScript checking, **23 editor tests**, deterministic bundle/license build and
+  asset checks passed with pinned Node 24.22.2. An initial npm child inherited
+  global Node 25.9 and was refused by the pin gate before tests; fixing its PATH,
+  not changing the pin, allowed the checks to run.
+- An independent exported-bridge smoke built and attached **10,000 nested Unicode
+  Markdown notes**, plus a separate BOM/CRLF/combining-mark/emoji cohort containing
+  hidden/opaque bytes and linked binary data. Every input body was compared after
+  attach and rename. Sealed IDs survived retry/reconciliation, and original note,
+  configuration bytes and IDs stayed unchanged. Rebuilding a sealed plan was
+  refused. This Windows storage proof is not a mobile performance guarantee.
+- The same smoke exercised actual add, untrack, track, rename, bounded binary export,
+  image insertion and remove APIs. Exported bytes/hash matched the original;
+  untracking retained bytes; the unindexed image survived a fresh resource owner.
+- Actual bundled CodeMirror in Chromium received typed source and a flushed current
+  selection, then emitted the insertion edit before its correlated received ack.
+  Duplicate replay was inert; one Undo restored the exact pre-insert source, and
+  Redo restored the link. Moving the cursor caused stale rejection without source
+  changes; subsequent typing still worked. Synthetic composition events held the
+  selection barrier until completion. This is not physical-device IME evidence.
+
+### Integration defects found and corrected
+
+Resource-only preflight initially ran during ordinary NOTE opening too, changing
+its missing-file error behavior. Restricting that preflight to RESOURCES preserved
+the established note-open contract while actual resource operations still validate
+on their owner. An obsolete test expecting automatic deletion of malformed import
+journals was removed rather than re-pinning unsafe cleanup; the reviewed core now
+preserves ambiguous legacy state and refuses recovery.
+
+Cohort destination comparison initially appended an empty root node component,
+leaving a trailing separator unlike the core's import-root result. A complete
+private attempt was retained and no dispatch/live publication occurred. Root paths
+now append only nonempty relative components. Library resource integration exposed
+the related legitimate trailing separator returned by directory APIs; validated
+transfer directory roots now remove that empty final component without relaxing
+no-follow or ownership checks. The dirty-NOTE resource regression then passed,
+with unsaved source and on-disk revision unchanged.
+
+Early new test fixtures omitted provider accepted-name records and export consent;
+native correctly refused them. Fixtures now follow the real closed schemas. A test
+and throwaway smoke also captured native-owner futures in isolate closures; moving
+the filesystem request closure to a top-level function fixed the harness without
+passing a core context across isolates.
+
+
+### Executed Android workflows and desktop interoperability
+
+Both Android arm64/x86_64 ABIs were packaged through the pinned root build command.
+Installed on Medium_Phone (Android 17/API 37, 16 KiB pages), without clearing app
+data. The final installed APK hash matched the built package. The final grouping
+dialog was visually checked after correcting its disclosure to **new node IDs**,
+not new notebook IDs.
+
+- Actual system ZIP and folder pickers each imported the same seven raw files into
+  separate child cohorts: Unicode Markdown, CRLF/BOM/combining-mark/emoji source,
+  nested references, binary data, a hidden sidecar and an empty file. Every byte
+  was compared independently with the original input. Folder permission came from
+  the actual SAF confirmation, not a filesystem bypass.
+- Force-stop/cold-start after ZIP preparation retained identical `prepared.json`
+  and `ids.json`; Apply committed the same sealed root ID. Discarding private
+  staging left the live cohort intact.
+- A standalone Markdown file selected through the file picker refused a conflicting
+  child name before publication. Explicit pre-seal name change then prepared and
+  committed it without replacing the prior cohort. An escaping local dependency
+  was refused with no live child/prefix. Cancelling the system picker retained a
+  visible zero-byte attempt that explicit discard removed.
+- Imported the previous real Files and assets export through the new ZIP path.
+  All four source files and their old UUID-named asset path remained byte-exact;
+  the imported note received a new core ID. No old path or source link was rewritten.
+- On a dirty ordinary-note editor, the real image picker published a 68-byte PNG
+  while leaving the exact received source and native body unchanged. Insert image
+  added escaped literal Markdown. One Undo restored all earlier unwritten source;
+  Redo restored the link. Explicit Write advanced the on-disk revision, and Reopen
+  installed revision zero from the exact captured CodeMirror bytes. The PNG and
+  note ID survived later process restart.
+- Added a 1,792-byte tracked binary attachment, untracked it without deleting bytes,
+  tracked it again, and renamed it. Save As cancellation retained a verified private
+  snapshot. Force-stop/cold-start displayed the ambiguous-external-copy warning and
+  preserved its ready marker. Save As again produced an external file exactly equal
+  to the original binary. Explicit removal then cleared attachment membership and
+  the selected file without modifying source or the unrelated PNG.
+- Exported the new notebook through the existing whole-backup/system Save As flow.
+  Independent ZIP CRC and byte comparisons covered both raw cohorts, edited source
+  and image. The default Windows desktop SDK opened/read/closed that Android backup
+  with the same notebook/node IDs and every portable file unchanged. Its isolated
+  test-mode paths did not enable the mobile writer or change production defaults.
+
+The new owned **Offline workflows** notebook remains on the AVD for manual testing.
+All 26 preexisting managed files, including Personal/Projects and prior fixtures,
+were byte-for-byte unchanged. Settled imports/exports/cohorts/resources roots were
+empty; `/proc/<app-pid>/fd` contained no retained transfer-file descriptors. Browser
+sessions, debug forwarding and owned throwaway fixture/scenario files were removed.
+The final app and AVD remain running.
+
+### Recovery boundaries and verification limits
+
+Added real-filesystem regressions for charging an attempt after it moves under
+`vx_import`, including physical children moved before parent publication; a foreign
+replacement of its recorded wrapper identity refuses allocation. A controlled
+unexpected-name outcome retains real copied bytes/dispatch evidence across a fresh
+owner, refuses both recovery-as-success and re-copy, and permits only explicit
+private abandonment. This models a suffix result before receipt; it is not a claim
+that a timing-dependent external-writer race was reproduced on a device.
+
+One fast ADB text-injection burst rendered fewer characters than its command string.
+Preservation/Write checks used the actual CodeMirror source, not that command as an
+oracle. A later instrumented burst arrived intact; this does not establish a cause
+or physical-device IME/no-dropped-input coverage. The diagnostic input was discarded
+through the normal editor disposition barrier, not written to the notebook.
+
+No iOS build/runtime, physical-device, actual power-loss/disk-full, provider
+revocation or OEM backup/transfer guarantee follows from these checks. The share
+inbox, durable editor drafts/autosave/preview, WebDAV, publication and release gates
+remain open. No repository was pushed.

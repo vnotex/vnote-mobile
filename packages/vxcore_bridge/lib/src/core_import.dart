@@ -22,6 +22,21 @@ abstract final class CoreImportStore {
   static Map<String, Object?> run(
     Map<String, Object?> request, {
     int cancellationAddress = 0,
+  }) =>
+      _run(request, cancellationAddress: cancellationAddress, transfer: false);
+
+  /// Executes cohort/resource staging commands on a joined filesystem worker.
+  /// This shares bounded decoding and cancellation ownership with [run], but
+  /// uses the distinct closed transfer command set, never notebook publication.
+  static Map<String, Object?> runTransfer(
+    Map<String, Object?> request, {
+    int cancellationAddress = 0,
+  }) => _run(request, cancellationAddress: cancellationAddress, transfer: true);
+
+  static Map<String, Object?> _run(
+    Map<String, Object?> request, {
+    required int cancellationAddress,
+    required bool transfer,
   }) {
     if (cancellationAddress < 0) {
       throw const CoreException(_invalid, 'Invalid import cancellation token');
@@ -33,7 +48,8 @@ abstract final class CoreImportStore {
     }
     return using((arena) {
       final output = arena<Pointer<Char>>();
-      final code = native.vxm_import_run(
+      final invoke = transfer ? native.vxm_transfer_run : native.vxm_import_run;
+      final code = invoke(
         encoded.toNativeUtf8(allocator: arena).cast(),
         Pointer<native.VxmImportCancel>.fromAddress(cancellationAddress),
         output,
@@ -41,7 +57,10 @@ abstract final class CoreImportStore {
       final response = output.value;
       try {
         if (code != native.VxCoreError.VXCORE_OK) {
-          throw CoreException(code, _message(code));
+          throw CoreException(
+            code,
+            transfer ? _transferMessage(code) : _message(code),
+          );
         }
         if (response == nullptr) _malformed();
         final bytes = response.cast<Uint8>();
@@ -160,6 +179,20 @@ abstract final class CoreImportStore {
     native.VxCoreError.VXCORE_ERR_JSON_PARSE,
     'Malformed native import response',
   );
+
+  static String _transferMessage(int code) => switch (code) {
+    native.VxCoreError.VXCORE_ERR_CANCELLED => 'Transfer work was cancelled; retain its data until all workers have joined',
+    native.VxCoreError.VXCORE_ERR_FILE_CHANGED_OUTSIDE =>
+      'Transfer ownership or storage changed; retained work is quarantined',
+    native.VxCoreError.VXCORE_ERR_UNSUPPORTED =>
+      'Transfer refused unsafe storage, protected content, or a size limit',
+    native.VxCoreError.VXCORE_ERR_JSON_PARSE =>
+      'Transfer metadata or durable records are malformed',
+    native.VxCoreError.VXCORE_ERR_ALREADY_EXISTS =>
+      'The transfer destination already exists; no replacement was authorized',
+    _ =>
+      'Transfer failed; recover its actual outcome before retrying or cleanup',
+  };
 
   static String _message(int code) => switch (code) {
     native.VxCoreError.VXCORE_ERR_CANCELLED =>

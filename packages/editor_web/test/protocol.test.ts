@@ -1,10 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EditorState } from '@codemirror/state';
+import { EditorState, Text } from '@codemirror/state';
 import { history, historyField, isolateHistory, undo, redo, undoDepth } from '@codemirror/commands';
 import {
-  applyChanges, assertCredits, decodeHostMessage, encodeMessage, LIMITS, ProtocolError, trimHistory, prepareHistoryPrune,
+  applyChanges, assertCredits, decodeHostMessage, encodeMessage, insertionTransaction, LIMITS, ProtocolError, trimHistory, prepareHistoryPrune,
   preferredLineEnding, RequestCache, stringSource, utf8Length, validBoundary,
   validateChanges, validateHostMessage, validateSelection, validateSession, validateSource,
 } from '../src/protocol';
@@ -246,7 +246,117 @@ test('CRLF history pruning preserves an end selection and executable undo/redo',
   assert.equal(state.doc.toString(), 'base\r\n' + 'x'.repeat(201));
 });
 
+test('selection request and set variants are closed and insertion source is bounded', () => {
+  assert.equal(validateHostMessage(envelope('selection', { mode: 'request' })).type, 'selection');
+  assert.equal(validateHostMessage(envelope('selection', { anchor: 2, head: 1 })).type, 'selection');
+  const insert = envelope('insert', { text: '![甲](assets/a%20b.png)', anchor: 2, head: 1 });
+  assert.equal(validateHostMessage(insert).type, 'insert');
+  for (const invalid of [
+    envelope('selection', { mode: 'request', anchor: 0, head: 0 }),
+    envelope('selection', { mode: 'current', anchor: 0, head: 0 }),
+    envelope('selection', { mode: 'set', anchor: 0, head: 0 }),
+    envelope('selection', { mode: undefined, anchor: 0, head: 0 }),
+    envelope('selection', { anchor: 0 }),
+    { ...insert, text: '\ud800' }, { ...insert, text: '\udfff' },
+    { ...insert, text: 'x'.repeat(LIMITS.insertedUnits + 1) },
+    { ...insert, text: '中'.repeat(3000) },
+    { ...insert, text: '\u0000'.repeat(1400) },
+    { ...insert, anchor: -1 }, { ...insert, head: 0.5 },
+    { ...insert, execute: true }, { ...insert, text: undefined },
+    { ...insert, requestId: 'editor-1' },
+  ]) assert.throws(() => validateHostMessage(invalid), ProtocolError);
+});
+
+test('live insertion transaction retains literal source and is one isolated undo group', () => {
+  let state = EditorState.create({ doc: Text.of(['base\r', '']),
+    selection: { anchor: 6 }, extensions: [history(), EditorState.lineSeparator.of('\n')] });
+  state = state.update({ changes: { from: 6, insert: 'typed' }, selection: { anchor: 11 },
+    userEvent: 'input.type' }).state;
+  const before = state.doc.toString();
+  const literal = '![日本語](assets/a%20b.png)\r\n</script>${notJavaScript}😀';
+  const request = validateHostMessage(envelope('insert', { text: literal, anchor: 11, head: 11 }));
+  assert.equal(request.type, 'insert');
+  if (request.type !== 'insert') throw new Error('Insertion request expected.');
+  const transaction = insertionTransaction(state, utf8Length(before), request);
+  assert.equal(transaction.annotation(isolateHistory), 'full');
+  state = transaction.state;
+  const inserted = state.doc.toString();
+  assert.equal(inserted, before + literal);
+  assert.equal(state.selection.main.head, inserted.length);
+  state = state.update({ changes: { from: state.doc.length, insert: 'after' },
+    userEvent: 'input.type' }).state;
+  assert.equal(undoDepth(state), 3);
+  const dispatch = (transaction) => { state = transaction.state; };
+  assert.equal(undo({ state, dispatch }), true);
+  assert.equal(state.doc.toString(), inserted);
+  assert.equal(undo({ state, dispatch }), true);
+  assert.equal(state.doc.toString(), before);
+  assert.equal(undo({ state, dispatch }), true);
+  assert.equal(state.doc.toString(), 'base\r\n');
+  assert.equal(redo({ state, dispatch }), true);
+  assert.equal(redo({ state, dispatch }), true);
+  assert.equal(state.doc.toString(), inserted);
+});
+
+test('insertion binds the directed selection, revision and generation without moving the cursor', () => {
+  const state = EditorState.create({ doc: 'a😀\r\nb', selection: { anchor: 5, head: 1 },
+    extensions: [history(), EditorState.lineSeparator.of('\n')] });
+  const request = validateHostMessage(envelope('insert', { text: '中', anchor: 5, head: 1, revision: 3 }));
+  if (request.type !== 'insert') throw new Error('Insertion request expected.');
+  validateSession(request, documentId, generation, 3, true);
+  const next = insertionTransaction(state, utf8Length(state.doc.toString()), request).state;
+  assert.equal(next.doc.toString(), 'a中b');
+  assert.equal(next.selection.main.head, 2);
+  for (const changed of [{ anchor: 1, head: 5 }, { anchor: 0, head: 0 }, { anchor: 2, head: 2 }]) {
+    assert.throws(() => insertionTransaction(state, 9, { ...request, ...changed }), ProtocolError);
+  }
+  assert.throws(() => validateSession(request, documentId, generation, 4, true), ProtocolError);
+  assert.throws(() => validateSession(request, documentId, 'f'.repeat(32), 3, true), ProtocolError);
+  assert.equal(state.doc.toString(), 'a😀\r\nb');
+  assert.equal(undoDepth(state), 0);
+});
+
+test('insertion refuses source boundaries, resulting CRLF cursor and full-document growth atomically', () => {
+  const insertion = (state: EditorState, text: string) => {
+    const request = validateHostMessage(envelope('insert', { text,
+      anchor: state.selection.main.anchor, head: state.selection.main.head }));
+    if (request.type !== 'insert') throw new Error('Insertion request expected.');
+    return insertionTransaction(state, utf8Length(state.doc.toString()), request);
+  };
+  for (const at of [2, 4]) {
+    const state = EditorState.create({ doc: Text.of(['a😀\r', 'b']), selection: { anchor: at } });
+    assert.throws(() => insertion(state, 'x'), ProtocolError);
+    assert.equal(state.doc.toString(), 'a😀\r\nb');
+  }
+  const pair = EditorState.create({ doc: Text.of(['', '']), selection: { anchor: 0 } });
+  assert.throws(() => insertion(pair, '\r'), ProtocolError);
+  assert.throws(() => insertion(pair, ''), ProtocolError);
+  const full = EditorState.create({ doc: 'a'.repeat(LIMITS.documentUnits), extensions: history() });
+  assert.throws(() => insertion(full, 'x'), ProtocolError);
+  assert.equal(full.doc.length, LIMITS.documentUnits);
+  assert.equal(undoDepth(full), 0);
+});
+
+test('queued insertion replay is inert until receipt and never becomes a second edit', () => {
+  const cache = new RequestCache();
+  const request = validateHostMessage(envelope('insert', { text: '[file](assets/file)', anchor: 0, head: 0 }));
+  const wire = encodeMessage(request);
+  assert.equal(cache.begin(request, wire), undefined);
+  // While composition owns the cursor the queued request has no response yet.
+  assert.equal(cache.begin(request, wire)?.response, null);
+  const ack = encodeMessage(envelope('ack', { revision: 1, throughRevision: 1, stage: 'received' }));
+  cache.complete(request, ack);
+  assert.equal(cache.begin(request, wire)?.response, ack);
+  assert.throws(() => cache.begin(request, wire + ' '), ProtocolError);
+  for (let i = 2; i <= LIMITS.replayEntries + 1; i++) {
+    const selection = validateHostMessage(envelope('selection', { requestId: `host-${i}`, mode: 'request' }));
+    cache.begin(selection, encodeMessage(selection));
+  }
+  assert.throws(() => cache.begin(request, wire), ProtocolError);
+});
+
 test('new line policy counts exact separators, including chunk edges and first-occurrence ties', () => {
+
   assert.equal(preferredLineEnding(stringSource('plain')), '\n');
   assert.equal(preferredLineEnding(stringSource('a\r\nb\nc\r\nd')), '\r\n');
   assert.equal(preferredLineEnding(stringSource('a\rb\nc')), '\r');

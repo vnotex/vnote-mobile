@@ -11,6 +11,10 @@ import 'notebook_export.dart';
 import 'notebook_import.dart';
 import 'document_transfer_platform.dart';
 import 'notebook_workspace.dart';
+import 'notebook_session.dart';
+import 'cohort_import.dart';
+import 'resource_transfer.dart';
+import 'transfer_worker.dart';
 
 typedef LibraryOpenCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
@@ -36,6 +40,18 @@ typedef LibraryCreateCatalog = Future<CatalogCore> Function(
 typedef LibraryWorkspaceFactory = NotebookWorkspace Function(
   ManagedNotebookPaths paths,
   String notebookId,
+);
+typedef LibraryCreateCohortImporter = CohortImporter Function(
+  String root,
+  String notebooksRoot,
+  void Function(Object) reserve,
+  void Function(Object) release,
+);
+typedef LibraryCreateResourceTransfer = ResourceTransfer Function(
+  String root,
+  String notebooksRoot,
+  void Function(Object) reserve,
+  void Function(Object) release,
 );
 
 @immutable
@@ -64,10 +80,14 @@ class NotebookLibraryState {
     this.error,
     this.exportState = const NotebookExportState(),
     this.importState = const NotebookImportState(),
+    this.cohortState = const CohortImportState(),
+    this.resourceState = const ResourceTransferState(),
     this.transferReserved = false,
   });
   final NotebookExportState exportState;
   final NotebookImportState importState;
+  final CohortImportState cohortState;
+  final ResourceTransferState resourceState;
   final bool transferReserved;
   final List<ManagedNotebookEntry> entries;
   final NotebookWorkspace? workspace;
@@ -87,6 +107,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     LibraryOpenExportCatalog? openExportCatalog,
     LibraryCreateExporter? createExporter,
     LibraryCreateImporter? createImporter,
+    LibraryCreateCohortImporter? createCohortImporter,
+    LibraryCreateResourceTransfer? createResourceTransfer,
   }) : _obtainStorage = obtainStorage ?? ManagedNotebookStorage.obtain,
        _openCatalog = openCatalog ?? _open,
        _createCatalog = createCatalog ?? _create,
@@ -94,6 +116,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
        _openExportCatalog = openExportCatalog ?? _openExport,
        _createExporter = createExporter ?? _exporterFor,
        _createImporter = createImporter ?? _importerFor,
+       _createCohortImporter = createCohortImporter ?? _cohortImporterFor,
+       _createResourceTransfer = createResourceTransfer ?? _resourceTransferFor,
        super(const NotebookLibraryState());
 
   final Future<ManagedNotebookStorage> Function() _obtainStorage;
@@ -103,6 +127,15 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   final LibraryOpenExportCatalog _openExportCatalog;
   final LibraryCreateExporter _createExporter;
   final LibraryCreateImporter _createImporter;
+  final LibraryCreateCohortImporter _createCohortImporter;
+  final LibraryCreateResourceTransfer _createResourceTransfer;
+  CohortImporter? _cohortImporter;
+  ResourceTransfer? _resourceTransfer;
+  CohortImportState _cohortFallback = const CohortImportState();
+  ResourceTransferState _resourceFallback = const ResourceTransferState();
+  bool _scanningTransfers = true;
+  ResourceCore? _temporaryResource;
+  Completer<void>? _transferLease;
   NotebookImporter? _importer;
   NotebookImportState _importFallback = const NotebookImportState();
   String? _transferOwner = 'checking';
@@ -153,6 +186,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       error: _error,
       exportState: _exporter?.value ?? _exportFallback,
       importState: _importer?.value ?? _importFallback,
+      cohortState: _cohortImporter?.value ?? _cohortFallback,
+      resourceState: _resourceTransfer?.value ?? _resourceFallback,
       transferReserved: _transferOwner != null || _transferCall != null,
     );
   }
@@ -172,13 +207,16 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   void _assertTransfer(String owner) {
-    if (_transferOwner != owner || _transferCall != owner || _stopping) {
+    if ((_transferOwner != owner && _transferOwner != 'blocked') ||
+        _transferCall != owner ||
+        _stopping) {
       throw StateError('Another transfer still owns private staging.');
     }
   }
 
   bool _claimTransfer(String owner, {bool cleanup = false}) {
     if (_stopping ||
+        _scanningTransfers ||
         _transferCall != null ||
         _transferOwner == 'checking' ||
         (_transferOwner != null &&
@@ -187,38 +225,764 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       return false;
     }
     _transferCall = owner;
+    _transferLease = Completer<void>();
     if (_transferOwner != 'blocked') _transferOwner = owner;
     return true;
   }
 
   void _settleTransfer() {
     if (_transferCall != null) return;
-    if (_exporter?.initialized != true || _importer?.initialized != true) {
+    if (_scanningTransfers ||
+        _exporter?.initialized != true ||
+        _importer?.initialized != true ||
+        _cohortImporter?.initialized != true ||
+        _resourceTransfer?.initialized != true) {
       _transferOwner = 'blocked';
       return;
     }
     final export = _exporter!.value;
-    final hasExport =
-        export.busy || export.prepared != null || export.leftovers.isNotEmpty;
-    final hasImport = _importer!.value.busy || _importer!.value.hasStaging;
-    _transferOwner = hasExport && hasImport
+    final owners = <String>[
+      if (export.busy || export.prepared != null || export.leftovers.isNotEmpty)
+        'export',
+      if (_importer!.value.busy || _importer!.value.hasStaging) 'import',
+      if (_cohortImporter!.value.busy || _cohortImporter!.value.hasStaging)
+        'cohort',
+      if (_resourceTransfer!.value.busy || _resourceTransfer!.value.hasStaging)
+        'resource',
+    ];
+    _transferOwner =
+        owners.length > 1 ||
+            _cohortImporter!.value.attempts.length > 1 ||
+            _resourceTransfer!.value.attempts.length > 1
         ? 'blocked'
-        : hasExport
-        ? 'export'
-        : hasImport
-        ? 'import'
-        : null;
+        : owners.firstOrNull;
   }
 
   void _finishTransferCall() {
     _transferCall = null;
+    final lease = _transferLease;
+    _transferLease = null;
+    lease?.complete();
     _settleTransfer();
     _publish();
   }
 
   void _transferChanged() {
     _settleTransfer();
+    final workspace = _workspace;
+    if (workspace != null) {
+      workspace.setTransferBlock(
+        _blockedNotebook(workspace.notebookLocation)
+            ? 'A retained transfer needs recovery. Return to Notebooks to resolve it.'
+            : null,
+      );
+    }
     _publish();
+  }
+
+  void _reserveController(Object owner) {
+    final domain = identical(owner, _cohortImporter)
+        ? 'cohort'
+        : identical(owner, _resourceTransfer)
+        ? 'resource'
+        : null;
+    if (domain == null) throw StateError('Unknown transfer owner.');
+    if (_scanningTransfers) return;
+    _assertTransfer(domain);
+  }
+
+  void _releaseController(Object owner) => _transferChanged();
+
+  Future<void> _ensureOfflineTransfers() async {
+    try {
+      if (_cohortImporter == null) {
+        final root = await _storage!.obtainCohortRoot();
+        if (_stopping) return;
+        _cohortImporter = _createCohortImporter(
+          root,
+          p.normalize(_storage!.root),
+          _reserveController,
+          _releaseController,
+        );
+        _cohortImporter!.addListener(_transferChanged);
+      }
+      await _cohortImporter!.initialize();
+    } on Object catch (error) {
+      _cohortFallback = CohortImportState(error: _describe(error));
+    }
+    try {
+      if (_resourceTransfer == null) {
+        final root = await _storage!.obtainResourceRoot();
+        if (_stopping) return;
+        _resourceTransfer = _createResourceTransfer(
+          root,
+          p.normalize(_storage!.root),
+          _reserveController,
+          _releaseController,
+        );
+        _resourceTransfer!.addListener(_transferChanged);
+      }
+      await _resourceTransfer!.initialize();
+    } on Object catch (error) {
+      _resourceFallback = ResourceTransferState(error: _describe(error));
+    }
+  }
+
+  bool get _unknownTransferTarget =>
+      _cohortImporter?.initialized != true ||
+      _resourceTransfer?.initialized != true ||
+      _cohortImporter!.value.blocksAllNotebooks ||
+      _resourceTransfer!.value.blocksAllNotebooks;
+
+  bool _blockedNotebook(String location) {
+    if (_unknownTransferTarget) return true;
+    final relative = p.basename(location);
+    return _cohortImporter!.value.blockedNotebookRelatives.contains(relative) ||
+        _resourceTransfer!.value.blockedNotebookRelatives.contains(relative);
+  }
+
+  Future<void> _recoverOfflineTransfers() async {
+    final cohorts = _cohortImporter;
+    if (cohorts != null && cohorts.initialized) {
+      for (final id in cohorts.value.attempts.map((item) => item.id).toList()) {
+        final attempt = cohorts.value.attempts
+            .where((item) => item.id == id)
+            .firstOrNull;
+        if (attempt == null) continue;
+        if (_stopping) return;
+        if (attempt.stage != TransferStage.intent &&
+            attempt.stage != TransferStage.quarantined) {
+          continue;
+        }
+        if (!_claimTransfer('cohort', cleanup: true)) continue;
+        try {
+          cohorts.select(attempt);
+          await cohorts.recover(attempt, _applyCohort);
+        } on Object catch (error) {
+          _error = _describe(error);
+        } finally {
+          _finishTransferCall();
+        }
+      }
+    }
+    final resources = _resourceTransfer;
+    if (resources != null && resources.initialized) {
+      for (final id
+          in resources.value.attempts.map((item) => item.id).toList()) {
+        final attempt = resources.value.attempts
+            .where((item) => item.id == id)
+            .firstOrNull;
+        if (attempt == null) continue;
+        if (_stopping) return;
+        if (attempt.stage != TransferStage.intent &&
+            attempt.stage != TransferStage.quarantined) {
+          continue;
+        }
+        if (!_claimTransfer('resource', cleanup: true)) continue;
+        try {
+          resources.select(attempt);
+          await resources.recover(attempt, _applyRetainedResource);
+        } on Object catch (error) {
+          _error = _describe(error);
+        } finally {
+          _finishTransferCall();
+        }
+      }
+    }
+  }
+
+  Future<ManagedNotebookPaths> _transferPaths(
+    String relative,
+    String transactionRoot,
+  ) async {
+    if (relative != p.basename(relative) ||
+        relative == '.' ||
+        relative == '..' ||
+        relative.contains('/') ||
+        relative.contains('\\')) {
+      throw StateError('The retained notebook location is invalid.');
+    }
+    final existing = await _storage!.existing(p.join(_storage!.root, relative));
+    final engine = p.join(transactionRoot, 'recovery', newTransferId());
+    return ManagedNotebookPaths(
+      app: p.join(engine, 'app'),
+      local: p.join(engine, 'local'),
+      notebook: existing.notebook,
+    );
+  }
+
+  Future<CoreCohortBuildResult> _buildCohort(
+    CohortAttempt attempt,
+    TransferCancellation cancellation,
+  ) async {
+    cancellation.check();
+    final core = await CoreNotebook.createCohortBuilder(
+      attempt.transactionRoot,
+    );
+    try {
+      cancellation.onCancel = core.cancel;
+      cancellation.check();
+      return await core.build();
+    } finally {
+      cancellation.onCancel = null;
+      await core.close();
+    }
+  }
+
+  Future<CoreCohortOutcome> _applyCohort(
+    CohortAttempt attempt,
+    TransferCancellation cancellation,
+    bool recover,
+  ) async {
+    if (_workspace != null) {
+      throw StateError('Return to Notebooks before applying files.');
+    }
+    if (!recover) cancellation.check();
+    final paths = await _transferPaths(
+      attempt.target.notebookRelative,
+      attempt.transactionRoot,
+    );
+    final core = await _openCatalog(paths, attempt.target.notebookId);
+    _temporary = core;
+    try {
+      if (!recover) cancellation.check();
+      return recover
+          ? await core.recoverCohort(attempt.transactionRoot)
+          : await core.applyCohort(attempt.transactionRoot);
+    } finally {
+      await _release(core);
+    }
+  }
+
+  Future<CoreResourceResult> _applyRetainedResource(
+    ResourceAttempt attempt,
+    TransferCancellation cancellation,
+    bool recover,
+  ) async {
+    if (_workspace != null) {
+      throw StateError('Return to Notebooks before recovering resources.');
+    }
+    if (!recover) cancellation.check();
+    final paths = await _transferPaths(
+      attempt.target.notebookRelative,
+      attempt.transactionRoot,
+    );
+    final core = await CoreNotebook.openResources(
+      appDataPath: paths.app,
+      localDataPath: paths.local,
+      notebookPath: paths.notebook,
+      notebookId: attempt.target.notebookId,
+      nodeId: attempt.target.nodeId,
+    );
+    _temporaryResource = core;
+    try {
+      return await _applyResourceOnCore(core, attempt, cancellation, recover);
+    } finally {
+      await core.close();
+      if (identical(_temporaryResource, core)) _temporaryResource = null;
+    }
+  }
+
+  Future<void> _refreshResourceListing(
+    ResourceCore core,
+    ResourceTarget target,
+  ) async {
+    _resourceTransfer!.clearListing(target);
+    try {
+      _resourceTransfer!.setListing(target, await core.listResources());
+    } on Object catch (error) {
+      _error = 'Resource listing could not be refreshed: ${_describe(error)}';
+    }
+  }
+
+  Future<CoreResourceResult> _applyResourceOnCore(
+    ResourceCore core,
+    ResourceAttempt attempt,
+    TransferCancellation cancellation,
+    bool recover,
+  ) async {
+    _resourceTransfer!.clearListing(attempt.target);
+    try {
+      if (!recover) cancellation.check();
+      return recover
+          ? await core.recoverResource(attempt.transactionRoot)
+          : await core.applyResource(attempt.transactionRoot);
+    } finally {
+      // Errors may follow physical/membership changes. Inspect the actual
+      // state before releasing this SAME owner, never infer rollback.
+      await _refreshResourceListing(core, attempt.target);
+    }
+  }
+
+  Future<CoreResourceExport> _exportResourceOnCore(
+    ResourceCore core,
+    ResourceAttempt attempt,
+    TransferCancellation cancellation,
+  ) async {
+    cancellation.onCancel = core.cancelResourceRead;
+    try {
+      cancellation.check();
+      return await core.exportResource(attempt.name, attempt.transactionRoot);
+    } finally {
+      cancellation.onCancel = null;
+    }
+  }
+
+  Future<CoreResourceExport> _exportRetainedResource(
+    ResourceAttempt attempt,
+    TransferCancellation cancellation,
+  ) async {
+    cancellation.check();
+    final paths = await _transferPaths(
+      attempt.target.notebookRelative,
+      attempt.transactionRoot,
+    );
+    final core = await CoreNotebook.openResources(
+      appDataPath: paths.app,
+      localDataPath: paths.local,
+      notebookPath: paths.notebook,
+      notebookId: attempt.target.notebookId,
+      nodeId: attempt.target.nodeId,
+    );
+    _temporaryResource = core;
+    try {
+      return await _exportResourceOnCore(core, attempt, cancellation);
+    } finally {
+      await core.close();
+      if (identical(_temporaryResource, core)) _temporaryResource = null;
+    }
+  }
+
+  Future<void> inspectResource(ResourceAttempt attempt) async {
+    if (_workspace != null ||
+        _active != null ||
+        _resourceTransfer == null ||
+        !_claimTransfer('resource', cleanup: true)) {
+      return;
+    }
+    if (!_admit()) {
+      _finishTransferCall();
+      return;
+    }
+    try {
+      _resourceTransfer!.select(attempt);
+      await _resourceTransfer!.refresh(attempt.target, (
+        target,
+        cancellation,
+      ) async {
+        final paths = await _transferPaths(
+          target.notebookRelative,
+          attempt.transactionRoot,
+        );
+        final core = await CoreNotebook.openResources(
+          appDataPath: paths.app,
+          localDataPath: paths.local,
+          notebookPath: paths.notebook,
+          notebookId: target.notebookId,
+          nodeId: target.nodeId,
+        );
+        _temporaryResource = core;
+        cancellation.onCancel = core.cancelResourceRead;
+        try {
+          cancellation.check();
+          return await core.listResources();
+        } finally {
+          cancellation.onCancel = null;
+          await core.close();
+          if (identical(_temporaryResource, core)) _temporaryResource = null;
+        }
+      });
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _retire();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> importFiles(
+    NotebookWorkspace workspace,
+    CoreDirectory directory,
+    DocumentImportKind kind,
+    String folderName,
+  ) async {
+    if (!identical(_workspace, workspace) ||
+        !identical(workspace.value.directory, directory) ||
+        !workspace.value.canMutate ||
+        _active != null ||
+        _cohortImporter == null ||
+        !_claimTransfer('cohort')) {
+      return;
+    }
+    final target = CohortTarget(
+      notebookId: directory.notebookId,
+      parentId: directory.folderId,
+      notebookRelative: p.basename(workspace.notebookLocation),
+      folderName: folderName,
+    );
+    try {
+      // Join the browser owner before any picker/build. Provider work then
+      // permits opening other notebooks, but applying requires library admission.
+      if (!await returnToLibrary(workspace) || _stopping) return;
+      await _cohortImporter!.start(target: target, kind: kind);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> retryCohort(CohortAttempt attempt) async {
+    if (_transferOwner == 'blocked' &&
+        attempt.stage != TransferStage.intent &&
+        attempt.stage != TransferStage.quarantined) {
+      _error = 'Resolve conflicting retained transfers before preparing or applying a new copy.';
+      _publish();
+      return;
+    }
+    if (_workspace != null ||
+        _active != null ||
+        _cohortImporter == null ||
+        !_claimTransfer('cohort', cleanup: true)) {
+      return;
+    }
+    if (!_admit()) {
+      _finishTransferCall();
+      return;
+    }
+    try {
+      _cohortImporter!.select(attempt);
+      await _cohortImporter!.retry(
+        attempt,
+        build: _buildCohort,
+        apply: _applyCohort,
+      );
+      if (!_stopping) await _discover();
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _retire();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> discardCohort(CohortAttempt attempt) async {
+    if (_workspace != null ||
+        _active != null ||
+        _cohortImporter == null ||
+        !_claimTransfer('cohort', cleanup: true)) {
+      return;
+    }
+    if (!_admit()) {
+      _finishTransferCall();
+      return;
+    }
+    try {
+      _cohortImporter!.select(attempt);
+      await _cohortImporter!.discard(attempt, recover: _applyCohort);
+      if (!_stopping) await _discover();
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _retire();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> renameCohortTarget(CohortAttempt attempt, String name) async {
+    if (_workspace != null ||
+        _active != null ||
+        _cohortImporter == null ||
+        !_claimTransfer('cohort')) {
+      return;
+    }
+    try {
+      _cohortImporter!.select(attempt);
+      await _cohortImporter!.setFolderName(attempt, name);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  void cancelCohort() => _cohortImporter?.cancel();
+  void cancelResource() => _resourceTransfer?.cancel();
+
+  ResourceTarget resourceTarget(
+    NotebookWorkspace workspace,
+    NotebookSession session,
+  ) {
+    final note = session.value.note;
+    if (!identical(_workspace, workspace) ||
+        !identical(workspace.value.session, session) ||
+        note == null ||
+        _stopping) {
+      throw StateError('The selected note has changed.');
+    }
+    return ResourceTarget(
+      notebookId: note.notebookId,
+      nodeId: note.nodeId,
+      notebookRelative: p.basename(workspace.notebookLocation),
+    );
+  }
+
+  Future<void> refreshResources(
+    NotebookWorkspace workspace,
+    NotebookSession session,
+  ) async {
+    final target = resourceTarget(workspace, session);
+    if (_resourceTransfer == null || !_claimTransfer('resource', cleanup: true)) {
+      return;
+    }
+    try {
+      await session.withResources(
+        (core) =>
+            _resourceTransfer!.refresh(target, (target, cancellation) async {
+              cancellation.onCancel = core.cancelResourceRead;
+              try {
+                cancellation.check();
+                return await core.listResources();
+              } finally {
+                cancellation.onCancel = null;
+              }
+            }),
+      );
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> changeResource(
+    NotebookWorkspace workspace,
+    NotebookSession session,
+    ResourceOperation operation,
+    String name, {
+    String? newName,
+  }) async {
+    final target = resourceTarget(workspace, session);
+    if (_resourceTransfer == null || !_claimTransfer('resource')) return;
+    try {
+      await session.withResources((core) async {
+        final attempt = await _resourceTransfer!.start(
+          target: target,
+          operation: operation,
+          name: name,
+          newName: newName,
+        );
+        if (attempt == null ||
+            attempt.target.notebookId != target.notebookId ||
+            attempt.target.nodeId != target.nodeId ||
+            _stopping) {
+          return;
+        }
+        if (operation == ResourceOperation.export) {
+          await _resourceTransfer!.prepareExport(
+            attempt,
+            (attempt, cancellation) =>
+                _exportResourceOnCore(core, attempt, cancellation),
+          );
+        } else {
+          if (attempt.stage == TransferStage.source ||
+              attempt.stage == TransferStage.prepared) {
+            await _resourceTransfer!.apply(
+              attempt,
+              (attempt, cancellation, recover) =>
+                  _applyResourceOnCore(core, attempt, cancellation, recover),
+            );
+          }
+        }
+        if (operation == ResourceOperation.export ||
+            (attempt.stage != TransferStage.source &&
+                attempt.stage != TransferStage.prepared)) {
+          await _refreshResourceListing(core, target);
+        }
+        final ready = _resourceTransfer!.value.current;
+        if (!_stopping &&
+            operation == ResourceOperation.export &&
+            ready?.stage == TransferStage.exportReady) {
+          await _resourceTransfer!.save(ready!);
+        }
+      });
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> resolveSessionResource(
+    NotebookWorkspace workspace,
+    NotebookSession session,
+    ResourceAttempt attempt, {
+    bool discard = false,
+    bool abandon = false,
+  }) async {
+    final target = resourceTarget(workspace, session);
+    if (attempt.target.notebookId != target.notebookId ||
+        attempt.target.nodeId != target.nodeId ||
+        _resourceTransfer == null ||
+        !_claimTransfer('resource', cleanup: true)) {
+      return;
+    }
+    try {
+      await session.withResources((core) async {
+        _resourceTransfer!.select(attempt);
+        var inspected = false;
+        Future<CoreResourceResult> apply(
+          ResourceAttempt current,
+          TransferCancellation cancellation,
+          bool recover,
+        ) async {
+          try {
+            return await _applyResourceOnCore(
+              core,
+              current,
+              cancellation,
+              recover,
+            );
+          } finally {
+            inspected = true;
+          }
+        }
+
+        if (discard) {
+          await _resourceTransfer!.discard(
+            attempt,
+            recover: apply,
+            abandon: abandon,
+          );
+        } else if (attempt.operation == ResourceOperation.export) {
+          if (attempt.stage != TransferStage.exportReady) {
+            await _resourceTransfer!.prepareExport(
+              attempt,
+              (attempt, cancellation) =>
+                  _exportResourceOnCore(core, attempt, cancellation),
+            );
+          }
+        } else {
+          await _resourceTransfer!.retry(attempt, apply);
+        }
+        if (!inspected) await _refreshResourceListing(core, target);
+        final current = _resourceTransfer!.value.current;
+        if (!discard &&
+            !_stopping &&
+            current?.stage == TransferStage.exportReady) {
+          await _resourceTransfer!.save(current!);
+        }
+      });
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> retryResource(ResourceAttempt attempt) async {
+    if (_transferOwner == 'blocked' &&
+        attempt.stage != TransferStage.intent &&
+        attempt.stage != TransferStage.quarantined &&
+        attempt.stage != TransferStage.exportReady) {
+      _error =
+          'Resolve conflicting retained transfers before applying a resource.';
+      _publish();
+      return;
+    }
+    if (_workspace != null ||
+        _active != null ||
+        _resourceTransfer == null ||
+        !_claimTransfer('resource', cleanup: true)) {
+      return;
+    }
+    if (!_admit()) {
+      _finishTransferCall();
+      return;
+    }
+    final admission = _active!;
+    void releaseAdmission() {
+      if (identical(_active, admission)) _retire();
+    }
+
+    try {
+      _resourceTransfer!.select(attempt);
+      if (attempt.operation == ResourceOperation.export) {
+        if (attempt.stage != TransferStage.exportReady) {
+          await _resourceTransfer!.prepareExport(
+            attempt,
+            _exportRetainedResource,
+          );
+        }
+        final ready = _resourceTransfer!.value.current;
+        releaseAdmission();
+        if (!_stopping && ready?.stage == TransferStage.exportReady) {
+          await _resourceTransfer!.save(ready!);
+        }
+      } else {
+        await _resourceTransfer!.retry(attempt, _applyRetainedResource);
+        if (!_stopping) await _discover();
+      }
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      releaseAdmission();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> discardResource(
+    ResourceAttempt attempt, {
+    bool abandon = false,
+  }) async {
+    if (_workspace != null ||
+        _active != null ||
+        _resourceTransfer == null ||
+        !_claimTransfer('resource', cleanup: true)) {
+      return;
+    }
+    if (!_admit()) {
+      _finishTransferCall();
+      return;
+    }
+    try {
+      _resourceTransfer!.select(attempt);
+      await _resourceTransfer!.discard(
+        attempt,
+        recover: _applyRetainedResource,
+        abandon: abandon,
+      );
+      if (!_stopping) await _discover();
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _retire();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> discardOfflineLeftover(
+    TransferLeftover item, {
+    required bool cohort,
+  }) async {
+    if (_workspace != null ||
+        _active != null ||
+        !item.canDiscard ||
+        !_claimTransfer(cohort ? 'cohort' : 'resource', cleanup: true)) {
+      return;
+    }
+    try {
+      if (cohort) {
+        await _cohortImporter!.discardLeftover(item);
+      } else {
+        await _resourceTransfer!.discardLeftover(item);
+      }
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+    if (!_stopping) await refresh();
   }
 
   Future<void> _ensureImporter() async {
@@ -362,6 +1126,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         continue;
       }
       if (candidate.error != null ||
+          _blockedNotebook(candidate.paths.notebook) ||
           _importer!.value.blockedLocations.any(
             (path) => p.equals(path, candidate.paths.notebook),
           )) {
@@ -556,7 +1321,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     final current = _importer?.value.current;
     if (current == null ||
         current.phase != NotebookImportPhase.finishing ||
-        !_claimTransfer('import')) {
+        !_claimTransfer('import', cleanup: true)) {
       return;
     }
     try {
@@ -637,6 +1402,20 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         capture: (destination, budget, cancellation) async {
           cancellation.check();
           if (_stopping) throw StateError('The notebook library is closing.');
+          final ledger = await runTransferStore({
+            'op': 'checkSpace',
+            'scope': 'cohort',
+            'root': _cohortImporter!.root,
+            'notebooksRoot': p.normalize(_storage!.root),
+            'id': '00000000000000000000000000000000',
+            'requiredBytes': 0,
+          });
+          cancellation.check();
+          final remaining = (ledger['remainingBytes'] as int) - 128 * 1024;
+          final captureBudget = remaining < budget ? remaining : budget;
+          if (captureBudget <= 0) {
+            throw StateError('Private transfer staging is full.');
+          }
           final core = await _openExportCatalog(paths, entry.notebookId!);
           _temporary = core;
           try {
@@ -645,7 +1424,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
             if (_stopping) throw StateError('The notebook library is closing.');
             return await core.exportSnapshot(
               destination,
-              stagingBudgetBytes: budget,
+              stagingBudgetBytes: captureBudget,
               format: format,
             );
           } finally {
@@ -709,9 +1488,17 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _stale = true;
     _storage ??= await _obtainStorage();
     if (_stopping) return;
-    await _ensureExporter();
-    await _ensureImporter();
+    _scanningTransfers = true;
+    try {
+      await _ensureExporter();
+      await _ensureImporter();
+      await _ensureOfflineTransfers();
+    } finally {
+      _scanningTransfers = false;
+    }
     _settleTransfer();
+    if (_stopping) return;
+    await _recoverOfflineTransfers();
     if (_stopping) return;
     await _recoverPublishedImport();
     if (_stopping) return;
@@ -722,6 +1509,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       String? id;
       var name = candidate.label;
       var failure = candidate.error;
+      if (_blockedNotebook(candidate.paths.notebook)) {
+        failure = 'A retained file/resource transfer requires recovery; this notebook is quarantined.';
+      }
       final previouslyKnown = _entries
           .where(
             (entry) =>
@@ -848,6 +1638,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     if (_workspace != null ||
         _stale ||
         !entry.canOpen ||
+        _blockedNotebook(entry.location) ||
         !_entries.any((current) => identical(current, entry)) ||
         !_admit()) {
       return false;
@@ -864,7 +1655,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   Future<bool> createNotebook(String name) async {
-    if (_workspace != null || _stale || !_admit()) return false;
+    if (_workspace != null || _stale || _unknownTransferTarget || !_admit()) {
+      return false;
+    }
     try {
       final paths = await _storage!.allocate();
       if (_stopping) return false;
@@ -923,7 +1716,22 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _stopping = true;
     _exporter?.cancel();
     _importer?.cancel();
+    _cohortImporter?.cancel();
+    _resourceTransfer?.cancel();
     _publish();
+    // Providers and native transfer workers must release every lease before
+    // their borrowed NOTE owner or a selected workspace can be retired.
+    try {
+      await Future.wait<void>([
+        if (_cohortImporter != null) _cohortImporter!.shutdown(),
+        if (_resourceTransfer != null) _resourceTransfer!.shutdown(),
+        if (_exporter != null) _exporter!.shutdown(),
+        if (_importer != null) _importer!.shutdown(),
+      ]);
+    } on Object catch (error) {
+      _error = _describe(error);
+    }
+    await _transferLease?.future;
     await _active?.future;
     try {
       await _workspace?.shutdown();
@@ -933,6 +1741,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       try {
         final core = _temporary;
         if (core != null) await _release(core);
+        await _temporaryResource?.close();
+        _temporaryResource = null;
       } finally {
         try {
           final exporter = _exporter;
@@ -955,10 +1765,38 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
             }
           }
           _publish();
+          _cohortImporter?.removeListener(_transferChanged);
+          _cohortImporter?.dispose();
+          _resourceTransfer?.removeListener(_transferChanged);
+          _resourceTransfer?.dispose();
         }
       }
     }
   }
+
+  static CohortImporter _cohortImporterFor(
+    String root,
+    String notebooksRoot,
+    void Function(Object) reserve,
+    void Function(Object) release,
+  ) => CohortImporter(
+    root: root,
+    notebooksRoot: notebooksRoot,
+    reserveTransfer: reserve,
+    releaseTransfer: release,
+  );
+
+  static ResourceTransfer _resourceTransferFor(
+    String root,
+    String notebooksRoot,
+    void Function(Object) reserve,
+    void Function(Object) release,
+  ) => ResourceTransfer(
+    root: root,
+    notebooksRoot: notebooksRoot,
+    reserveTransfer: reserve,
+    releaseTransfer: release,
+  );
 
   @override
   void dispose() {

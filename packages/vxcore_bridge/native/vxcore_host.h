@@ -34,8 +34,14 @@ enum {
   VXM_EVENT_QUERY = 8,
   VXM_EVENT_TAG = 9,
   VXM_EVENT_EXPORT = 10,
+  VXM_EVENT_COHORT_OPEN = 11,
+  VXM_EVENT_RESOURCE_OPEN = 12,
+  VXM_EVENT_COHORT = 13,
+  VXM_EVENT_RESOURCE = 14,
   VXM_MODE_NOTE = 1,
   VXM_MODE_CATALOG = 2,
+  VXM_MODE_COHORT_BUILDER = 3,
+  VXM_MODE_RESOURCES = 4,
   VXM_EXPORT_NOTEBOOK = 0,
   VXM_EXPORT_FILES_AND_ASSETS = 1,
   VXM_EDITOR_MARKDOWN = 1,
@@ -66,6 +72,9 @@ typedef struct VxmOpenOptions {
   // source-rewriting recovery/migrations and persisted session restoration before
   // core initialization. Ordinary owners retain core's normal recovery behavior.
   int32_t export_only;
+  // Builder-only owned cohorts/<id>. All core/workbook paths are derived by
+  // native preflight before context creation. Other modes require null/empty.
+  const char *transaction_root;
 } VxmOpenOptions;
 
 // Immutable terminal event. Pointers are borrowed until vxm_event_free(), which
@@ -92,11 +101,11 @@ typedef struct VxmEvent {
   uint64_t size;
 } VxmEvent;
 
-// Copies bounded input and starts an owner thread. OPEN/CATALOG_OPEN is request
-// 1, revision 0. Only one host may own a given storage root until teardown.
-// create_notebook=0 requires an existing notebook, even without an expected UUID.
-// create_notebook=1 is catalog-only, requires a valid display name and no expected
-// UUID, and rejects every existing root entry. Note mode never creates.
+// Copies bounded input and starts an owner thread. The mode-specific OPEN event
+// is request1, revision0. Only one host may own a storage root until teardown.
+// create_notebook=0 requires an existing notebook except COHORT_BUILDER, whose
+// transaction_root preflight derives an isolated workbook before creation.
+// create_notebook=1 remains catalog-only, with a display name and no expected UUID.
 // All returns are actual VxCoreError values. Admission failure produces no event.
 // Success reserves terminal storage before work starts. Notify runs outside the
 // queue mutex and carries only a caller-owned integer token; it must not block.
@@ -149,6 +158,17 @@ VXM_API int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t request_id,
 VXM_API int32_t vxm_host_catalog_export(VxmHost *host, uint64_t request_id,
                                        uint64_t generation, int32_t format, const char *destination,
                                        uint64_t staging_budget_bytes);
+// Closed JSON <=16 KiB. Cohort: {op:"build"} on COHORT_BUILDER;
+// {op:"apply"|"recover",transactionRoot} on normal CATALOG (never export-only).
+// Resource: {op:"list"}, {op:"apply"|"recover",transactionRoot}, or
+// {op:"export",name,transactionRoot}, admitted on NOTE and RESOURCES only.
+// Resource-open is metadata-only: no source read/reload/decryption. List owns
+// an 8 MiB reservation; all transfer summaries own 16 KiB until event release.
+// Apply/recover drain after dispatch; only build/list/export are cancellable.
+VXM_API int32_t vxm_host_cohort(VxmHost *host, uint64_t request_id,
+                               uint64_t generation, const char *json);
+VXM_API int32_t vxm_host_resource(VxmHost *host, uint64_t request_id,
+                                 uint64_t generation, const char *json);
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
 // Cancel affects pending requests and the matching active read-only search/export,
 // checked between files/nodes and each 256 KiB export chunk. Active writes (including tags) are never cancelled. INVALID_STATE
@@ -191,8 +211,8 @@ VXM_API int32_t vxm_import_path_keys(const uint8_t *input, uint64_t size,
 // receipt permits PRIVATE cleanup only, even after legitimate live edits/removal.
 // writeMarker: +marker(request|captured|prepared),data -> durable phase.
 // checkSpace: +requiredBytes (additional bytes, not headroom) -> {availableBytes};
-// no-follow imports+exports bytes + requiredBytes <=4GiB, free space includes
-// an additional 64MiB headroom. It also rejects hardlinks/reparse/special files.
+// no-follow imports+exports+cohorts+resources and moved-attempt charges plus
+// requiredBytes <=4GiB; free space includes an additional 64MiB headroom.
 // Durable phase fields: id,kind,phase(staged|published|committed),captured,prepared,
 // treeRelative,inventoryHash,notebookId,notebookName,destination,bytes,entries;
 // sourceName is included once captured. Unknown identity/path states are errors,
@@ -204,6 +224,10 @@ VXM_API int32_t vxm_import_path_keys(const uint8_t *input, uint64_t size,
 // are redacted by the Dart facade. The borrowed token may be null (no cancellation).
 VXM_API int32_t vxm_import_run(const char *request_json, VxmImportCancel *cancel,
                               char **out_json);
+// Distinct cohort/resource staging schema, same bounded transport and borrowed
+// cancellation lifetime. Result is released with vxm_import_result_free.
+VXM_API int32_t vxm_transfer_run(const char *request_json, VxmImportCancel *cancel,
+                                char **out_json);
 VXM_API void vxm_import_result_free(char *result);
 
 #ifdef __cplusplus

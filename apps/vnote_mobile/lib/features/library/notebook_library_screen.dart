@@ -6,6 +6,8 @@ import '../../services/notebook_library.dart';
 import '../../services/notebook_export.dart';
 import '../../services/notebook_import.dart';
 import '../../services/document_transfer_platform.dart';
+import '../../services/cohort_import.dart';
+import '../../services/resource_transfer.dart';
 
 class NotebookLibraryScreen extends StatefulWidget {
   const NotebookLibraryScreen({
@@ -211,6 +213,18 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                             state: state.exportState,
                             closed: state.closed,
                           ),
+                          _CohortPanel(
+                            library: library,
+                            state: state.cohortState,
+                            available: available,
+                            closed: state.closed,
+                          ),
+                          _ResourceTransfersPanel(
+                            library: library,
+                            state: state.resourceState,
+                            available: available,
+                            closed: state.closed,
+                          ),
                         ],
                       );
                     }
@@ -271,6 +285,404 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
         ),
       );
     },
+  );
+}
+
+Future<bool> _confirmPrivateDiscard(
+  BuildContext context, {
+  required String title,
+  required String detail,
+  String action = 'Discard staging',
+}) async =>
+    await showDialog<bool>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: Text(title),
+        content: Text(detail),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context, false),
+            child: const Text('Cancel'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, true),
+            child: Text(action),
+          ),
+        ],
+      ),
+    ) ==
+    true;
+
+class _CohortPanel extends StatelessWidget {
+  const _CohortPanel({
+    required this.library,
+    required this.state,
+    required this.available,
+    required this.closed,
+  });
+  final NotebookLibrary library;
+  final CohortImportState state;
+  final bool available;
+  final bool closed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!state.hasStaging &&
+        !state.busy &&
+        state.error == null &&
+        state.message == null) {
+      return const SizedBox.shrink();
+    }
+    final idle = available && !state.busy && !closed;
+    return Card(
+      margin: const EdgeInsets.all(12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Standalone files and assets',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            if (state.busy) ...[
+              const LinearProgressIndicator(),
+              Text('Files: ${state.phase.name}…'),
+              TextButton(
+                onPressed: closed ? null : library.cancelCohort,
+                child: const Text('Cancel files transfer'),
+              ),
+            ],
+            if (state.error != null) SelectableText(state.error!),
+            if (state.message != null) SelectableText(state.message!),
+            for (final attempt in state.attempts)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${attempt.sourceName ?? attempt.kind.name} → ${attempt.target.notebookRelative} / ${attempt.target.folderName}',
+                    ),
+                    SelectableText(
+                      'Notebook ${attempt.target.notebookId}\nParent ${attempt.target.parentId}',
+                    ),
+                    Text(
+                      '${attempt.entries} entries · ${attempt.bytes} bytes · ${attempt.stage.name}',
+                    ),
+                    if (attempt.cohortId != null)
+                      SelectableText(
+                        'Stable imported root: ${attempt.cohortId}',
+                      ),
+                    if (attempt.stage == TransferStage.quarantined ||
+                        attempt.stage == TransferStage.intent)
+                      const Text(
+                        'Target notebook unavailable until its actual outcome is reconciled. Other notebooks may remain usable.',
+                      ),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        if (attempt.stage != TransferStage.committed)
+                          FilledButton(
+                            onPressed: idle
+                                ? () => library.retryCohort(attempt)
+                                : null,
+                            child: Text(switch (attempt.stage) {
+                              TransferStage.receiving => 'Reselect source',
+                              TransferStage.captured =>
+                                'Prepare captured source',
+                              TransferStage.source =>
+                                'Prepare immutable folder',
+                              TransferStage.prepared =>
+                                'Apply to target folder',
+                              _ => 'Retry recovery',
+                            }),
+                          ),
+                        if (const [
+                          TransferStage.receiving,
+                          TransferStage.captured,
+                          TransferStage.source,
+                        ].contains(attempt.stage))
+                          TextButton(
+                            onPressed: idle
+                                ? () async {
+                                    final name = await showDialog<String>(
+                                      context: context,
+                                      builder: (_) => _CohortNameDialog(
+                                        initial: attempt.target.folderName,
+                                      ),
+                                    );
+                                    if (name != null &&
+                                        library.value.cohortState.attempts.any(
+                                          (item) => identical(item, attempt),
+                                        )) {
+                                      await library.renameCohortTarget(
+                                        attempt,
+                                        name,
+                                      );
+                                    }
+                                  }
+                                : null,
+                            child: const Text('Change new folder name'),
+                          ),
+                        TextButton(
+                          onPressed: idle
+                              ? () async {
+                                  if (await _confirmPrivateDiscard(
+                                        context,
+                                        title: 'Discard files staging?',
+                                        detail:
+                                            'Recovery runs first if publication is unresolved. A committed folder is never deleted. '
+                                            'Only proven private staging can be removed; ambiguous ownership stays quarantined.',
+                                      ) &&
+                                      library.value.cohortState.attempts.any(
+                                        (item) => identical(item, attempt),
+                                      )) {
+                                    await library.discardCohort(attempt);
+                                  }
+                                }
+                              : null,
+                          child: const Text('Discard staging'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            for (final item in state.leftovers)
+              ListTile(
+                title: Text(item.label),
+                subtitle: SelectableText('${item.reason}\n${item.location}'),
+                trailing: item.canDiscard
+                    ? TextButton(
+                        onPressed: idle
+                            ? () async {
+                                if (await _confirmPrivateDiscard(
+                                  context,
+                                  title: 'Discard private residue?',
+                                  detail: item.reason,
+                                )) {
+                                  await library.discardOfflineLeftover(
+                                    item,
+                                    cohort: true,
+                                  );
+                                }
+                              }
+                            : null,
+                        child: const Text('Discard'),
+                      )
+                    : null,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _ResourceTransfersPanel extends StatelessWidget {
+  const _ResourceTransfersPanel({
+    required this.library,
+    required this.state,
+    required this.available,
+    required this.closed,
+  });
+  final NotebookLibrary library;
+  final ResourceTransferState state;
+  final bool available;
+  final bool closed;
+
+  @override
+  Widget build(BuildContext context) {
+    if (!state.hasStaging &&
+        !state.busy &&
+        state.error == null &&
+        state.message == null) {
+      return const SizedBox.shrink();
+    }
+    final idle = available && !state.busy && !closed;
+    return Card(
+      margin: const EdgeInsets.all(12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            const Text(
+              'Retained attachment / image transfers',
+              style: TextStyle(fontWeight: FontWeight.bold),
+            ),
+            if (state.busy) ...[
+              const LinearProgressIndicator(),
+              Text('Resources: ${state.phase.name}…'),
+              TextButton(
+                onPressed: closed ? null : library.cancelResource,
+                child: const Text('Cancel resource transfer'),
+              ),
+            ],
+            if (state.error != null) SelectableText(state.error!),
+            if (state.message != null) SelectableText(state.message!),
+            if (state.externalMayBeIncomplete)
+              const Text(
+                'A previous external Save As may already exist or be incomplete. Verify its destination before saving again.',
+              ),
+            for (final attempt in state.attempts)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 8),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      '${attempt.operation.name}: ${attempt.name}${attempt.newName == null ? '' : ' → ${attempt.newName}'} · ${attempt.stage.name}',
+                    ),
+                    SelectableText(
+                      'Notebook ${attempt.target.notebookId}\nNote ${attempt.target.nodeId}',
+                    ),
+                    if (attempt.stage == TransferStage.committed)
+                      const Text(
+                        'The file operation committed. No editor link is inserted by recovery. Open the note and explicitly insert a link; Write still controls source durability.',
+                      ),
+                    if (state.listing?.notebookId ==
+                            attempt.target.notebookId &&
+                        state.listing?.nodeId == attempt.target.nodeId)
+                      for (final entry in state.listing!.entries)
+                        Text(
+                          '${entry.name} · ${entry.tracked ? 'tracked' : 'unindexed'} · ${entry.exists ? '${entry.bytes} bytes' : 'missing'}',
+                        ),
+                    Wrap(
+                      spacing: 8,
+                      children: [
+                        TextButton(
+                          onPressed: idle
+                              ? () => library.inspectResource(attempt)
+                              : null,
+                          child: const Text('Inspect actual resources'),
+                        ),
+                        if (attempt.stage != TransferStage.committed)
+                          FilledButton(
+                            onPressed: idle
+                                ? () => library.retryResource(attempt)
+                                : null,
+                            child: Text(
+                              attempt.stage == TransferStage.exportReady
+                                  ? 'Save As again'
+                                  : 'Retry / recover',
+                            ),
+                          ),
+                        TextButton(
+                          onPressed: idle
+                              ? () async {
+                                  if (await _confirmPrivateDiscard(
+                                        context,
+                                        title: 'Discard resource staging?',
+                                        detail:
+                                            'Only private staging is discarded. Committed attachments and images remain in the notebook. '
+                                            'An unresolved live outcome must be recovered or explicitly abandoned.',
+                                      ) &&
+                                      library.value.resourceState.attempts.any(
+                                        (item) => identical(item, attempt),
+                                      )) {
+                                    await library.discardResource(attempt);
+                                  }
+                                }
+                              : null,
+                          child: const Text('Discard staging'),
+                        ),
+                        if (attempt.stage == TransferStage.intent ||
+                            attempt.stage == TransferStage.quarantined)
+                          TextButton(
+                            onPressed: idle
+                                ? () async {
+                                    if (await _confirmPrivateDiscard(
+                                          context,
+                                          title: 'Abandon private recovery records?',
+                                          detail:
+                                              'Inspect the listed actual resources first. The live outcome is ambiguous. '
+                                              'Every live file, including an unexpected suffix copy, is preserved. '
+                                              'Only private staging and recovery records are abandoned. Nothing is recopied, deleted live, or linked into source.',
+                                          action: 'Abandon private staging',
+                                        ) &&
+                                        library.value.resourceState.attempts
+                                            .any(
+                                              (item) =>
+                                                  identical(item, attempt),
+                                            )) {
+                                      await library.discardResource(
+                                        attempt,
+                                        abandon: true,
+                                      );
+                                    }
+                                  }
+                                : null,
+                            child: const Text('Abandon private staging'),
+                          ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            for (final item in state.leftovers)
+              ListTile(
+                title: Text(item.label),
+                subtitle: SelectableText('${item.reason}\n${item.location}'),
+                trailing: item.canDiscard
+                    ? TextButton(
+                        onPressed: idle
+                            ? () async {
+                                if (await _confirmPrivateDiscard(
+                                  context,
+                                  title: 'Discard private residue?',
+                                  detail: item.reason,
+                                )) {
+                                  await library.discardOfflineLeftover(
+                                    item,
+                                    cohort: false,
+                                  );
+                                }
+                              }
+                            : null,
+                        child: const Text('Discard'),
+                      )
+                    : null,
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _CohortNameDialog extends StatefulWidget {
+  const _CohortNameDialog({required this.initial});
+  final String initial;
+  @override
+  State<_CohortNameDialog> createState() => _CohortNameDialogState();
+}
+
+class _CohortNameDialogState extends State<_CohortNameDialog> {
+  late final _name = TextEditingController(text: widget.initial);
+  @override
+  void dispose() {
+    _name.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) => AlertDialog(
+    title: const Text('New child folder name'),
+    content: TextField(controller: _name, autofocus: true, autocorrect: false),
+    actions: [
+      TextButton(
+        onPressed: () => Navigator.pop(context),
+        child: const Text('Cancel'),
+      ),
+      FilledButton(
+        onPressed: () {
+          if (_name.text.trim().isNotEmpty) Navigator.pop(context, _name.text);
+        },
+        child: const Text('Save name'),
+      ),
+    ],
   );
 }
 

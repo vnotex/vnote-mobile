@@ -403,14 +403,16 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
 
   Future<void> _capture(ImportAttempt attempt) async {
     _checkCancelled();
-    // The source length is not known until the picker has acquired it. Reserve
-    // the maximum accepted input; native adds the shared 64 MiB headroom.
+    // Reserve before the provider lease: input, bounded escaped JSONL records
+    // for folder entries, and markers. Native adds the shared 64 MiB headroom.
     await runStore({
       'op': 'checkSpace',
       'id': attempt.id,
-      'requiredBytes': attempt.kind == DocumentImportKind.zip
-          ? 1024 * 1024 * 1024
-          : 2 * 1024 * 1024 * 1024,
+      'requiredBytes':
+          (attempt.kind == DocumentImportKind.zip
+              ? 1024 * 1024 * 1024
+              : 2 * 1024 * 1024 * 1024 + 100000 * 8192) +
+          64 * 1024,
     }, cancellationAddress: _cancellationAddress);
     _checkCancelled();
     await _platform.prepareStorage();
@@ -422,6 +424,7 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
       // descriptor/security-scope lease and must settle before any cleanup.
       result = await _platform.pickImport(
         operationId: attempt.id,
+        scope: DocumentTransferScope.notebook,
         kind: attempt.kind,
       );
     } finally {
@@ -653,7 +656,7 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
       // Join this transport before reusing the same durable transaction ID;
       // a delayed cancellation must not cancel the next picker retry.
       _providerCancellation = Future<void>.sync(
-        () => _platform.cancelImport(id),
+        () => _platform.cancelImport(id, scope: DocumentTransferScope.notebook),
       ).catchError((Object _) {});
     }
   }
@@ -1113,6 +1116,8 @@ class _ImportStore {
     final prepared = await NotebookImportArchive.prepare(
       transactionRoot: transaction,
       kind: kind,
+      scope: DocumentTransferScope.notebook,
+      format: ImportPreparationFormat.notebook,
       cancellationAddress: cancellation,
     );
     // The archive worker has closed all files. Preserve completed preparation

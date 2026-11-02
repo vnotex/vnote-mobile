@@ -5,7 +5,7 @@ import { defaultKeymap, history, historyField, historyKeymap, redo, redoDepth, u
 import { markdown } from '@codemirror/lang-markdown';
 import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import {
-  assertCredits, encodeMessage, LIMITS, preferredLineEnding, prepareHistoryPrune, ProtocolError,
+  assertCredits, encodeMessage, insertionTransaction, LIMITS, preferredLineEnding, prepareHistoryPrune, ProtocolError,
   RequestCache, requireThat, utf8Length, validBoundary, validateChanges, validateHostMessage,
   validateSelection, validateSession, validateSource,
   type Change, type Envelope, type HostMessage, type Selection,
@@ -440,13 +440,34 @@ function handle(message: HostMessage): void {
   }
   switch (message.type) {
     case 'selection':
+      requireThat(!frozen, 'Rejected text cannot supply an insertion selection.');
+      clearTimeout(selectionTimer);
+      selectionTimer = undefined;
       flush();
+      if (message.mode === 'request') {
+        // Flush precedes the correlated cursor barrier, including after IME.
+        // No document snapshot or delayed coalesced selection is needed.
+        reply(message, { type: 'selection', mode: 'current', ...selectionOf(view.state) });
+        break;
+      }
       validateSession(message, documentId!, generation, revision, true);
       validateSelection(view.state.doc, message);
       suppressSelection = true;
       try { view.dispatch({ selection: { anchor: message.anchor, head: message.head } }); }
       finally { suppressSelection = false; }
       break;
+    case 'insert': {
+      requireThat(!frozen, 'Rejected text cannot accept an insertion.');
+      flush();
+      validateSession(message, documentId!, generation, revision, true);
+      const transaction = insertionTransaction(view.state, documentBytes, message);
+      requireThat(applyTransaction(transaction), 'Insertion was refused; the previous text is retained.');
+      // Publish through the normal bounded edit channel BEFORE acknowledging the
+      // host request. A channel failure retains that exact batch for retry.
+      flush();
+      reply(message, { type: 'ack', stage: 'received', throughRevision: revision });
+      break;
+    }
     case 'command':
       requireThat(!frozen, 'Text is retained after host rejection; commands are paused.');
       if (message.command === 'undo') undo(view); else redo(view);
@@ -487,7 +508,8 @@ function receive(input: unknown): void {
   let message: HostMessage;
   try {
     message = validateHostMessage(input);
-    if (generation !== null) validateSession(message, documentId!, generation, revision);
+    if (generation !== null) requireThat(message.documentId === documentId && message.generation === generation,
+      'Stale or unknown session.');
     const previous = cache.begin(message, encodeMessage(message));
     if (previous) { if (previous.response !== null) post(previous.response); return; }
   } catch (error) { show(errorText(error), true); return; }

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 // Offsets are exact source UTF-16 units. This module has no DOM or storage access.
-import { EditorState } from '@codemirror/state';
-import { history, historyField } from '@codemirror/commands';
+import { EditorState, Text, type Transaction } from '@codemirror/state';
+import { history, historyField, isolateHistory } from '@codemirror/commands';
 export const LIMITS = Object.freeze({
   documentUnits: 4 * 1024 * 1024,
   documentBytes: 4 * 1024 * 1024,
@@ -135,7 +135,9 @@ export interface Envelope {
 export type HostMessage = Envelope & (
   | { type: 'load'; text: string; language: 'markdown' | 'text'; baseVersion: string; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
   | { type: 'ack'; stage: 'received' | 'rejected'; throughRevision: number; error?: string }
-  | { type: 'selection'; anchor: number; head: number }
+  | { type: 'selection'; mode: 'request' }
+  | { type: 'selection'; anchor: number; head: number; mode?: never }
+  | { type: 'insert'; text: string; anchor: number; head: number }
   | { type: 'command'; command: 'undo' | 'redo' }
   | { type: 'theme'; theme: 'light' | 'dark' }
   | { type: 'save'; mode: 'snapshotRequest'; reason?: 'manual' | 'close' }
@@ -180,8 +182,20 @@ export function validateHostMessage(value: unknown): HostMessage {
         && (value.stage !== 'rejected' || typeof value.error === 'string'), 'Unsupported acknowledgement.');
       break;
     case 'selection':
-      keys(value, [...HEADER, 'anchor', 'head']);
-      requireThat(integer(value.anchor) && integer(value.head), 'Invalid selection offsets.');
+      if ('mode' in value) {
+        keys(value, [...HEADER, 'mode']);
+        requireThat(value.mode === 'request', 'Invalid selection request mode.');
+      } else {
+        keys(value, [...HEADER, 'anchor', 'head']);
+        requireThat(integer(value.anchor) && integer(value.head), 'Invalid selection offsets.');
+      }
+      break;
+    case 'insert':
+      keys(value, [...HEADER, 'text', 'anchor', 'head']);
+      requireThat(typeof value.text === 'string' && value.text.length <= LIMITS.insertedUnits,
+        'Invalid insertion source or size.');
+      utf8Length(value.text);
+      requireThat(integer(value.anchor) && integer(value.head), 'Invalid insertion selection.');
       break;
     case 'command':
       keys(value, [...HEADER, 'command']);
@@ -209,6 +223,28 @@ export function validateSession(message: Envelope, documentId: string, generatio
   requireThat(exact ? message.revision === revision : message.revision <= revision,
     exact ? 'Message does not match current revision.' : 'Message refers to a future revision.');
 }
+// The live editor and history regressions use this same exact-source transaction.
+// Transport credits are checked separately by the ordinary edit preflight.
+export function insertionTransaction(
+  state: EditorState, sourceBytes: number, message: Extract<HostMessage, { type: 'insert' }>,
+): Transaction {
+  const current = state.selection.main;
+  requireThat(message.anchor === current.anchor && message.head === current.head,
+    'Selection changed before insertion; choose Insert link again at the intended cursor.');
+  validateSelection(state.doc, message);
+  const from = Math.min(message.anchor, message.head), to = Math.max(message.anchor, message.head);
+  requireThat(from !== to || message.text.length !== 0, 'Insertion must change source.');
+  validateChanges(state.doc, sourceBytes, [{ from, to, insert: message.text }]);
+  const position = from + message.text.length;
+  const transaction = state.update({
+    changes: { from, to, insert: Text.of(message.text.split('\n')) },
+    selection: { anchor: position, head: position },
+    annotations: isolateHistory.of('full'), userEvent: 'input.insert', filter: false,
+  });
+  validateSelection(transaction.newDoc, { anchor: position, head: position });
+  return transaction;
+}
+
 export function assertCredits(count: number, bytes: number): void {
   requireThat(count <= LIMITS.outstandingBatches && bytes <= LIMITS.outstandingBytes,
     'Waiting for the host to receive edits. Text is still only in memory.');

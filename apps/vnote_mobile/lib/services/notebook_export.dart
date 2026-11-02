@@ -372,6 +372,7 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
         // picker/reader has settled. Cancel alone never releases this lease.
         final result = await _platform.save(
           operationId: prepared.id,
+          scope: DocumentTransferScope.notebook,
           path: prepared.path,
           suggestedName: prepared.format == CoreExportFormat.filesAndAssets
               ? 'vnote-files-assets-${prepared.id}.zip'
@@ -476,7 +477,9 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
     if (id != null) {
       // A cancellation transport failure does not settle the source lease.
       unawaited(
-        Future<void>.sync(() => _platform.cancel(id)).catchError((Object _) {}),
+        Future<void>.sync(
+          () => _platform.cancel(id, scope: DocumentTransferScope.notebook),
+        ).catchError((Object _) {}),
       );
     }
   }

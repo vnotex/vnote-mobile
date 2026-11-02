@@ -1,7 +1,10 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+import 'dart:async';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 
 Future<void> _link(String path, String target) async {
@@ -20,6 +23,8 @@ Future<void> _link(String path, String target) async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  _platformBoundaries();
   late Directory temp;
   late ManagedNotebookStorage storage;
   setUp(() async {
@@ -65,6 +70,48 @@ void main() {
       await Link(exportRoot).delete();
     }
   });
+
+  for (final name in ['cohorts', 'resources']) {
+    test(
+      '$name staging stays private and refuses linked replacement',
+      () async {
+        final obtain = name == 'cohorts'
+            ? storage.obtainCohortRoot
+            : storage.obtainResourceRoot;
+        final root = await obtain();
+        expect(
+          await FileSystemEntity.identical(
+            Directory(root).parent.path,
+            Directory(storage.root).parent.path,
+          ),
+          isTrue,
+        );
+        expect(await FileSystemEntity.identical(root, storage.root), isFalse);
+        expect(
+          Directory(root).uri.pathSegments
+              .where((part) => part.isNotEmpty)
+              .last,
+          name,
+        );
+        await File('$root/retained.bin').writeAsBytes([0, 255, 0]);
+        expect(await obtain(), root);
+        expect(await File('$root/retained.bin').readAsBytes(), [0, 255, 0]);
+        await Directory(root).delete(recursive: true);
+        final outside = await Directory('${temp.path}/outside-$name').create();
+        await File('${outside.path}/keep.txt').writeAsString('untouched');
+        await _link(root, outside.path);
+        try {
+          await expectLater(obtain(), throwsStateError);
+          expect(
+            await File('${outside.path}/keep.txt').readAsString(),
+            'untouched',
+          );
+        } finally {
+          await Link(root).delete();
+        }
+      },
+    );
+  }
 
   test(
     'discovery preserves legacy roots and allocation never creates a notebook',
@@ -137,4 +184,267 @@ void main() {
       await expectLater(storage.candidates(), throwsStateError);
     },
   );
+}
+
+void _platformBoundaries() {
+  group('scoped document provider boundary', () {
+    const channel = MethodChannel('vnote.mobile/document_transfer');
+    const platform = MethodChannelDocumentTransferPlatform();
+    const id = '0123456789abcdef0123456789abcdef';
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    final calls = <MethodCall>[];
+    late Future<Object?> Function(MethodCall) respond;
+
+    setUp(() {
+      calls.clear();
+      respond = (_) async => null;
+      messenger.setMockMethodCallHandler(channel, (call) {
+        calls.add(call);
+        return respond(call);
+      });
+    });
+    tearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    test(
+      'file and image capture accepts an opaque empty single file',
+      () async {
+        respond = (_) async => {
+          'status': 'ready',
+          'sourceName': '空白 asset.bin',
+          'bytes': 0,
+          'entries': 1,
+        };
+        for (final (scope, kind) in [
+          (DocumentTransferScope.cohort, DocumentImportKind.file),
+          (DocumentTransferScope.resource, DocumentImportKind.file),
+          (DocumentTransferScope.resource, DocumentImportKind.image),
+        ]) {
+          final result = await platform.pickImport(
+            operationId: id,
+            scope: scope,
+            kind: kind,
+          );
+          expect(result.status, DocumentImportStatus.ready);
+          expect(result.bytes, 0);
+          expect(result.entries, 1);
+          expect(calls.last.method, 'pickImport');
+          expect(calls.last.arguments, {
+            'operationId': id,
+            'scope': scope.name,
+            'kind': kind.name,
+          });
+        }
+      },
+    );
+
+    test(
+      'raw provider results enforce file limits, count and portable basename',
+      () async {
+        for (final reply in <Map<String, Object>>[
+          {'sourceName': 'asset.bin', 'bytes': (256 << 20) + 1, 'entries': 1},
+          {'sourceName': 'asset.bin', 'bytes': 0, 'entries': 0},
+          {'sourceName': 'asset.bin', 'bytes': 0, 'entries': 2},
+          {'sourceName': '../escape.bin', 'bytes': 1, 'entries': 1},
+          {'sourceName': 'CON.bin', 'bytes': 1, 'entries': 1},
+          {'sourceName': '${'界' * 85}.bin', 'bytes': 1, 'entries': 1},
+        ]) {
+          respond = (_) async => {'status': 'ready', ...reply};
+          final result = await platform.pickImport(
+            operationId: id,
+            scope: DocumentTransferScope.resource,
+            kind: DocumentImportKind.file,
+          );
+          expect(result.status, DocumentImportStatus.failed, reason: '$reply');
+          expect(result.sourceName, isNull);
+        }
+      },
+    );
+
+    test('scope kind mismatches never invoke a provider', () async {
+      for (final (scope, kind) in [
+        (DocumentTransferScope.notebook, DocumentImportKind.file),
+        (DocumentTransferScope.notebook, DocumentImportKind.image),
+        (DocumentTransferScope.cohort, DocumentImportKind.image),
+        (DocumentTransferScope.resource, DocumentImportKind.zip),
+        (DocumentTransferScope.resource, DocumentImportKind.folder),
+      ]) {
+        expect(
+          (await platform.pickImport(
+            operationId: id,
+            scope: scope,
+            kind: kind,
+          )).status,
+          DocumentImportStatus.failed,
+        );
+      }
+      expect(calls, isEmpty);
+    });
+
+    test(
+      'resource export sends the exact Unicode filename and scope',
+      () async {
+        respond = (_) async => {
+          'status': 'saved',
+          'externalMayBeIncomplete': false,
+        };
+        const name = '圖像 [draft].png';
+        const path = '/private/resources/$id/output/$name';
+        final result = await platform.save(
+          operationId: id,
+          scope: DocumentTransferScope.resource,
+          path: path,
+          suggestedName: name,
+        );
+        expect(result.status, DocumentExportStatus.saved);
+        expect(calls.single.arguments, {
+          'operationId': id,
+          'scope': 'resource',
+          'path': path,
+          'suggestedName': name,
+        });
+        expect(calls.single.method, 'saveExport');
+      },
+    );
+
+    test(
+      'resource output names cannot escape or alias portable components',
+      () async {
+        for (final name in [
+          '../asset',
+          'a/b',
+          r'a\b',
+          'CON.txt',
+          'LPT¹.bin',
+          'trailing.',
+          'trailing ',
+          'control\u0000.bin',
+          '界' * 86,
+          '\ud800',
+        ]) {
+          final result = await platform.save(
+            operationId: id,
+            scope: DocumentTransferScope.resource,
+            path: '/private/resources/$id/output/asset',
+            suggestedName: name,
+          );
+          expect(result.status, DocumentExportStatus.failed, reason: name);
+        }
+        expect(
+          (await platform.save(
+            operationId: id,
+            scope: DocumentTransferScope.cohort,
+            path: '/private/cohorts/$id/output/asset',
+            suggestedName: 'asset',
+          )).status,
+          DocumentExportStatus.failed,
+        );
+        expect(calls, isEmpty);
+      },
+    );
+
+    test('notebook exports retain their ZIP-only name contract', () async {
+      respond = (_) async => {
+        'status': 'saved',
+        'externalMayBeIncomplete': false,
+      };
+      expect(
+        (await platform.save(
+          operationId: id,
+          scope: DocumentTransferScope.notebook,
+          path: '/private/exports/$id/notebook.zip',
+          suggestedName: 'vnote-$id.zip',
+        )).status,
+        DocumentExportStatus.saved,
+      );
+      expect(calls.single.arguments['scope'], 'notebook');
+      expect(
+        (await platform.save(
+          operationId: id,
+          scope: DocumentTransferScope.notebook,
+          path: '/private/exports/$id/notebook.zip',
+          suggestedName: 'asset.png',
+        )).status,
+        DocumentExportStatus.failed,
+      );
+      expect(calls, hasLength(1));
+    });
+
+    test(
+      'scoped import cancellation acknowledges without releasing the reader',
+      () async {
+        final entered = Completer<void>();
+        final lease = Completer<Object?>();
+        respond = (call) async {
+          if (call.method == 'pickImport') {
+            entered.complete();
+            return lease.future;
+          }
+          return null;
+        };
+        var settled = false;
+        final picking = platform
+            .pickImport(
+              operationId: id,
+              scope: DocumentTransferScope.resource,
+              kind: DocumentImportKind.image,
+            )
+            .then((value) {
+              settled = true;
+              return value;
+            });
+        await entered.future;
+        await platform.cancelImport(id, scope: DocumentTransferScope.resource);
+        expect(calls.last.method, 'cancelImport');
+        expect(calls.last.arguments, {'operationId': id, 'scope': 'resource'});
+        expect(settled, isFalse);
+        lease.complete({
+          'status': 'cancelled',
+          'sourceName': null,
+          'bytes': 0,
+          'entries': 0,
+        });
+        expect((await picking).status, DocumentImportStatus.cancelled);
+      },
+    );
+
+    test(
+      'scoped save cancellation preserves the external-outcome lease',
+      () async {
+        final entered = Completer<void>();
+        final lease = Completer<Object?>();
+        respond = (call) async {
+          if (call.method == 'saveExport') {
+            entered.complete();
+            return lease.future;
+          }
+          return null;
+        };
+        var settled = false;
+        final saving = platform
+            .save(
+              operationId: id,
+              scope: DocumentTransferScope.resource,
+              path: '/private/resources/$id/output/data.bin',
+              suggestedName: 'data.bin',
+            )
+            .then((value) {
+              settled = true;
+              return value;
+            });
+        await entered.future;
+        await platform.cancel(id, scope: DocumentTransferScope.resource);
+        expect(calls.last.method, 'cancelExport');
+        expect(calls.last.arguments, {'operationId': id, 'scope': 'resource'});
+        expect(settled, isFalse);
+        lease.complete({
+          'status': 'cancelled',
+          'externalMayBeIncomplete': true,
+        });
+        final result = await saving;
+        expect(result.status, DocumentExportStatus.cancelled);
+        expect(result.externalMayBeIncomplete, isTrue);
+      },
+    );
+  });
 }

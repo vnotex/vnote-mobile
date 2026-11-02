@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vnote_mobile/services/editor_session.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
+import 'package:vnote_mobile/features/resources/resource_panel.dart';
 
 // These fakes exercise coordinator transitions only. They are not storage proof;
 // real FFI create/write/read/identity evidence belongs to the bridge tests.
@@ -42,6 +43,34 @@ class ControlledCore implements NotebookCore {
   Completer<void>? closeGate;
   Future<void>? _closing;
   final writes = <PendingWrite>[];
+  int resourceCancellations = 0;
+  Future<CoreResourceListing> Function()? onListResources;
+
+  @override
+  Future<CoreResourceListing> listResources() =>
+      onListResources?.call() ??
+      Future.value(
+        CoreResourceListing(
+          notebookId: nextRead.notebookId,
+          nodeId: nextRead.nodeId,
+          notePath: nextRead.path,
+          entries: const [],
+        ),
+      );
+  @override
+  Future<CoreResourceResult> applyResource(String transactionRoot) async =>
+      throw StateError('Resource storage requires a real native fixture.');
+  @override
+  Future<CoreResourceResult> recoverResource(String transactionRoot) async =>
+      throw StateError('Resource recovery requires a real native fixture.');
+  @override
+  Future<CoreResourceExport> exportResource(
+    String name,
+    String transactionRoot,
+  ) async =>
+      throw StateError('Resource export requires a real native fixture.');
+  @override
+  void cancelResourceRead() => resourceCancellations++;
 
   @override
   String get nativeNotices => 'Native license fixture';
@@ -152,6 +181,137 @@ Future<NotebookSession> start(ControlledCore core) async {
 Future<void> turn() => Future<void>.delayed(Duration.zero);
 
 void main() {
+  test(
+    'resource barrier borrows NOTE owner and joins before explicit Write',
+    () async {
+      final core = ControlledCore();
+      final session = await start(core);
+      final editor = session.value.editor!;
+      final gate = Completer<void>();
+      final resources = session.withResources((owner) async {
+        expect(owner, same(core));
+        await gate.future;
+        return owner.listResources();
+      });
+      expect(session.value.resourcesBusy, isTrue);
+      insert(editor, 'volatile while copying');
+      var snapshots = 0;
+      final writing = session.write((message) {
+        snapshots++;
+        answer(editor, message);
+      });
+      await turn();
+      expect(snapshots, 0);
+      expect(core.writes, isEmpty);
+      expect(session.value.onDiskRevision, 0);
+      gate.complete();
+      await resources;
+      await turn();
+      expect(core.writes.single.text, 'base\r\nvolatile while copying');
+      core.writes.single.completion.complete(
+        CoreWriteResult(revision: 1, baseHash: secondHash),
+      );
+      expect(await writing, isTrue);
+      expect(session.value.resourcesBusy, isFalse);
+      expect(core.reads, 1);
+    },
+  );
+
+  test(
+    'resource barrier drains before close and rejects a second borrower',
+    () async {
+      final core = ControlledCore();
+      final session = await start(core);
+      final editor = session.value.editor!;
+      final gate = Completer<void>();
+      final resources = session.withResources((_) => gate.future);
+      await expectLater(session.withResources((_) async {}), throwsStateError);
+      final closing = session.close(
+        NotebookDisposition.discard,
+        (message) => answer(editor, message),
+      );
+      await turn();
+      expect(core.closes, 0);
+      gate.complete();
+      await resources;
+      expect(await closing, isTrue);
+      expect(core.closes, 1);
+    },
+  );
+
+  test(
+    'shutdown joins resources without making volatile source durable',
+    () async {
+      final core = ControlledCore();
+      final session = await start(core);
+      insert(session.value.editor!, 'unsaved');
+      final gate = Completer<void>();
+      final resources = session.withResources((_) => gate.future);
+      final closing = session.shutdown();
+      await turn();
+      expect(core.closes, 0);
+      gate.complete();
+      await resources;
+      await closing;
+      expect(core.closes, 1);
+      expect(core.writes, isEmpty);
+      expect(session.value.onDiskRevision, 0);
+    },
+  );
+
+  test('ambiguous resource ownership blocks Write and reopen but allows explicit discard exit', () async {
+    final core = ControlledCore();
+    final session = await start(core);
+    final editor = session.value.editor!;
+    insert(editor, 'preserved');
+    session.setResourceBlock('Ambiguous resource dispatch');
+    expect(await session.write((_) => fail('No source snapshot')), isFalse);
+    expect(
+      await session.reopen(
+        NotebookDisposition.discard,
+        (_) => fail('No reopen barrier'),
+      ),
+      isFalse,
+    );
+    expect(editor.value.text, 'base\r\npreserved');
+    expect(core.writes, isEmpty);
+    expect(
+      await session.close(
+        NotebookDisposition.discard,
+        (message) => answer(editor, message),
+      ),
+      isTrue,
+    );
+  });
+
+  test('resource links encode raw percent and parentheses and escape Markdown labels', () {
+    expect(
+      resourceMarkdownLink(
+        name: '[x] (50%).png',
+        relativeUrl: 'assets/id/[x] (50%).png',
+        image: true,
+      ),
+      r'![\[x\] \(50\%\)\.png](assets/id/%5Bx%5D%20%2850%25%29.png)',
+    );
+    expect(
+      resourceMarkdownLink(name: '研究.png', relativeUrl: 'assets/id/研究.png'),
+      '[研究\\.png](assets/id/%E7%A0%94%E7%A9%B6.png)',
+    );
+    for (final path in [
+      '/root',
+      '../asset',
+      'a//b',
+      'a/./b',
+      'https:asset',
+      'a\\b',
+      'a\nb',
+    ]) {
+      expect(
+        () => resourceMarkdownLink(name: 'file', relativeUrl: path),
+        throwsStateError,
+      );
+    }
+  });
   test(
     'a reopened editor can write revision one through the real core',
     () async {

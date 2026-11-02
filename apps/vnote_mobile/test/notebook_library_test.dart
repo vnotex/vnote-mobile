@@ -12,6 +12,11 @@ import 'package:vnote_mobile/services/notebook_import.dart';
 import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
+import 'package:vnote_mobile/services/cohort_import.dart';
+import 'package:vnote_mobile/services/resource_transfer.dart';
+import 'package:vnote_mobile/services/notebook_session.dart';
+
+import 'notebook_session_test.dart' as protocol show ready, insert, answer;
 
 class _Owners {
   int active = 0;
@@ -128,10 +133,18 @@ class _Catalog implements CatalogCore {
     String destination, {
     required int stagingBudgetBytes,
     required CoreExportFormat format,
-  }) =>
-      core.exportSnapshot(destination, stagingBudgetBytes: stagingBudgetBytes, format: format);
+  }) => core.exportSnapshot(
+    destination,
+    stagingBudgetBytes: stagingBudgetBytes,
+    format: format,
+  );
   @override
   void cancelExport() => core.cancelExport();
+  @override
+  Future<CoreCohortOutcome> applyCohort(String root) => core.applyCohort(root);
+  @override
+  Future<CoreCohortOutcome> recoverCohort(String root) =>
+      core.recoverCohort(root);
   @override
   Future<void> close() => closing ??= _close();
   Future<void> _close() async {
@@ -157,6 +170,7 @@ class _ExportProvider implements DocumentTransferPlatform {
   @override
   Future<DocumentImportResult> pickImport({
     required String operationId,
+    required DocumentTransferScope scope,
     required DocumentImportKind kind,
   }) async => const DocumentImportResult(
     status: DocumentImportStatus.unavailable,
@@ -165,7 +179,10 @@ class _ExportProvider implements DocumentTransferPlatform {
     entries: 0,
   );
   @override
-  Future<void> cancelImport(String operationId) async {}
+  Future<void> cancelImport(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {}
 
   final entered = Completer<String>();
   final result = Completer<DocumentExportResult>();
@@ -175,6 +192,7 @@ class _ExportProvider implements DocumentTransferPlatform {
   @override
   Future<DocumentExportResult> save({
     required String operationId,
+    required DocumentTransferScope scope,
     required String path,
     required String suggestedName,
   }) async {
@@ -189,7 +207,10 @@ class _ExportProvider implements DocumentTransferPlatform {
   }
 
   @override
-  Future<void> cancel(String operationId) async {
+  Future<void> cancel(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {
     if (!result.isCompleted) {
       result.complete(
         const DocumentExportResult(
@@ -212,6 +233,7 @@ class _ImportProvider implements DocumentTransferPlatform {
   @override
   Future<DocumentExportResult> save({
     required String operationId,
+    required DocumentTransferScope scope,
     required String path,
     required String suggestedName,
   }) async => const DocumentExportResult(
@@ -219,12 +241,19 @@ class _ImportProvider implements DocumentTransferPlatform {
     externalMayBeIncomplete: false,
   );
   @override
-  Future<void> cancel(String operationId) async {}
+  Future<void> cancel(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {}
   @override
-  Future<void> cancelImport(String operationId) async {}
+  Future<void> cancelImport(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {}
   @override
   Future<DocumentImportResult> pickImport({
     required String operationId,
+    required DocumentTransferScope scope,
     required DocumentImportKind kind,
   }) async {
     if (entered != null && !entered!.isCompleted) entered!.complete();
@@ -279,6 +308,8 @@ void main() {
     LibraryCreateCatalog? create,
     DocumentTransferPlatform? exportPlatform,
     DocumentTransferPlatform? importPlatform,
+    DocumentTransferPlatform? cohortPlatform,
+    DocumentTransferPlatform? resourcePlatform,
   }) => NotebookLibrary(
     obtainStorage: () async => storage,
     openCatalog: owners.open,
@@ -294,6 +325,22 @@ void main() {
       platform: importPlatform,
       checkAdmission: admission,
     ),
+    createCohortImporter: (root, notebooksRoot, reserve, release) =>
+        CohortImporter(
+          root: root,
+          notebooksRoot: notebooksRoot,
+          platform: cohortPlatform,
+          reserveTransfer: reserve,
+          releaseTransfer: release,
+        ),
+    createResourceTransfer: (root, notebooksRoot, reserve, release) =>
+        ResourceTransfer(
+          root: root,
+          notebooksRoot: notebooksRoot,
+          platform: resourcePlatform,
+          reserveTransfer: reserve,
+          releaseTransfer: release,
+        ),
     createCatalog: create ?? owners.create,
     createWorkspace: (paths, id) => NotebookWorkspace(
       paths: paths,
@@ -317,6 +364,321 @@ void main() {
     library.dispose();
     expect(owners.active, 0);
     await temp.delete(recursive: true);
+  });
+
+  test('browser cohort groups raw assets, seals stable IDs, and leaves original nodes unchanged', () async {
+    await library.shutdown();
+    library.dispose();
+    final source = await Directory(p.join(temp.path, 'raw-source')).create();
+    final noteBytes = utf8.encode('# Imported\r\n[asset](image.bin)\r\n');
+    await File(p.join(source.path, 'note.md')).writeAsBytes(noteBytes);
+    await File(p.join(source.path, 'image.bin')).writeAsBytes([0, 255, 7]);
+    await File(p.join(source.path, '.opaque')).writeAsBytes([3, 0, 9]);
+    library = makeLibrary(
+      cohortPlatform: _ImportProvider(
+        source.path,
+        p.join(temp.path, 'cohorts'),
+      ),
+    );
+    await library.initialize();
+    expect(await library.createNotebook('Destination'), isTrue);
+    final workspace = library.value.workspace!;
+    await workspace.createNote('original.md');
+    final directory = workspace.value.directory!;
+    final originalId = directory.entries.single.id;
+    final location = workspace.notebookLocation;
+    await library.importFiles(
+      workspace,
+      directory,
+      DocumentImportKind.folder,
+      'Grouped',
+    );
+    expect(library.value.workspace, isNull);
+    expect(library.value.cohortState.current!.stage, TransferStage.source);
+    expect(await Directory(p.join(location, 'Grouped')).exists(), isFalse);
+    await library.retryCohort(library.value.cohortState.current!);
+    final prepared = library.value.cohortState.current!;
+    expect(prepared.stage, TransferStage.prepared);
+    expect(prepared.cohortId, isNotNull);
+    expect(await Directory(p.join(location, 'Grouped')).exists(), isFalse);
+    await library.retryCohort(prepared);
+    final committed = library.value.cohortState.current!;
+    expect(committed.stage, TransferStage.committed);
+    expect(committed.cohortId, prepared.cohortId);
+    expect(
+      await File(p.join(location, 'Grouped', 'note.md')).readAsBytes(),
+      noteBytes,
+    );
+    expect(await File(p.join(location, 'Grouped', 'image.bin')).readAsBytes(), [
+      0,
+      255,
+      7,
+    ]);
+    expect(await File(p.join(location, 'Grouped', '.opaque')).readAsBytes(), [
+      3,
+      0,
+      9,
+    ]);
+    await library.discardCohort(committed);
+    expect(library.value.transferReserved, isFalse);
+    expect(await library.openNotebook(library.value.entries.single), isTrue);
+    final entries = library.value.workspace!.value.directory!.entries;
+    expect(
+      entries.singleWhere((entry) => entry.name == 'original.md').id,
+      originalId,
+    );
+    expect(
+      entries.singleWhere((entry) => entry.name == 'Grouped').id,
+      prepared.cohortId,
+    );
+  });
+
+  test(
+    'resource operations reuse a dirty NOTE owner and never write its source',
+    () async {
+      await library.shutdown();
+      library.dispose();
+      final source = await Directory(p.join(temp.path, 'resource-source'))
+          .create();
+      final bytes = [0x89, 0x50, 0x4e, 0x47, 0, 255];
+      await File(p.join(source.path, 'provider.png')).writeAsBytes(bytes);
+      library = makeLibrary(
+        resourcePlatform: _ImportProvider(
+          source.path,
+          p.join(temp.path, 'resources'),
+        ),
+      );
+      await library.initialize();
+      expect(await library.createNotebook('Resources'), isTrue);
+      final workspace = library.value.workspace!;
+      await workspace.createNote('note.md');
+      await workspace.openNote(workspace.value.directory!.entries.single);
+      final session = workspace.value.session!;
+      final editor = session.value.editor!;
+      protocol.ready(editor);
+      protocol.insert(editor, 'unsaved text');
+      final sourcePath = p.join(
+        workspace.notebookLocation,
+        session.value.note!.path,
+      );
+      final savedBefore = await File(sourcePath).readAsBytes();
+      await library.changeResource(
+        workspace,
+        session,
+        ResourceOperation.image,
+        'chosen.png',
+      );
+      expect(
+        library.value.resourceState.current!.stage,
+        TransferStage.committed,
+        reason: '${library.value.error}; ${library.value.resourceState.error}',
+      );
+      final added = library.value.resourceState.listing!.entries.single;
+      expect(added.name, 'chosen.png');
+      expect(added.tracked, isFalse);
+      final asset = File(
+        p.joinAll([p.dirname(sourcePath), ...added.relativeUrl.split('/')]),
+      );
+      expect(await asset.readAsBytes(), bytes);
+      expect(await File(sourcePath).readAsBytes(), savedBefore);
+      expect(editor.value.text, 'unsaved text');
+      expect(session.value.onDiskRevision, 0);
+      await library.resolveSessionResource(
+        workspace,
+        session,
+        library.value.resourceState.current!,
+        discard: true,
+      );
+      await library.changeResource(
+        workspace,
+        session,
+        ResourceOperation.track,
+        'chosen.png',
+      );
+      expect(
+        library.value.resourceState.listing!.entries.single.tracked,
+        isTrue,
+      );
+      await library.resolveSessionResource(
+        workspace,
+        session,
+        library.value.resourceState.current!,
+        discard: true,
+      );
+      await library.changeResource(
+        workspace,
+        session,
+        ResourceOperation.rename,
+        'chosen.png',
+        newName: 'renamed.png',
+      );
+      expect(
+        library.value.resourceState.listing!.entries.single.name,
+        'renamed.png',
+      );
+      await library.resolveSessionResource(
+        workspace,
+        session,
+        library.value.resourceState.current!,
+        discard: true,
+      );
+      await library.changeResource(
+        workspace,
+        session,
+        ResourceOperation.untrack,
+        'renamed.png',
+      );
+      expect(
+        library.value.resourceState.listing!.entries.single.tracked,
+        isFalse,
+      );
+      expect(await File(sourcePath).readAsBytes(), savedBefore);
+      expect(session.value.editor, same(editor));
+      expect(session.value.dirty, isTrue);
+      await library.resolveSessionResource(
+        workspace,
+        session,
+        library.value.resourceState.current!,
+        discard: true,
+      );
+      await workspace.returnToBrowser(
+        session,
+        NotebookDisposition.discard,
+        (message) => protocol.answer(editor, message),
+      );
+    },
+  );
+
+  test('cohort provider reservation blocks notebook transfers but other notebooks stay usable', () async {
+    await library.shutdown();
+    library.dispose();
+    final source = await Directory(p.join(temp.path, 'cohort-provider'))
+        .create();
+    await File(p.join(source.path, 'note.md')).writeAsString('# One');
+    final provider = _ImportProvider(source.path, p.join(temp.path, 'cohorts'));
+    final gate = Completer<void>();
+    final entered = Completer<void>();
+    provider.gate = gate;
+    provider.entered = entered;
+    library = makeLibrary(cohortPlatform: provider);
+    await library.initialize();
+    await library.createNotebook('Other');
+    await library.returnToLibrary(library.value.workspace!);
+    final otherId = library.value.entries.single.notebookId;
+    await library.createNotebook('Target');
+    final target = library.value.workspace!;
+    final importing = library.importFiles(
+      target,
+      target.value.directory!,
+      DocumentImportKind.folder,
+      'Batch',
+    );
+    try {
+      await Future.any([
+        entered.future,
+        importing.then<void>((_) => throw StateError('Provider not entered')),
+      ]);
+      expect(library.value.transferReserved, isTrue);
+      final other = library.value.entries.singleWhere(
+        (entry) => entry.notebookId == otherId,
+      );
+      await library.exportNotebook(other, format: CoreExportFormat.notebook);
+      await library.prepareImport(DocumentImportKind.folder);
+      expect(
+        await Directory(await storage.obtainExportRoot()).list().isEmpty,
+        isTrue,
+      );
+      expect(
+        await Directory(await storage.obtainImportRoot()).list().isEmpty,
+        isTrue,
+      );
+      expect(await library.openNotebook(other), isTrue);
+      library.cancelCohort();
+    } finally {
+      gate.complete();
+    }
+    await importing;
+    expect(library.value.workspace!.notebookId, otherId);
+    await library.returnToLibrary(library.value.workspace!);
+    await library.discardCohort(library.value.cohortState.current!);
+  });
+
+  test('unknown resource residue is scanned before notebook writers and never silently deleted', () async {
+    await library.initialize();
+    await library.createNotebook('Existing');
+    await library.returnToLibrary(library.value.workspace!);
+    final location = library.value.entries.single.location;
+    final config = File(p.join(location, 'vx_notebook', 'config.json'));
+    final before = await config.readAsBytes();
+    await library.shutdown();
+    library.dispose();
+    final residue = await Directory(
+      p.join(await storage.obtainResourceRoot(), 'f' * 32),
+    ).create();
+    final marker = File(p.join(residue.path, 'intent.json'));
+    await marker.writeAsString('{broken ownership');
+    library = makeLibrary();
+    final starting = library.initialize();
+    expect(await library.createNotebook('Too early'), isFalse);
+    await starting;
+    expect(library.value.resourceState.blocksAllNotebooks, isTrue);
+    expect(library.value.entries.single.canOpen, isFalse);
+    expect(await library.createNotebook('Blocked by unknown target'), isFalse);
+    expect(await marker.readAsString(), '{broken ownership');
+    expect(await config.readAsBytes(), before);
+  });
+
+  test('shutdown and discard wait for a resource provider lease before retiring NOTE', () async {
+    await library.shutdown();
+    library.dispose();
+    final source = await Directory(p.join(temp.path, 'pending-resource'))
+        .create();
+    await File(p.join(source.path, 'blob.bin')).writeAsBytes([0, 1, 2]);
+    final gate = Completer<void>();
+    addTearDown(() {
+      if (!gate.isCompleted) gate.complete();
+    });
+    final entered = Completer<void>();
+    final provider =
+        _ImportProvider(source.path, p.join(temp.path, 'resources'))
+          ..gate = gate
+          ..entered = entered;
+    library = makeLibrary(resourcePlatform: provider);
+    await library.initialize();
+    await library.createNotebook('Lease');
+    final workspace = library.value.workspace!;
+    await workspace.createNote('note.md');
+    await workspace.openNote(workspace.value.directory!.entries.single);
+    final session = workspace.value.session!;
+    final copying = library.changeResource(
+      workspace,
+      session,
+      ResourceOperation.add,
+      'blob.bin',
+    );
+    await Future.any([
+      entered.future,
+      copying.then<void>((_) => throw StateError('Provider not entered')),
+    ]);
+    expect(session.value.resourcesBusy, isTrue);
+    final attempt = library.value.resourceState.current!;
+    await library.resolveSessionResource(
+      workspace,
+      session,
+      attempt,
+      discard: true,
+    );
+    expect(await Directory(attempt.transactionRoot).exists(), isTrue);
+    var stopped = false;
+    final closing = library.shutdown().then((_) => stopped = true);
+    await Future<void>.delayed(Duration.zero);
+    expect(stopped, isFalse);
+    expect(session.value.resourcesBusy, isTrue);
+    gate.complete();
+    await copying;
+    await closing;
+    expect(stopped, isTrue);
+    expect(await Directory(attempt.transactionRoot).exists(), isTrue);
   });
 
   test('import reservation prevents a racing export while provider lease is pending', () async {
@@ -437,7 +799,10 @@ void main() {
     await library.createNotebook('Export source');
     await library.returnToLibrary(library.value.workspace!);
     final entry = library.value.entries.single;
-    final exporting = library.exportNotebook(entry, format: CoreExportFormat.notebook);
+    final exporting = library.exportNotebook(
+      entry,
+      format: CoreExportFormat.notebook,
+    );
     final archive = await Future.any([
       provider.entered.future,
       exporting.then<String>(
@@ -493,7 +858,10 @@ void main() {
       final entered = Completer<void>();
       owners.closeGate = gate;
       owners.closeEntered = entered;
-      final exporting = library.exportNotebook(library.value.entries.single, format: CoreExportFormat.notebook);
+      final exporting = library.exportNotebook(
+        library.value.entries.single,
+        format: CoreExportFormat.notebook,
+      );
       try {
         await Future.any([
           entered.future,

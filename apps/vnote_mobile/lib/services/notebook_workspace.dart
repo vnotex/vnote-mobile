@@ -96,6 +96,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   bool _searching = false;
   bool _searchCancelled = false;
   String? _searchError;
+  String? _transferBlock;
   bool _stale = true;
   bool _shuttingDown = false;
   bool _disposed = false;
@@ -105,6 +106,18 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   String get nativeNotices =>
       _catalog?.nativeNotices ?? _session?.nativeNotices ?? '';
+
+  String get notebookId => _notebookId;
+  String get notebookLocation => _paths.notebook;
+
+  /// Unresolved ownership prevents native reopen/mutations. Library return
+  /// remains available so a recovery owner can reconcile the pinned target.
+  void setTransferBlock(String? message) {
+    if (_transferBlock == message) return;
+    _transferBlock = message;
+    _session?.setResourceBlock(message);
+    _publish();
+  }
 
   Future<void> initialize() =>
       _shuttingDown ? Future<void>.value() : _initialization ??= _initialize();
@@ -121,6 +134,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   }
 
   Future<void> _openBrowser() async {
+    if (_transferBlock != null) throw StateError(_transferBlock!);
     if (_session != null) throw StateError('The selected note is still open.');
     if (_shuttingDown) return;
     if (_catalog == null) {
@@ -553,8 +567,8 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       directory: _directory,
       session: _session,
       busy: _active != null,
-      stale: _stale,
-      error: _error,
+      stale: _stale || _transferBlock != null,
+      error: _transferBlock ?? _error,
       mutation: _mutation,
       search: _search,
       searching: _searching,

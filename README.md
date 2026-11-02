@@ -112,8 +112,24 @@ implemented but has not been built or run here. OS backup exclusion is configure
 verified guarantee across iOS/OEM transfers. Keep your own exported copies before
 app removal or device loss. See [export/privacy contract](docs/adr/0006-import-share-and-privacy.md).
 
-Standalone Markdown/assets import, share-in and attachment editing remain planned
-offline work; preview, autosave/recovery and sync remain later gates. No iOS or
+Inside a notebook, **Import files** accepts one file, a ZIP or a selected folder
+and groups it into one new child folder. The selected hierarchy and raw bytes are
+preserved, including hidden/opaque assets; local Markdown dependencies must be
+present and confined. Preparation seals core-generated IDs once. Apply/restart
+reconciles the actual cohort before retrying; conflicts never overwrite a child or
+regenerate IDs. Source-entry limits also obey the core's parent/journal/ID caps.
+
+The editor's **Resources** panel lists tracked, unindexed and missing files. Add an
+attachment or image, track/untrack, rename/remove, or export a verified file through
+Save As. File/image input is bounded to 256 MiB; resource export to 1 GiB. Failed or
+ambiguous operations retain their private work and expose recovery/explicit
+abandonment without deleting unexpected live files. All transfers share the global
+4 GiB reservation, including cohort attempts moved into notebooks.
+
+**Insert link / Insert image** adds literal Markdown at a revision-bound cursor as
+one undo operation. The asset and source have separate outcomes: insertion failure
+does not copy the file again, and successful insertion still needs **Write**.
+Share-in, preview, durable drafts/autosave and sync remain later gates. No iOS or
 physical-device completion follows from Android/host verification.
 
 ## License

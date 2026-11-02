@@ -153,6 +153,12 @@ class _Catalog implements CatalogCore {
       throw StateError('Export snapshot requires the real storage fixture.');
   @override
   void cancelExport() {}
+  @override
+  Future<CoreCohortOutcome> applyCohort(String transactionRoot) async =>
+      throw StateError('Cohort attach requires real storage.');
+  @override
+  Future<CoreCohortOutcome> recoverCohort(String transactionRoot) async =>
+      throw StateError('Cohort recovery requires real storage.');
 
   @override
   Future<CoreTags> tags([String? nodeId]) async {
@@ -223,6 +229,19 @@ class _Note implements NotebookCore {
 
   @override
   String get nativeNotices => core.nativeNotices;
+  @override
+  Future<CoreResourceListing> listResources() => core.listResources();
+  @override
+  Future<CoreResourceResult> applyResource(String root) =>
+      core.applyResource(root);
+  @override
+  Future<CoreResourceResult> recoverResource(String root) =>
+      core.recoverResource(root);
+  @override
+  Future<CoreResourceExport> exportResource(String name, String root) =>
+      core.exportResource(name, root);
+  @override
+  void cancelResourceRead() => core.cancelResourceRead();
   @override
   Future<CoreNote> read() => core.read();
   @override
@@ -342,7 +361,10 @@ class _Library extends NotebookLibrary {
   final savedExports = <PreparedNotebookExport>[];
   int exportCancellations = 0;
   @override
-  Future<void> exportNotebook(ManagedNotebookEntry entry, {required CoreExportFormat format}) async {
+  Future<void> exportNotebook(
+    ManagedNotebookEntry entry, {
+    required CoreExportFormat format,
+  }) async {
     exportedEntries.add(entry);
   }
 
@@ -403,6 +425,80 @@ class _Library extends NotebookLibrary {
 }
 
 void main() {
+  test(
+    'resource ambiguity retires NOTE without opening a normal catalog',
+    () async {
+      final harness = _Harness();
+      final session = await harness.edit();
+      final editor = session.value.editor!;
+      harness.workspace.setTransferBlock('Pending resource ownership');
+      expect(
+        await harness.workspace.returnToBrowser(
+          session,
+          NotebookDisposition.discard,
+          (message) => protocol.answer(editor, message),
+        ),
+        isTrue,
+      );
+      expect(harness.catalogs.length, 1);
+      expect(harness.workspace.value.session, isNull);
+      expect(harness.workspace.value.canBrowse, isTrue);
+      expect(harness.workspace.value.canMutate, isFalse);
+      expect(await harness.workspace.createNote('blocked.md'), isNull);
+      expect(await harness.workspace.refresh(), isFalse);
+      harness.workspace.setTransferBlock(null);
+      expect(await harness.workspace.refresh(), isTrue);
+      expect(harness.catalogs.length, 2);
+    },
+  );
+
+  testWidgets(
+    'browser import captures the exact folder and rejects a stale grouping dialog',
+    (tester) async {
+      final harness = _Harness(widgetTest: true);
+      await harness.workspace.initialize();
+      final requests = <(CoreDirectory, DocumentImportKind, String)>[];
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookBrowser(
+            workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (directory, kind, name) async =>
+                requests.add((directory, kind, name)),
+            dark: false,
+            onThemeChanged: (_) {},
+            onShowNotebooks: () {},
+          ),
+        ),
+      );
+      await tester.tap(find.text('Import files'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Import files folder'));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('one new child folder'), findsOneWidget);
+      await tester.enterText(find.byType(TextFormField), 'Captured group');
+      harness.catalogs.single.onList = (_) async => _directory();
+      await harness.workspace.refresh();
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(requests, isEmpty);
+      final directory = harness.workspace.value.directory!;
+      await tester.tap(find.text('Import files'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Import file'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextFormField), 'Captured group');
+      await tester.tap(find.text('Save'));
+      await tester.pumpAndSettle();
+      expect(requests.single, (
+        directory,
+        DocumentImportKind.file,
+        'Captured group',
+      ));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await harness.workspace.shutdown();
+    },
+  );
   testWidgets(
     'prepared import confirmation rejects stale attempts and blocks competing transfer starts',
     (tester) async {
@@ -757,6 +853,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () => returns++,
@@ -832,6 +931,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () => returns++,
@@ -2001,6 +2103,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
@@ -2075,6 +2180,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
@@ -2138,6 +2246,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
@@ -2220,6 +2331,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
@@ -2296,6 +2410,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
@@ -2358,6 +2475,9 @@ void main() {
         MaterialApp(
           home: NotebookBrowser(
             workspace: harness.workspace,
+            transferReserved: false,
+            onImportFiles: (_, _, _) async =>
+                throw StateError('Unexpected import'),
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},

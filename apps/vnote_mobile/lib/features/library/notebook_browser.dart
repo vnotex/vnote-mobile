@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import '../../services/notebook_workspace.dart';
+import '../../services/document_transfer_platform.dart';
 import '../about/license_sheet.dart';
 
 class NotebookBrowser extends StatefulWidget {
@@ -13,6 +14,8 @@ class NotebookBrowser extends StatefulWidget {
     required this.dark,
     required this.onThemeChanged,
     required this.onShowNotebooks,
+    required this.transferReserved,
+    required this.onImportFiles,
     super.key,
   });
 
@@ -20,6 +23,9 @@ class NotebookBrowser extends StatefulWidget {
   final bool dark;
   final ValueChanged<bool> onThemeChanged;
   final VoidCallback onShowNotebooks;
+  final bool transferReserved;
+  final Future<void> Function(CoreDirectory, DocumentImportKind, String)
+  onImportFiles;
 
   @override
   State<NotebookBrowser> createState() => _NotebookBrowserState();
@@ -66,6 +72,34 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
     } else {
       await _workspace.createNote(name);
     }
+  }
+
+  Future<void> _importFiles(DocumentImportKind kind) async {
+    final directory = _workspace.value.directory;
+    if (directory == null ||
+        !_stillCurrent(directory) ||
+        widget.transferReserved) {
+      return;
+    }
+    final name = await showDialog<String>(
+      context: context,
+      builder: (context) => _NameDialog(
+        title: 'Import into ${directory.path == '.' ? '/' : directory.path}',
+        initial: 'Imported files',
+        note: false,
+        detail:
+            'Everything selected goes into one new child folder with this name. '
+            'Original paths and bytes are preserved; new node IDs are generated. '
+            'VNote-ID links are not rewritten and remote links are not fetched. '
+            'Choose a containing folder or ZIP for Markdown with sibling assets. '
+            'Notebook backups use Import notebook instead. The library will show '
+            'the retained source before you prepare and apply it.',
+      ),
+    );
+    if (name == null || !_stillCurrent(directory) || widget.transferReserved) {
+      return;
+    }
+    await widget.onImportFiles(directory, kind, name);
   }
 
   Future<void> _renameNotebook(CoreDirectory directory) async {
@@ -259,6 +293,29 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                             : null,
                         icon: const Icon(Icons.create_new_folder_outlined),
                         label: const Text('New folder'),
+                      ),
+                      PopupMenuButton<DocumentImportKind>(
+                        tooltip: 'Import files into this folder',
+                        enabled: state.canMutate && !widget.transferReserved,
+                        onSelected: _importFiles,
+                        itemBuilder: (_) => const [
+                          PopupMenuItem(
+                            value: DocumentImportKind.file,
+                            child: Text('Import file'),
+                          ),
+                          PopupMenuItem(
+                            value: DocumentImportKind.zip,
+                            child: Text('Import files ZIP'),
+                          ),
+                          PopupMenuItem(
+                            value: DocumentImportKind.folder,
+                            child: Text('Import files folder'),
+                          ),
+                        ],
+                        child: const Padding(
+                          padding: EdgeInsets.all(12),
+                          child: Text('Import files'),
+                        ),
                       ),
                     ],
                   ),
@@ -821,12 +878,14 @@ class _NameDialog extends StatefulWidget {
     required this.initial,
     required this.note,
     this.notebook = false,
+    this.detail,
   });
 
   final String title;
   final String initial;
   final bool note;
   final bool notebook;
+  final String? detail;
 
   @override
   State<_NameDialog> createState() => _NameDialogState();
@@ -851,24 +910,37 @@ class _NameDialogState extends State<_NameDialog> {
   @override
   Widget build(BuildContext context) => AlertDialog(
     title: Text(widget.title),
-    content: Form(
-      key: _form,
-      child: TextFormField(
-        controller: _controller,
-        autofocus: true,
-        autocorrect: false,
-        decoration: InputDecoration(
-          labelText: 'Name',
-          helperMaxLines: widget.notebook ? 3 : null,
-          helperText: widget.note
-              ? 'Include .md (Markdown) or .txt (plain text).'
-              : widget.notebook
-              ? 'Display name only. The notebook folder is not renamed.'
-              : null,
-        ),
-        validator: (value) =>
-            value == null || value.trim().isEmpty ? 'Enter a name.' : null,
-        onFieldSubmitted: (_) => _submit(),
+    content: SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          if (widget.detail != null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 12),
+              child: Text(widget.detail!),
+            ),
+          Form(
+            key: _form,
+            child: TextFormField(
+              controller: _controller,
+              autofocus: true,
+              autocorrect: false,
+              decoration: InputDecoration(
+                labelText: 'Name',
+                helperMaxLines: widget.notebook ? 3 : null,
+                helperText: widget.note
+                    ? 'Include .md (Markdown) or .txt (plain text).'
+                    : widget.notebook
+                    ? 'Display name only. The notebook folder is not renamed.'
+                    : null,
+              ),
+              validator: (value) => value == null || value.trim().isEmpty
+                  ? 'Enter a name.'
+                  : null,
+              onFieldSubmitted: (_) => _submit(),
+            ),
+          ),
+        ],
       ),
     ),
     actions: [

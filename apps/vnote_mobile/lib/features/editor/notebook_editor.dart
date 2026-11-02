@@ -9,12 +9,15 @@ import 'package:webview_flutter/webview_flutter.dart';
 import '../../services/editor_session.dart';
 import '../../services/notebook_session.dart';
 import '../../services/notebook_workspace.dart';
+import '../../services/notebook_library.dart';
+import '../resources/resource_panel.dart';
 import '../about/license_sheet.dart';
 
 class NotebookEditor extends StatefulWidget {
   const NotebookEditor({
     required this.workspace,
     required this.session,
+    required this.library,
     required this.dark,
     required this.onThemeChanged,
     super.key,
@@ -22,6 +25,7 @@ class NotebookEditor extends StatefulWidget {
 
   final NotebookWorkspace workspace;
   final NotebookSession session;
+  final NotebookLibrary library;
 
   final bool dark;
   final ValueChanged<bool> onThemeChanged;
@@ -218,6 +222,26 @@ class _NotebookEditorState extends State<NotebookEditor> {
     await _notebook.write(_send);
   }
 
+  Future<void> _showResources() async {
+    final editor = _notebook.value.editor;
+    if (editor == null || _notebook.value.busy) return;
+    await showModalBottomSheet<void>(
+      context: context,
+      isScrollControlled: true,
+      useSafeArea: true,
+      builder: (context) => FractionallySizedBox(
+        heightFactor: 0.9,
+        child: ResourcePanel(
+          library: widget.library,
+          workspace: widget.workspace,
+          session: _notebook,
+          editor: editor,
+          send: _send,
+        ),
+      ),
+    );
+  }
+
   Future<void> _copyReceivedText() async {
     try {
       await Clipboard.setData(ClipboardData(text: _session.value.text));
@@ -316,6 +340,13 @@ class _NotebookEditorState extends State<NotebookEditor> {
                     : '${state.note!.notebookName} / ${state.note!.path}',
               ),
               actions: [
+                IconButton(
+                  tooltip: 'Attachments and images',
+                  onPressed: state.note != null && !state.busy
+                      ? _showResources
+                      : null,
+                  icon: const Icon(Icons.attach_file),
+                ),
                 IconButton(
                   tooltip: 'Legal notices',
                   icon: const Icon(Icons.info_outline),

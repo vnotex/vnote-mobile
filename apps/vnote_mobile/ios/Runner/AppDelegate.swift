@@ -38,6 +38,7 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
 
   private final class Operation {
     let id: String
+    let scope: String
     let source: URL
     let picker: UIDocumentPickerViewController
     weak var scene: UIScene?
@@ -48,10 +49,11 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     var dismissing = false
     var stopStatus: String?
 
-    init(id: String, source: URL, descriptor: Int32,
+    init(id: String, scope: String, source: URL, descriptor: Int32,
          picker: UIDocumentPickerViewController, scene: UIScene,
          result: @escaping FlutterResult) {
       self.id = id
+      self.scope = scope
       self.source = source
       self.descriptor = descriptor
       self.picker = picker
@@ -95,20 +97,24 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     case "pickImport":
       pickImport(call, result: result)
     case "cancelImport":
-      guard let args = call.arguments as? [String: Any],
-            let id = args["operationId"] as? String, Self.validID(id) else {
+      guard let args = call.arguments as? [String: Any], args.count == 2,
+            let id = args["operationId"] as? String, Self.validID(id),
+            let scope = args["scope"] as? String, Self.validScope(scope) else {
         result(FlutterError(code: "invalid_request", message: "Invalid import request.", details: nil))
         return
       }
-      if let operation = importing, operation.id == id { stopImport(operation, status: "cancelled") }
+      if let operation = importing, operation.id == id, operation.scope == scope {
+        stopImport(operation, status: "cancelled")
+      }
       result(nil)
     case "cancelExport":
-      guard let args = call.arguments as? [String: Any],
-            let id = args["operationId"] as? String, Self.validID(id) else {
+      guard let args = call.arguments as? [String: Any], args.count == 2,
+            let id = args["operationId"] as? String, Self.validID(id),
+            let scope = args["scope"] as? String, Self.validScope(scope) else {
         result(FlutterError(code: "invalid_request", message: "Invalid export request.", details: nil))
         return
       }
-      if let operation = active, operation.id == id {
+      if let operation = active, operation.id == id, operation.scope == scope {
         requestStop(operation, status: "cancelled")
       }
       // Acknowledges the request only; saveExport still owns the source lease.
@@ -139,11 +145,12 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
       reply(result, status: "unavailable", incomplete: false)
       return
     }
-    guard let args = call.arguments as? [String: Any],
+    guard let args = call.arguments as? [String: Any], args.count == 4,
           let id = args["operationId"] as? String,
+          let scope = args["scope"] as? String, scope == "notebook" || scope == "resource",
           let path = args["path"] as? String,
           let name = args["suggestedName"] as? String,
-          Self.validID(id), Self.validName(name) else {
+          Self.validID(id), scope != "notebook" || Self.validName(name) else {
       reply(result, status: "failed", incomplete: false)
       return
     }
@@ -155,18 +162,18 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     let descriptor: Int32
     do {
       let root = try prepareStorage()
-      (source, descriptor) = try openSource(root: root, id: id, path: path)
+      (source, descriptor) = try openSource(root: root, id: id, scope: scope, name: name, path: path)
     } catch {
       reply(result, status: "failed", incomplete: false)
       return
     }
-    // UIKit derives its initial name from the source URL (notebook.zip); it has
-    // no suggested-name setter. Never rename or alias the immutable ready ZIP.
+    // UIKit derives its name from the immutable source URL: notebook.zip or the
+    // exact ready resource basename. Never rename or alias a retained snapshot.
     let picker = UIDocumentPickerViewController(forExporting: [source], asCopy: true)
     picker.delegate = self
     picker.modalPresentationStyle = .formSheet
     picker.shouldShowFileExtensions = true
-    let operation = Operation(id: id, source: source, descriptor: descriptor,
+    let operation = Operation(id: id, scope: scope, source: source, descriptor: descriptor,
                               picker: picker, scene: scene, result: result)
     active = operation
     leaseOwner = self
@@ -274,6 +281,7 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
 
   private final class ImportOperation {
     let id: String
+    let scope: String
     let kind: String
     let root: URL
     let transaction: URL
@@ -292,10 +300,11 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     private var cancelled = false
     private var coordinator: NSFileCoordinator?
 
-    init(id: String, kind: String, root: URL, transaction: URL,
+    init(id: String, scope: String, kind: String, root: URL, transaction: URL,
          picker: UIDocumentPickerViewController, scene: UIScene,
          result: @escaping FlutterResult) {
       self.id = id
+      self.scope = scope
       self.kind = kind
       self.root = root
       self.transaction = transaction
@@ -334,9 +343,10 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
       replyImport(result, status: "unavailable")
       return
     }
-    guard let args = call.arguments as? [String: Any], args.count == 2,
+    guard let args = call.arguments as? [String: Any], args.count == 3,
           let id = args["operationId"] as? String, Self.validID(id),
-          let kind = args["kind"] as? String, kind == "zip" || kind == "folder" else {
+          let scope = args["scope"] as? String,
+          let kind = args["kind"] as? String, Self.validImport(scope: scope, kind: kind) else {
       replyImport(result, status: "failed")
       return
     }
@@ -344,18 +354,24 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     let transaction: URL
     do {
       root = try prepareStorage()
-      transaction = try validateImportRequest(root: root, id: id, kind: kind)
+      transaction = try validateImportRequest(root: root, id: id, scope: scope, kind: kind)
     } catch {
       replyImport(result, status: "failed")
       return
     }
-    let picker = UIDocumentPickerViewController(
-      forOpeningContentTypes: kind == "zip" ? [UTType.zip] : [UTType.folder], asCopy: false)
+    let types: [UTType]
+    switch kind {
+    case "zip": types = [.zip]
+    case "folder": types = [.folder]
+    case "image": types = [.image]
+    default: types = [.item]
+    }
+    let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
     picker.allowsMultipleSelection = false
     picker.delegate = self
     picker.modalPresentationStyle = .formSheet
     picker.shouldShowFileExtensions = true
-    let operation = ImportOperation(id: id, kind: kind, root: root, transaction: transaction,
+    let operation = ImportOperation(id: id, scope: scope, kind: kind, root: root, transaction: transaction,
                                     picker: picker, scene: scene, result: result)
     importing = operation
     leaseOwner = self
@@ -447,13 +463,23 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
             "bytes": bytes, "entries": entries])
   }
 
-  private func validateImportRequest(root: URL, id: String, kind: String) throws -> URL {
+  private func validateImportRequest(root: URL, id: String, scope: String, kind: String) throws -> URL {
+    guard Self.validImport(scope: scope, kind: kind) else { throw ImportError.unavailable }
     try requireDirectory(root)
-    let imports = root.appendingPathComponent("imports", isDirectory: true)
-    let transaction = imports.appendingPathComponent(id, isDirectory: true)
-    try requireDirectory(imports)
+    let group = root.appendingPathComponent(try Self.importNamespace(scope), isDirectory: true)
+    let transaction = group.appendingPathComponent(id, isDirectory: true)
+    try requireDirectory(group)
     try requireDirectory(transaction)
-    let marker = transaction.appendingPathComponent("request.json")
+    let request = try readMarker(transaction.appendingPathComponent("request.json"))
+    let version = try Self.markerInteger(request["version"])
+    let legacy = scope == "notebook" && request.count == 3 && version == 1
+    let scoped = request.count == 4 && version == 2 && request["scope"] as? String == scope
+    guard legacy || scoped, request["id"] as? String == id, request["kind"] as? String == kind
+    else { throw ImportError.unavailable }
+    return transaction
+  }
+
+  private func readMarker(_ marker: URL) throws -> [String: Any] {
     let before = try metadata(marker)
     try requireRegularFile(before)
     guard before.st_size <= 16384 else { throw ImportError.unavailable }
@@ -473,19 +499,15 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     guard Darwin.read(descriptor, &extra, 1) == 0 else { throw ImportError.unavailable }
     try requireImportUnchanged(descriptor, url: marker, expected: before)
     let decoded = try JSONSerialization.jsonObject(with: Data(bytes))
-    guard let request = decoded as? [String: Any], request.count == 3,
-          let version = request["version"] as? NSNumber,
-          CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1,
-          request["id"] as? String == id, request["kind"] as? String == kind
-    else { throw ImportError.unavailable }
-    return transaction
+    guard let object = decoded as? [String: Any] else { throw ImportError.unavailable }
+    return object
   }
 
   private func copyCoordinatedImport(_ operation: ImportOperation, source: URL) throws {
     // The delegate acquired this scope; release it even on early cancellation.
     defer { source.stopAccessingSecurityScopedResource() }
     try operation.checkCancellation()
-    _ = try validateImportRequest(root: operation.root, id: operation.id, kind: operation.kind)
+    _ = try validateImportRequest(root: operation.root, id: operation.id, scope: operation.scope, kind: operation.kind)
     let coordinator = NSFileCoordinator(filePresenter: nil)
     operation.setCoordinator(coordinator)
     defer { operation.setCoordinator(nil) }
@@ -503,15 +525,21 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
         operation.sourceName = name
         let value = try self.metadata(coordinated)
         let reserve: Int64
-        if operation.kind == "zip" {
-          try self.requireImportFile(value, maximum: Self.maximumInputBytes)
-          guard value.st_size > 0 else { throw ImportError.unavailable }
-          reserve = value.st_size
-        } else {
+        if operation.kind == "folder" {
           guard (value.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else { throw ImportError.unavailable }
           reserve = Self.maximumTreeBytes
+        } else {
+          try self.requireImportFile(value, maximum: operation.kind == "zip"
+            ? Self.maximumInputBytes : Self.maximumFileBytes)
+          if operation.kind == "zip" {
+            guard value.st_size > 0 else { throw ImportError.unavailable }
+          } else {
+            try self.validateImportName(name, relative: name)
+          }
+          reserve = value.st_size
         }
-        try self.requireImportSpace(operation.transaction, bytes: reserve)
+        let metadata: Int64 = 64 * 1024 + (operation.kind == "folder" ? 100000 * 8192 : 0)
+        try self.requireImportSpace(operation.transaction, bytes: reserve + metadata)
         var buffer = [UInt8](repeating: 0, count: 256 * 1024)
         try buffer.withUnsafeMutableBytes { buffer in
           if operation.kind == "zip" {
@@ -524,9 +552,21 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
             try self.createImportDirectory(destination)
             let accepted = try self.createImportOutput(operation.transaction.appendingPathComponent("accepted.jsonl"))
             defer { Darwin.close(accepted) }
-            var visited = Set<String>()
-            try self.copyImportDirectory(operation, source: coordinated, destination: destination,
-              prefix: "", depth: 0, visited: &visited, inventory: accepted, buffer: buffer)
+            if operation.kind == "folder" {
+              var visited = Set<String>()
+              try self.copyImportDirectory(operation, source: coordinated, destination: destination,
+                prefix: "", depth: 0, visited: &visited, inventory: accepted, buffer: buffer)
+            } else {
+              try self.copyImportFile(operation, source: coordinated,
+                destination: destination.appendingPathComponent(name), expected: value,
+                maximum: Self.maximumFileBytes, buffer: buffer)
+              var record = try JSONSerialization.data(withJSONObject: ["path": name, "type": "file"],
+                options: [.sortedKeys, .withoutEscapingSlashes])
+              record.append(10)
+              try self.requireImportSpace(operation.transaction, bytes: Int64(record.count))
+              try record.withUnsafeBytes { try self.writeImportBytes(accepted, buffer: $0) }
+              operation.entries = 1
+            }
             guard Darwin.fsync(accepted) == 0 else { throw ImportError.unavailable }
           }
         }
@@ -727,7 +767,7 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
           supportURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
             == library.path else { throw ExportError.unavailable }
     try prepareExcludedDirectory(root)
-    for name in ["core", "notebooks", "exports", "imports"] {
+    for name in ["core", "notebooks", "exports", "imports", "cohorts", "resources"] {
       try prepareExcludedDirectory(root.appendingPathComponent(name, isDirectory: true))
     }
     return root
@@ -785,17 +825,45 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     else { throw ExportError.unavailable }
   }
 
-  private func openSource(root: URL, id: String, path: String) throws -> (URL, Int32) {
-    guard path.utf8.count <= 16384, !path.utf8.contains(0) else { throw ExportError.unavailable }
-    let exports = root.appendingPathComponent("exports", isDirectory: true)
-    let transaction = exports.appendingPathComponent(id, isDirectory: true)
-    let source = transaction.appendingPathComponent("notebook.zip", isDirectory: false)
-    guard path == source.path else { throw ExportError.unavailable }
+  private func openSource(root: URL, id: String, scope: String, name: String, path: String) throws -> (URL, Int32) {
+    guard path.utf8.count <= 16384, !path.utf8.contains(0), scope == "notebook" || scope == "resource"
+    else { throw ExportError.unavailable }
     try requireDirectory(root)
-    try requireDirectory(exports)
+    let group = root.appendingPathComponent(scope == "resource" ? "resources" : "exports", isDirectory: true)
+    let transaction = group.appendingPathComponent(id, isDirectory: true)
+    try requireDirectory(group)
     try requireDirectory(transaction)
+    let source: URL
+    var readyBytes: Int64?
+    if scope == "resource" {
+      try validateImportName(name, relative: name)
+      let request = try readMarker(transaction.appendingPathComponent("request.json"))
+      guard let kind = request["kind"] as? String else { throw ExportError.unavailable }
+      _ = try validateImportRequest(root: root, id: id, scope: scope, kind: kind)
+      let output = transaction.appendingPathComponent("output", isDirectory: true)
+      try requireDirectory(output)
+      let ready = try readMarker(transaction.appendingPathComponent("ready.json"))
+      let version = try Self.markerInteger(ready["version"])
+      let bytes = try Self.markerInteger(ready["bytes"])
+      guard ready.count == 6, version == 1, ready["id"] as? String == id,
+            ready["scope"] as? String == scope, ready["name"] as? String == name,
+            bytes >= 0, bytes <= Self.maximumInputBytes,
+            let digest = ready["sha256"] as? String, digest.utf8.count == 64,
+            digest.utf8.allSatisfy({ (48...57).contains($0) || (97...102).contains($0) })
+      else { throw ExportError.unavailable }
+      readyBytes = bytes
+      source = output.appendingPathComponent(name, isDirectory: false)
+    } else {
+      source = transaction.appendingPathComponent("notebook.zip", isDirectory: false)
+    }
+    guard path == source.path else { throw ExportError.unavailable }
     let before = try metadata(source)
-    try requireRegularFile(before)
+    if let bytes = readyBytes {
+      try requireImportFile(before, maximum: Self.maximumInputBytes)
+      guard before.st_size == bytes else { throw ExportError.unavailable }
+    } else {
+      try requireRegularFile(before)
+    }
     guard source.resolvingSymlinksInPath().standardizedFileURL.path == path
     else { throw ExportError.unavailable }
     let descriptor = source.withUnsafeFileSystemRepresentation { pointer -> Int32 in
@@ -804,23 +872,46 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     }
     guard descriptor >= 0 else { throw ExportError.unavailable }
     do {
-      var opened = stat()
-      guard Darwin.fstat(descriptor, &opened) == 0 else { throw ExportError.unavailable }
-      try requireRegularFile(opened)
       try requireDirectory(root)
-      try requireDirectory(exports)
+      try requireDirectory(group)
       try requireDirectory(transaction)
-      let after = try metadata(source)
-      guard opened.st_dev == before.st_dev, opened.st_ino == before.st_ino,
-            opened.st_dev == after.st_dev, opened.st_ino == after.st_ino,
-            opened.st_size == before.st_size, opened.st_size == after.st_size,
-            opened.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
-            opened.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec
-      else { throw ExportError.unavailable }
+      if scope == "resource" { try requireDirectory(source.deletingLastPathComponent()) }
+      try requireImportUnchanged(descriptor, url: source, expected: before)
       return (source, descriptor)
     } catch {
       Darwin.close(descriptor)
       throw ExportError.unavailable
+    }
+  }
+
+  private static func markerInteger(_ value: Any?) throws -> Int64 {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+          !["f", "d"].contains(String(cString: number.objCType)),
+          number.compare(NSNumber(value: Int64.min)) != .orderedAscending,
+          number.compare(NSNumber(value: Int64.max)) != .orderedDescending
+    else { throw ImportError.unavailable }
+    return number.int64Value
+  }
+
+  private static func validScope(_ scope: String) -> Bool {
+    ["notebook", "cohort", "resource"].contains(scope)
+  }
+
+  private static func validImport(scope: String, kind: String) -> Bool {
+    switch scope {
+    case "notebook": return ["zip", "folder"].contains(kind)
+    case "cohort": return ["zip", "folder", "file"].contains(kind)
+    case "resource": return ["file", "image"].contains(kind)
+    default: return false
+    }
+  }
+
+  private static func importNamespace(_ scope: String) throws -> String {
+    switch scope {
+    case "notebook": return "imports"
+    case "cohort": return "cohorts"
+    case "resource": return "resources"
+    default: throw ImportError.unavailable
     }
   }
 

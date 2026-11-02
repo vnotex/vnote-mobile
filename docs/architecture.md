@@ -40,8 +40,10 @@ side effects with the same pinned public cmark parser. Destinations cannot be
 overwritten, linked indexed nodes cannot be orphaned, and resource postconditions
 are checked after core success. This is not a new transaction/rollback guarantee.
 
-This slice covers the current managed notebook, not multi-notebook management,
-search/tag UI, import/export, attachment editing, preview, autosave or sync.
+The offline application includes the managed library, search/tags, notebook and
+files/assets interchange, standalone cohorts, and ordinary-note resources.
+Preview, durable drafts/autosave, the stopped-app share inbox and sync remain
+separate gates.
 
 ## Native ownership and storage
 
@@ -51,7 +53,36 @@ The implemented host has one native owner OS thread for context/metadata/buffer 
 
 CMake selects the checked POSIX writer from `src/mobile/` only for Android/iOS; desktop saves use the original in-place implementation from `src/platform/buffer_file_save_desktop.cpp`. The Windows DACL/recovery path from the initial native slice has been removed. Shared callsites and the native owner-thread protocol are unchanged.
 
-No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires the remaining notebook/import/search workflows, recovery, preview and WebDAV interoperability.
+No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires durable editor recovery, preview, share-in and WebDAV interoperability.
+
+## Offline transfer boundaries
+
+The library acquires one synchronous reservation across notebook import/export,
+cohorts and resources before provider or worker awaits. `transfer_worker.dart`
+joins filesystem isolates and provider cancellation before freeing borrowed native
+tokens. Native filesystem commands share no-follow/hash/identity helpers and a
+quota ledger which includes still-owned attempts moved into notebook journals.
+Startup reconciles pending effects before admitting ordinary writers; uncertain
+targets remain unavailable rather than being rediscovered as fresh data.
+
+Cohort preparation bulk-indexes an isolated private workbook through core APIs,
+closes its builder owner and seals complete content/metadata plus generated IDs.
+The destination catalog consumes a separate attempt through core journaled attach.
+Authoritative reachability and durable receipts decide commit; retries never
+reconstruct IDs or trust stale paths. Dart does not serialize notebook metadata.
+
+Resource operations reuse the editor's NOTE owner, or a fresh metadata-only
+RESOURCES owner during recovery. Protected bodies and persisted restore work are
+refused before buffer opening. Listing does not create directories; bounded export
+copies bytes before provider IO. Desired operations, possible dispatch and proved
+outcomes are distinct durable records. A raced suffix is retained as ambiguous,
+not silently linked or copied again. Session Write/switch/close joins its resource
+barrier, and library shutdown drains controllers before native owner retirement.
+
+CodeMirror insertion first returns an exact current selection after flushing edits,
+then accepts one revision/selection-bound transaction. Its received acknowledgement
+follows the normal edit batch and cannot advance disk state. An already-published
+asset survives stale cursor, transport and insertion failures for explicit reuse.
 
 ## Decisions and gates
 

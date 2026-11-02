@@ -19,6 +19,7 @@ class _Platform implements DocumentTransferPlatform {
   @override
   Future<DocumentImportResult> pickImport({
     required String operationId,
+    required DocumentTransferScope scope,
     required DocumentImportKind kind,
   }) async => const DocumentImportResult(
     status: DocumentImportStatus.unavailable,
@@ -27,7 +28,9 @@ class _Platform implements DocumentTransferPlatform {
     entries: 0,
   );
   @override
-  Future<void> cancelImport(String operationId) async {}
+  Future<void> cancelImport(String operationId, {
+    required DocumentTransferScope scope,
+  }) async {}
 
   int preparations = 0;
   int saves = 0;
@@ -47,9 +50,11 @@ class _Platform implements DocumentTransferPlatform {
   @override
   Future<DocumentExportResult> save({
     required String operationId,
+    required DocumentTransferScope scope,
     required String path,
     required String suggestedName,
   }) async {
+    expect(scope, DocumentTransferScope.notebook);
     saves++;
     onSave?.call(operationId, path, suggestedName);
     if (!entered.isCompleted) entered.complete();
@@ -58,7 +63,10 @@ class _Platform implements DocumentTransferPlatform {
   }
 
   @override
-  Future<void> cancel(String operationId) async {
+  Future<void> cancel(String operationId, {
+    required DocumentTransferScope scope,
+  }) async {
+    expect(scope, DocumentTransferScope.notebook);
     cancellations++;
     // Deliberately does not settle pending: cancel acknowledgement is not a
     // native reader/picker release and must never make discard legal.
@@ -94,10 +102,10 @@ Future<void> _copyTree(String source, String destination) async {
 
 Future<Map<String, Object>> _treeSnapshot(String root) async {
   final entries = <String, Object>{};
-  await for (final entity in Directory(root).list(
+  await for (final entity in Directory(root,
+  ).list(
     recursive: true,
-    followLinks: false,
-  )) {
+    followLinks: false)) {
     final name = p.split(p.relative(entity.path, from: root)).join('/');
     if (entity is Directory) {
       entries['$name/'] = 'directory';
@@ -222,8 +230,7 @@ void main() {
   ExportSnapshotCapture capture(CoreExportFormat format) => (
     String destination,
     int budget,
-    ExportCancellation cancellation,
-  ) async {
+    ExportCancellation cancellation) async {
     final catalog = await CoreNotebook.openExportCatalog(
       appDataPath: p.join(temp.path, 'core', 'app'),
       localDataPath: p.join(temp.path, 'core', 'local'),
@@ -243,7 +250,8 @@ void main() {
     }
   };
 
-  Future<PreparedNotebookExport> prepare({required CoreExportFormat format}) async {
+  Future<PreparedNotebookExport> prepare({required CoreExportFormat format,
+  }) async {
     await makeNotebook();
     await exporter.initialize();
     final ready = await exporter.prepare(
@@ -724,7 +732,8 @@ void main() {
     final files = <String, List<int>>{
       '研究/notes.md': [
         0xef, 0xbb, 0xbf,
-        ...utf8.encode('# saved\r\n![asset](resources/assets/$noteId/raw.bin)\r\n'),
+        ...utf8.encode('# saved\r\n![asset](resources/assets/$noteId/raw.bin)\r\n',
+        ),
       ],
       'plain.txt': utf8.encode('not converted\r\n'),
       '研究/resources/assets/$noteId/raw.bin': [0, 255, 254, 13, 10],
@@ -797,7 +806,8 @@ void main() {
       expect(platform.saves, 2);
       expect(exporter.value.prepared, isNull);
       expect(await Directory(root).list().isEmpty, isTrue);
-    });
+    },
+    );
   }
 
   test('exact legacy ready markers recover as notebook without touching stored bytes', () async {
@@ -835,8 +845,7 @@ void main() {
 
   final invalidMarkers = <String, void Function(
     Map<String, dynamic>,
-    Map<String, dynamic>,
-  )>{
+    Map<String, dynamic>)>{
     'unknown request format': (request, _) => request['format'] = 'future',
     'unknown ready format': (_, ready) => ready['format'] = 'future',
     'missing request format': (request, _) => request.remove('format'),
@@ -881,9 +890,11 @@ void main() {
       final directory = p.dirname(artifact.path);
       final requestPath = p.join(directory, 'request.json');
       final readyPath = p.join(directory, 'ready.json');
-      final request = jsonDecode(await File(requestPath).readAsString())
+      final request = jsonDecode(await File(requestPath).readAsString(),
+        )
           as Map<String, dynamic>;
-      final ready = jsonDecode(await File(readyPath).readAsString())
+      final ready = jsonDecode(await File(readyPath).readAsString(),
+        )
           as Map<String, dynamic>;
       invalid.value(request, ready);
       await File(requestPath).writeAsString(jsonEncode(request), flush: true);
@@ -909,7 +920,8 @@ void main() {
       );
       await exporter.discardLeftover(exporter.value.leftovers.single);
       expect(await Directory(root).list().isEmpty, isTrue);
-    });
+    },
+    );
   }
 
   test('changing both marker formats cannot silently replace a current prepared handle', () async {
@@ -958,11 +970,13 @@ void main() {
         },
       );
       expect(artifact, isNull);
-      expect(exporter.value.error, contains(mismatch == 'format' ? 'format' : 'identity'));
+      expect(exporter.value.error, contains(mismatch == 'format' ? 'format' : 'identity'),
+        );
       expect(exporter.value.prepared, isNull);
       expect(await Directory(root).list().isEmpty, isTrue);
       expect(await _treeSnapshot(book), before);
-    });
+    },
+    );
   }
 
   test('request format changes during capture cannot publish a differently labelled ZIP', () async {
@@ -998,8 +1012,7 @@ void main() {
     final before = await File(artifact.path).readAsBytes();
     platform.onSave = (_, _, _) => throw const CoreException(
       1,
-      'private/provider/path and body',
-    );
+      'private/provider/path and body');
     await exporter.save(artifact);
     expect(platform.saves, 1);
     expect(exporter.value.error, isNotNull);
@@ -1008,7 +1021,8 @@ void main() {
     expect(await File(artifact.path).readAsBytes(), before);
     await exporter.discard(artifact);
     expect(await Directory(root).list().isEmpty, isTrue);
-  });
+  },
+  );
 
   test('protected source refusal is actionable but capture implementation failures stay redacted', () async {
     await makeNotebook();
@@ -1025,7 +1039,8 @@ void main() {
       ),
       isNull,
     );
-    expect(exporter.value.error, contains('refuses protected content; use a notebook backup'));
+    expect(exporter.value.error, contains('refuses protected content; use a notebook backup'),
+    );
     expect(exporter.value.error, isNot(contains('private-name')));
     expect(await Directory(root).list().isEmpty, isTrue);
     expect(await _treeSnapshot(book), before);
@@ -1067,7 +1082,8 @@ void main() {
         'format': ?format,
         'snapshot': 'snapshot',
         'archive': 'notebook.zip',
-      }));
+      }),
+        );
       final before = await _treeSnapshot(directory);
       await exporter.initialize();
       expect(exporter.value.prepared, isNull);
@@ -1081,7 +1097,8 @@ void main() {
         await exporter.discardLeftover(exporter.value.leftovers.single);
         expect(await Directory(root).list().isEmpty, isTrue);
       }
-    });
+    },
+    );
   }
 
   for (final format in CoreExportFormat.values) {
@@ -1123,7 +1140,8 @@ void main() {
       late List<int> bytes;
       await tester.runAsync(() async {
         expect(await _zipSnapshot(artifact.path), expected);
-        expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before);
+        expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before,
+          );
         bytes = await File(artifact.path).readAsBytes();
         await library.shutdown();
         library = makeLibrary();
@@ -1137,7 +1155,8 @@ void main() {
       expect(recovered.sha256, artifact.sha256);
       expect(recovered.path, artifact.path);
       expect(
-        find.text('${format == CoreExportFormat.notebook ? 'Notebook backup' : 'Files and assets'}: $notebookName'),
+        find.text('${format == CoreExportFormat.notebook ? 'Notebook backup' : 'Files and assets'}: $notebookName',
+          ),
         findsOneWidget,
       );
       expect(
@@ -1158,9 +1177,11 @@ void main() {
       expect(library.value.exportState.prepared, isNull);
       await tester.runAsync(() async {
         expect(await Directory(root).list().isEmpty, isTrue);
-        expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before);
+        expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before,
+          );
       });
-    });
+    },
+    );
   }
 
   testWidgets('legacy notebook recovery stays a backup through displayed Save As', (tester) async {
@@ -1182,7 +1203,8 @@ void main() {
       expect(await _treeSnapshot(p.dirname(artifact.path)), before);
     });
     await tester.pumpWidget(screen(library));
-    expect(library.value.exportState.prepared!.format, CoreExportFormat.notebook);
+    expect(library.value.exportState.prepared!.format, CoreExportFormat.notebook,
+      );
     expect(find.text('Notebook backup: $notebookName'), findsOneWidget);
     expect(find.textContaining('Not a notebook backup.'), findsNothing);
     platform.onSave = (_, path, name) {
@@ -1201,7 +1223,8 @@ void main() {
     await tester.runAsync(() async {
       expect(await Directory(root).list().isEmpty, isTrue);
     });
-  });
+  },
+  );
 
   testWidgets('a stale format dialog cannot export a newly discovered library row', (tester) async {
     late NotebookLibrary library;
@@ -1231,9 +1254,11 @@ void main() {
     expect(library.value.exportState.prepared, isNull);
     await tester.runAsync(() async {
       expect(await Directory(root).list().isEmpty, isTrue);
-      expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before);
+      expect(await _treeSnapshot(p.join(temp.path, 'notebooks', 'book')), before,
+        );
     });
-  });
+  },
+  );
 
   test('same-size archive corruption is refused before provider and remains discardable', () async {
     final artifact = await prepare(format: CoreExportFormat.notebook);

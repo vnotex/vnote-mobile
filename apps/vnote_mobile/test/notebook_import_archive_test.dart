@@ -275,6 +275,8 @@ void main() {
       () => NotebookImportArchive.prepare(
         transactionRoot: root,
         kind: kind,
+        scope: DocumentTransferScope.notebook,
+        format: ImportPreparationFormat.notebook,
         cancellationAddress: address,
       ),
     );
@@ -362,6 +364,164 @@ void main() {
   tearDown(() async {
     CoreImportStore.freeCancellation(cancellation);
     await temporary.delete(recursive: true);
+  });
+
+  Future<void> allocateFiles(
+    DocumentImportKind kind, {
+    DocumentTransferScope scope = DocumentTransferScope.cohort,
+  }) async {
+    await Directory(transaction).delete();
+    final root = p.join(
+      temporary.path,
+      scope == DocumentTransferScope.cohort ? 'cohorts' : 'resources',
+    );
+    await Directory(root).create();
+    transaction = p.join(root, _id);
+    await Isolate.run(
+      () => CoreImportStore.runTransfer({
+        'op': 'allocate',
+        'scope': scope.name,
+        'root': root,
+        'notebooksRoot': p.join(temporary.path, 'notebooks'),
+        'id': _id,
+        'kind': kind.name,
+        'target': {
+          'version': 1,
+          'id': _id,
+          'notebookId': '11111111-1111-4111-8111-111111111111',
+          'notebookRelative': 'fixture',
+          if (scope == DocumentTransferScope.cohort) ...{
+            'parentId': '22222222-2222-4222-8222-222222222222',
+            'folderName': 'Imported files',
+          } else
+            'nodeId': '22222222-2222-4222-8222-222222222222',
+        },
+      }),
+    );
+  }
+
+  Future<ImportPreparedTree> prepareFiles(
+    DocumentImportKind kind, {
+    required int bytes,
+    required int entries,
+    DocumentTransferScope scope = DocumentTransferScope.cohort,
+  }) async {
+    final root = transaction;
+    final address = cancellation;
+    final notebooks = p.join(temporary.path, 'notebooks');
+    return Isolate.run(() async {
+      CoreImportStore.runTransfer({
+        'op': 'capture',
+        'scope': scope.name,
+        'root': p.dirname(root),
+        'notebooksRoot': notebooks,
+        'id': _id,
+        'sourceName': 'Raw fixture',
+        'bytes': bytes,
+        'entries': entries,
+      });
+      return NotebookImportArchive.prepare(
+        transactionRoot: root,
+        kind: kind,
+        scope: scope,
+        format: ImportPreparationFormat.files,
+        cancellationAddress: address,
+      );
+    });
+  }
+
+  test(
+    'files ZIP keeps its sole wrapper and every hidden opaque byte',
+    () async {
+      await allocateFiles(DocumentImportKind.zip);
+      final zip = _zip([
+        _Entry(
+          'Wrapper/note.md',
+          bytes: utf8.encode('![picture](assets/图.png)\n'),
+        ),
+        const _Entry('Wrapper/assets/图.png', bytes: [0, 255, 128, 3]),
+        const _Entry('Wrapper/.hidden', bytes: [0, 42, 255]),
+        const _Entry('Wrapper/empty/'),
+      ]);
+      await File(p.join(transaction, 'input.zip')).writeAsBytes(zip.bytes);
+      final prepared = await prepareFiles(
+        DocumentImportKind.zip,
+        bytes: zip.bytes.length,
+        entries: 1,
+      );
+      expect(prepared.treeRelative, 'unpacked');
+      expect(prepared.entries, 6);
+      expect(
+        await File(p.join(transaction, 'unpacked/Wrapper/.hidden'))
+            .readAsBytes(),
+        [0, 42, 255],
+      );
+      expect(
+        await File(p.join(transaction, 'unpacked/Wrapper/assets/图.png'))
+            .readAsBytes(),
+        [0, 255, 128, 3],
+      );
+      final inventory = await File(p.join(transaction, 'inventory.jsonl'))
+          .readAsBytes();
+      expect(
+        prepared.inventoryHash,
+        crypto.sha256.convert(inventory).toString(),
+      );
+      expect(
+        (jsonDecode(const LineSplitter().convert(utf8.decode(inventory)).first)
+            as Map)['path'],
+        'Wrapper',
+      );
+      expect(
+        await File(p.join(transaction, 'prepared.json')).exists(),
+        isFalse,
+      );
+    },
+  );
+
+  test('files mode accepts empty standalone opaque input without notebook metadata', () async {
+    await allocateFiles(DocumentImportKind.file);
+    await Directory(p.join(transaction, 'unpacked')).create();
+    await File(p.join(transaction, 'unpacked/empty.bin')).writeAsBytes([]);
+    await File(
+      p.join(transaction, 'accepted.jsonl'),
+    ).writeAsString('${jsonEncode({'path': 'empty.bin', 'type': 'file'})}\n');
+    final prepared = await prepareFiles(
+      DocumentImportKind.file,
+      bytes: 0,
+      entries: 1,
+    );
+    expect(prepared.treeRelative, 'unpacked');
+    expect(prepared.bytes, 0);
+    expect(prepared.entries, 1);
+    expect(
+      jsonDecode(
+        await File(p.join(transaction, 'inventory.jsonl')).readAsString(),
+      )['sha256'],
+      crypto.sha256.convert(const <int>[]).toString(),
+    );
+  });
+
+  test('preparation scope cannot address another private namespace', () async {
+    await allocateFiles(DocumentImportKind.zip);
+    final root = transaction;
+    final address = cancellation;
+    await expectLater(
+      Isolate.run(
+        () => NotebookImportArchive.prepare(
+          transactionRoot: root,
+          kind: DocumentImportKind.zip,
+          scope: DocumentTransferScope.resource,
+          format: ImportPreparationFormat.files,
+          cancellationAddress: address,
+        ),
+      ),
+      throwsA(isA<NotebookImportArchiveException>()),
+    );
+    expect(
+      await File(p.join(transaction, 'inventory.jsonl')).exists(),
+      isFalse,
+    );
   });
 
   test('stored root preserves opaque bytes and inventories every physical directory', () async {

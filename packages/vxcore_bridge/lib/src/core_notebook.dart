@@ -9,8 +9,9 @@ import 'package:ffi/ffi.dart';
 
 import 'generated/core_json_keys.dart';
 import 'generated/vxcore_host_bindings.dart' as native;
+import 'transfer_models.dart';
 
-abstract interface class NotebookCore {
+abstract interface class NotebookCore implements ResourceCore {
   Future<CoreNote> read();
   Future<CoreWriteResult> write(
     String text, {
@@ -160,6 +161,8 @@ abstract interface class CatalogCore {
     required CoreExportFormat format,
   });
   void cancelExport();
+  Future<CoreCohortOutcome> applyCohort(String transactionRoot);
+  Future<CoreCohortOutcome> recoverCohort(String transactionRoot);
   Future<void> close();
 }
 
@@ -530,7 +533,164 @@ CoreTags _tagsResult(native.VxmEvent event) {
   return CoreTags(notebookId: notebookId, tags: tags, assigned: assignments);
 }
 
-final class CoreNotebook implements NotebookCore, CatalogCore {
+Never _badTransfer() => throw const CoreException(
+  native.VxCoreError.VXCORE_ERR_JSON_PARSE,
+  'Malformed native transfer result',
+);
+
+Map<String, dynamic> _transferObject(
+  native.VxmEvent event, {
+  bool listing = false,
+}) {
+  if (!listing && event.size > 16384) _badTransfer();
+  return _queryObject(event);
+}
+
+void _transferKeys(
+  Map<String, dynamic> value,
+  Set<String> required, [
+  Set<String> optional = const {},
+]) {
+  if (!required.every(value.containsKey) ||
+      value.keys.any(
+        (key) => !required.contains(key) && !optional.contains(key),
+      )) {
+    _badTransfer();
+  }
+}
+
+final _transferNameUnsafe = RegExp(r'[\x00-\x1f\x7f-\x9f<>:"/\\|?*]');
+final _transferPathUnsafe = RegExp(r'[\x00-\x1f\x7f-\x9f]');
+
+String _transferName(Object? value) {
+  final name = _queryString(value, maximum: 255);
+  if (name == '.' ||
+      name == '..' ||
+      name.endsWith('.') ||
+      name.endsWith(' ') ||
+      _transferNameUnsafe.hasMatch(name)) {
+    _badTransfer();
+  }
+  return name;
+}
+
+String _transferRelative(Object? value) {
+  final path = _queryString(value, maximum: 16384);
+  if (path.startsWith('/') ||
+      path.contains('\\') ||
+      path.contains(':') ||
+      _transferPathUnsafe.hasMatch(path) ||
+      path
+          .split('/')
+          .any((part) => part.isEmpty || part == '.' || part == '..')) {
+    _badTransfer();
+  }
+  return path;
+}
+
+int _transferBytes(Object? value, {int maximum = _maxInteger}) {
+  if (value is! int || value < 0 || value > maximum) _badTransfer();
+  return value;
+}
+
+CoreCohortBuildResult _cohortBuildResult(native.VxmEvent event) {
+  final json = _transferObject(event);
+  _transferKeys(json, const {'privateNotebookId', 'cohortId'});
+  return CoreCohortBuildResult(
+    privateNotebookId: _queryString(json['privateNotebookId'], maximum: 127),
+    cohortId: _queryString(json['cohortId'], maximum: 127),
+  );
+}
+
+CoreCohortOutcome _cohortOutcome(native.VxmEvent event) {
+  final json = _transferObject(event);
+  _transferKeys(json, const {'status', 'cohortId'}, const {'path'});
+  final status = switch (json['status']) {
+    'committed' => CoreCohortStatus.committed,
+    'absent' => CoreCohortStatus.absent,
+    _ => _badTransfer(),
+  };
+  if (status == CoreCohortStatus.absent && json['path'] != null) _badTransfer();
+  return CoreCohortOutcome(
+    status: status,
+    cohortId: _queryString(json['cohortId'], maximum: 127),
+    path: json['path'] == null ? null : _transferRelative(json['path']),
+  );
+}
+
+CoreResourceListing _resourceListing(native.VxmEvent event) {
+  final json = _transferObject(event, listing: true);
+  _transferKeys(json, const {'notebookId', 'nodeId', 'notePath', 'entries'});
+  final raw = json['entries'];
+  if (raw is! List || raw.length > 10000) _badTransfer();
+  final names = <String>{};
+  final entries = <CoreResourceEntry>[];
+  for (final item in raw) {
+    if (item is! Map<String, dynamic>) _badTransfer();
+    _transferKeys(item, const {
+      'name',
+      'tracked',
+      'exists',
+      'bytes',
+      'relativeUrl',
+    });
+    final name = _transferName(item['name']);
+    final tracked = item['tracked'];
+    final exists = item['exists'];
+    final bytes = _transferBytes(item['bytes']);
+    if (!names.add(name) ||
+        tracked is! bool ||
+        exists is! bool ||
+        (!exists && (!tracked || bytes != 0)))
+      _badTransfer();
+    entries.add(
+      CoreResourceEntry(
+        name: name,
+        tracked: tracked,
+        exists: exists,
+        bytes: bytes,
+        relativeUrl: _transferRelative(item['relativeUrl']),
+      ),
+    );
+  }
+  return CoreResourceListing(
+    notebookId: _queryString(json['notebookId'], maximum: 127),
+    nodeId: _queryString(json['nodeId'], maximum: 127),
+    notePath: _transferRelative(json['notePath']),
+    entries: entries,
+  );
+}
+
+CoreResourceResult _resourceResult(native.VxmEvent event) {
+  final json = _transferObject(event);
+  _transferKeys(json, const {'committed'}, const {'name', 'relativeUrl'});
+  final committed = json['committed'];
+  if (committed is! bool || (!committed && json['relativeUrl'] != null))
+    _badTransfer();
+  return CoreResourceResult(
+    committed: committed,
+    name: json['name'] == null ? null : _transferName(json['name']),
+    relativeUrl: json['relativeUrl'] == null
+        ? null
+        : _transferRelative(json['relativeUrl']),
+  );
+}
+
+CoreResourceExport _resourceExport(native.VxmEvent event) {
+  final json = _transferObject(event);
+  _transferKeys(json, const {'name', 'path', 'bytes', 'sha256'});
+  final hash = _queryString(json['sha256'], maximum: 64);
+  if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(hash)) _badTransfer();
+  return CoreResourceExport(
+    name: _transferName(json['name']),
+    path: _queryString(json['path']),
+    bytes: _transferBytes(json['bytes'], maximum: 1024 * 1024 * 1024),
+    sha256: hash,
+  );
+}
+
+final class CoreNotebook
+    implements NotebookCore, CatalogCore, CohortBuilderCore {
   CoreNotebook._(this._mode) : _token = _nextToken++ {
     _listener = NativeCallable<Void Function(Int64)>.listener(_onNotify);
   }
@@ -545,6 +705,10 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
   int? _searchRequest;
   int? _exportRequest;
   final _pending = <int, _Pending>{};
+  int? _resourceReadRequest;
+  int? _buildRequest;
+  String? _resourceNotebookId;
+  String? _resourceNodeId;
   final _closedEvent = Completer<int>();
   Future<void>? _closing;
 
@@ -626,6 +790,34 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     nodeId: nodeId,
     mode: native.VXM_MODE_NOTE,
   );
+
+  /// Opens a pinned ordinary node without reading or decrypting its body.
+  static Future<CoreNotebook> openResources({
+    required String appDataPath,
+    required String localDataPath,
+    required String notebookPath,
+    required String notebookId,
+    required String nodeId,
+  }) => _open(
+    appDataPath: appDataPath,
+    localDataPath: localDataPath,
+    notebookPath: notebookPath,
+    expectedNotebookId: notebookId,
+    nodeId: nodeId,
+    mode: native.VXM_MODE_RESOURCES,
+  );
+
+  /// Only the transaction root crosses the ABI; native derives and validates
+  /// workbook/engine namespaces before any ID-generating core constructor.
+  static Future<CoreNotebook> createCohortBuilder(String transactionRoot) =>
+      _open(
+        appDataPath: '',
+        localDataPath: '',
+        notebookPath: '',
+        transactionRoot: transactionRoot,
+        mode: native.VXM_MODE_COHORT_BUILDER,
+      );
+
   static Future<CoreNotebook> _open({
     required String appDataPath,
     required String localDataPath,
@@ -636,6 +828,7 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     String? notebookName,
     String? expectedNotebookId,
     String? nodeId,
+    String? transactionRoot,
   }) async {
     if (_nextToken > _maxInteger) {
       throw const CoreException(
@@ -644,19 +837,25 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
       );
     }
     final host = CoreNotebook._(mode);
-    final pending = _Pending(
-      mode == native.VXM_MODE_CATALOG
-          ? native.VXM_EVENT_CATALOG_OPEN
-          : native.VXM_EVENT_OPEN,
-      0,
-    );
+    final pending = _Pending(switch (mode) {
+      native.VXM_MODE_CATALOG => native.VXM_EVENT_CATALOG_OPEN,
+      native.VXM_MODE_COHORT_BUILDER => native.VXM_EVENT_COHORT_OPEN,
+      native.VXM_MODE_RESOURCES => native.VXM_EVENT_RESOURCE_OPEN,
+      _ => native.VXM_EVENT_OPEN,
+    }, 0);
     try {
       using((arena) {
         final options = arena<native.VxmOpenOptions>();
         options.ref
-          ..app_data_path = _option(arena, appDataPath)
-          ..local_data_path = _option(arena, localDataPath)
-          ..notebook_path = _option(arena, notebookPath)
+          ..app_data_path = mode == native.VXM_MODE_COHORT_BUILDER
+              ? nullptr
+              : _option(arena, appDataPath)
+          ..local_data_path = mode == native.VXM_MODE_COHORT_BUILDER
+              ? nullptr
+              : _option(arena, localDataPath)
+          ..notebook_path = mode == native.VXM_MODE_COHORT_BUILDER
+              ? nullptr
+              : _option(arena, notebookPath)
           ..notebook_name = notebookName == null
               ? nullptr
               : _option(arena, notebookName)
@@ -666,7 +865,10 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
           ..node_id = nodeId == null ? nullptr : _option(arena, nodeId)
           ..mode = mode
           ..create_notebook = createNotebook ? 1 : 0
-          ..export_only = exportOnly ? 1 : 0;
+          ..export_only = exportOnly ? 1 : 0
+          ..transaction_root = transactionRoot == null
+              ? nullptr
+              : _option(arena, transactionRoot);
         final out = arena<Pointer<native.VxmHost>>();
         final code = native.vxm_host_create(
           options,
@@ -684,6 +886,10 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
       });
       final initial = await pending.completer.future;
       if (initial is CoreDirectory) host._initialDirectory = initial;
+      if (mode == native.VXM_MODE_NOTE || mode == native.VXM_MODE_RESOURCES) {
+        host._resourceNotebookId = expectedNotebookId;
+        host._resourceNodeId = nodeId;
+      }
       return host;
     } catch (error, stack) {
       // Even initialization errors retain the listener until owner teardown and
@@ -1046,6 +1252,165 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
     }
   }
 
+  void _requireResources() {
+    if (_mode != native.VXM_MODE_NOTE && _mode != native.VXM_MODE_RESOURCES) {
+      throw const CoreException(_unusable, 'Resources require a note owner');
+    }
+  }
+
+  Future<T> _transfer<T>(
+    Map<String, Object> input, {
+    required bool cohort,
+    required Object Function(native.VxmEvent) decode,
+    bool readOnly = false,
+    bool building = false,
+  }) async {
+    final handle = _usableHandle();
+    if ((readOnly && _resourceReadRequest != null) ||
+        (building && _buildRequest != null)) {
+      throw const CoreException(
+        _unusable,
+        'A transfer read is already running',
+      );
+    }
+    final id = _nextRequest++;
+    final pending = _Pending(
+      cohort ? native.VXM_EVENT_COHORT : native.VXM_EVENT_RESOURCE,
+      0,
+      decode: decode,
+    );
+    final code = using((arena) {
+      final payload = _option(arena, jsonEncode(input));
+      return cohort
+          ? native.vxm_host_cohort(handle, id, _generation, payload)
+          : native.vxm_host_resource(handle, id, _generation, payload);
+    });
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native transfer admission failed');
+    }
+    _pending[id] = pending;
+    if (readOnly) _resourceReadRequest = id;
+    if (building) _buildRequest = id;
+    try {
+      return await pending.completer.future as T;
+    } finally {
+      if (readOnly && _resourceReadRequest == id) _resourceReadRequest = null;
+      if (building && _buildRequest == id) _buildRequest = null;
+    }
+  }
+
+  @override
+  Future<CoreCohortBuildResult> build() async {
+    _requireMode(native.VXM_MODE_COHORT_BUILDER);
+    return _transfer(
+      {'op': 'build'},
+      cohort: true,
+      decode: _cohortBuildResult,
+      building: true,
+    );
+  }
+
+  @override
+  Future<CoreCohortOutcome> applyCohort(String transactionRoot) async {
+    _requireMode(native.VXM_MODE_CATALOG);
+    _queryInput(transactionRoot);
+    return _transfer(
+      {'op': 'apply', 'transactionRoot': transactionRoot},
+      cohort: true,
+      decode: _cohortOutcome,
+    );
+  }
+
+  @override
+  Future<CoreCohortOutcome> recoverCohort(String transactionRoot) async {
+    _requireMode(native.VXM_MODE_CATALOG);
+    _queryInput(transactionRoot);
+    return _transfer(
+      {'op': 'recover', 'transactionRoot': transactionRoot},
+      cohort: true,
+      decode: _cohortOutcome,
+    );
+  }
+
+  @override
+  Future<CoreResourceListing> listResources() async {
+    _requireResources();
+    final result = await _transfer<CoreResourceListing>(
+      {'op': 'list'},
+      cohort: false,
+      decode: _resourceListing,
+      readOnly: true,
+    );
+    if (result.notebookId != _resourceNotebookId ||
+        result.nodeId != _resourceNodeId) {
+      throw const CoreException(
+        _unusable,
+        'Native resource identity correlation failed',
+      );
+    }
+    return result;
+  }
+
+  @override
+  Future<CoreResourceResult> applyResource(String transactionRoot) async {
+    _requireResources();
+    _queryInput(transactionRoot);
+    return _transfer(
+      {'op': 'apply', 'transactionRoot': transactionRoot},
+      cohort: false,
+      decode: _resourceResult,
+    );
+  }
+
+  @override
+  Future<CoreResourceResult> recoverResource(String transactionRoot) async {
+    _requireResources();
+    _queryInput(transactionRoot);
+    return _transfer(
+      {'op': 'recover', 'transactionRoot': transactionRoot},
+      cohort: false,
+      decode: _resourceResult,
+    );
+  }
+
+  @override
+  Future<CoreResourceExport> exportResource(
+    String name,
+    String transactionRoot,
+  ) async {
+    _requireResources();
+    _queryInput(name, maximum: 255);
+    _queryInput(transactionRoot);
+    final result = await _transfer<CoreResourceExport>(
+      {'op': 'export', 'name': name, 'transactionRoot': transactionRoot},
+      cohort: false,
+      decode: _resourceExport,
+      readOnly: true,
+    );
+    if (result.name != name) {
+      throw const CoreException(
+        _unusable,
+        'Native resource export name changed',
+      );
+    }
+    return result;
+  }
+
+  void _cancelTransfer(int? id) {
+    final handle = _handle;
+    if (id == null || handle == null) return;
+    final code = native.vxm_host_cancel(handle, id, _generation);
+    if (code != native.VxCoreError.VXCORE_OK && code != _unusable) {
+      throw CoreException(code, 'Native transfer cancellation failed');
+    }
+  }
+
+  @override
+  void cancelResourceRead() => _cancelTransfer(_resourceReadRequest);
+
+  @override
+  void cancel() => _cancelTransfer(_buildRequest);
+
   void _onNotify(int token) {
     final handle = _eventHandle;
     if (token != _token || handle == null) return;
@@ -1085,8 +1450,20 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
               event.node_id.cast<Utf8>().toDartString(),
             );
           } else if (event.kind == native.VXM_EVENT_QUERY ||
-              event.kind == native.VXM_EVENT_EXPORT) {
+              event.kind == native.VXM_EVENT_EXPORT ||
+              event.kind == native.VXM_EVENT_COHORT ||
+              event.kind == native.VXM_EVENT_RESOURCE) {
             pending.completer.complete(pending.decode!(event));
+          } else if (event.kind == native.VXM_EVENT_COHORT_OPEN ||
+              event.kind == native.VXM_EVENT_RESOURCE_OPEN) {
+            if (event.size != 0 ||
+                event.data != nullptr ||
+                event.notebook_id.cast<Utf8>().toDartString().isEmpty ||
+                (event.kind == native.VXM_EVENT_RESOURCE_OPEN &&
+                    event.node_id.cast<Utf8>().toDartString().isEmpty)) {
+              _badTransfer();
+            }
+            pending.completer.complete(true);
           } else if (event.kind == native.VXM_EVENT_TAG) {
             pending.completer.complete(true);
           } else if (event.kind == native.VXM_EVENT_LIST ||

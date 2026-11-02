@@ -30,27 +30,36 @@ class _Provider implements DocumentTransferPlatform {
   @override
   Future<DocumentImportResult> pickImport({
     required String operationId,
+    required DocumentTransferScope scope,
     required DocumentImportKind kind,
   }) async {
+    expect(scope, DocumentTransferScope.notebook);
     picks++;
     if (!entered.isCompleted) entered.complete();
     return (outcome ?? copy)(operationId, kind);
   }
 
   @override
-  Future<void> cancelImport(String operationId) async {
+  Future<void> cancelImport(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {
+    expect(scope, DocumentTransferScope.notebook);
     cancellations++;
     // An advisory acknowledgement deliberately does not settle the copy lease.
     await cancellationReply?.future;
   }
 
   @override
-  Future<void> cancel(String operationId) async =>
-      throw StateError('Export is not part of this provider fixture.');
+  Future<void> cancel(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async => throw StateError('Export is not part of this provider fixture.');
 
   @override
   Future<DocumentExportResult> save({
     required String operationId,
+    required DocumentTransferScope scope,
     required String path,
     required String suggestedName,
   }) async => throw StateError('Export is not part of this provider fixture.');

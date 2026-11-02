@@ -6,6 +6,7 @@
 #include <array>
 #include <atomic>
 #include <cerrno>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
@@ -34,7 +35,10 @@
 #include <sodium.h>
 #include <utf8proc.h>
 
-struct VxmImportCancel { std::atomic<bool> requested{false}; };
+struct VxmImportCancel {
+  std::atomic<bool> requested{false};
+  const std::atomic<bool> *borrowed = nullptr;
+};
 static_assert(std::atomic<bool>::is_always_lock_free, "Cancellation must be lock-free");
 
 namespace {
@@ -43,12 +47,13 @@ using Json = nlohmann::json;
 constexpr size_t kRequest = 16384, kResponse = 8 * 1024 * 1024;
 constexpr size_t kEntries = 100000, kChunk = 256 * 1024, kLine = 8192;
 constexpr uint64_t kFile = 256ULL * 1024 * 1024, kTree = 2ULL * 1024 * 1024 * 1024;
-struct Failure { int32_t code; };
+using Failure = vxm_import::StorageFailure;
 void require(bool condition, int32_t code = VXCORE_ERR_INVALID_PARAM) {
   if (!condition) throw Failure{code};
 }
 void cancelled(const VxmImportCancel *cancel) {
-  require(!cancel || !cancel->requested.load(std::memory_order_relaxed), VXCORE_ERR_CANCELLED);
+  require(!cancel || (!cancel->requested.load(std::memory_order_relaxed) &&
+          (!cancel->borrowed || !cancel->borrowed->load(std::memory_order_relaxed))), VXCORE_ERR_CANCELLED);
 }
 bool hex(const std::string &text, size_t length) {
   return text.size() == length && std::all_of(text.begin(), text.end(), [](char c) {
@@ -343,10 +348,11 @@ struct Hash {
     return hex_digest;
   }
 };
-std::string hash_file(const fs::path &path, uint64_t expected, const VxmImportCancel *cancel, bool flush) {
+std::string hash_file(const fs::path &path, uint64_t expected, const VxmImportCancel *cancel, bool flush,
+                      uint64_t limit = kFile) {
   File file(path, false, false, flush);
   const auto before = file.identity();
-  require(!before.directory && before.size == expected && expected <= kFile, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  require(!before.directory && before.size == expected && expected <= limit, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
   Hash hash;
   std::array<uint8_t, kChunk> buffer;
   uint64_t total = 0;
@@ -362,17 +368,18 @@ std::string hash_file(const fs::path &path, uint64_t expected, const VxmImportCa
   if (flush) { cancelled(cancel); file.flush(); }
   return hash.finish();
 }
-void durable_json(const fs::path &directory, const std::string &name, const Json &value) {
+void durable_json(const fs::path &directory, const std::string &name, const Json &value,
+                  size_t limit = kRequest) {
   const auto destination = directory / name;
   if (present(destination)) {
-    require(read_json(destination) == value, VXCORE_ERR_INVALID_STATE);
+    require(read_json(destination, limit) == value, VXCORE_ERR_INVALID_STATE);
     return;
   }
   const auto temporary = directory / (name + ".tmp");
   const auto encoded = value.dump();
-  require(encoded.size() <= kRequest, VXCORE_ERR_INVALID_PARAM);
+  require(encoded.size() <= limit, VXCORE_ERR_INVALID_PARAM);
   if (present(temporary)) {
-    require(read_json(temporary) == value, VXCORE_ERR_INVALID_STATE);
+    require(read_json(temporary, limit) == value, VXCORE_ERR_INVALID_STATE);
     File file(temporary, false, false, true);
     file.flush();
   } else {
@@ -381,6 +388,27 @@ void durable_json(const fs::path &directory, const std::string &name, const Json
     file.flush();
   }
   rename_new(temporary, destination);
+}
+void replace_json(const fs::path &directory, const std::string &name, const Json &expected, const Json &value) {
+  const auto target = directory / name;
+  require(read_json(target) == expected, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  const auto before = identity(target);
+  const auto temporary = directory / (name + ".next");
+  const auto encoded = value.dump();
+  require(encoded.size() <= kRequest, VXCORE_ERR_INVALID_PARAM);
+  if (present(temporary)) {
+    require(read_json(temporary) == value, VXCORE_ERR_INVALID_STATE);
+    File output(temporary, false, false, true); output.flush();
+  } else {
+    File output(temporary, true); output.write(encoded); output.flush();
+  }
+  require(identity(target) == before, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+#if defined(_WIN32)
+  require(MoveFileExW(temporary.c_str(), target.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH), VXCORE_ERR_IO);
+#else
+  require(::rename(temporary.c_str(), target.c_str()) == 0, VXCORE_ERR_IO);
+#endif
+  directory_flush(directory);
 }
 
 // Track every physical spelling, including prefixes, in both full-fold forms.
@@ -538,7 +566,7 @@ void exact_child(const fs::path &parent, const std::string &name, const VxmImpor
   throw Failure{VXCORE_ERR_FILE_CHANGED_OUTSIDE};
 }
 vxm_import::Inspection inspect_metadata(const fs::path &root, bool incoming, const VxmImportCancel *cancel,
-                                       const InventoryResult *physical = nullptr) {
+                                       const InventoryResult *physical = nullptr, bool pending_import = false) {
   absolute(root.u8string());
   require(identity(root).directory, VXCORE_ERR_UNSUPPORTED);
   confined(root, "vx_notebook/config.json");
@@ -604,6 +632,7 @@ vxm_import::Inspection inspect_metadata(const fs::path &root, bool incoming, con
     const auto path = root / relative_runtime;
     if (!present(path)) continue;
     require(identity(path).directory, VXCORE_ERR_UNSUPPORTED);
+    if (pending_import && std::string(runtime) == "vx_import") continue;
     for (const auto &entry : fs::directory_iterator(path)) {
       require(std::string(runtime) == "vx_transfer" && entry.path().filename() == "encryption" &&
               identity(entry.path()).directory && fs::is_empty(entry.path()), VXCORE_ERR_UNSUPPORTED);
@@ -976,22 +1005,125 @@ struct Store {
     return {{"discarded", true}};
   }
 };
-Json check_space(const Store &store, uint64_t required) {
+Json full_identity(const Identity &value) {
+  auto out = value.journal();
+  out["directory"] = value.directory;
+  out["bytes"] = value.size;
+  out["links"] = value.links;
+  out["seconds"] = value.seconds;
+  out["nanos"] = value.nanos;
+  return out;
+}
+Json snapshot_file(const fs::path &path, uint64_t limit, const VxmImportCancel *cancel) {
+  absolute(path.u8string());
+  const auto before = identity(path);
+  require(!before.directory && before.size <= limit, VXCORE_ERR_UNSUPPORTED);
+  auto result = full_identity(before);
+  result["sha256"] = hash_file(path, before.size, cancel, false, limit);
+  require(identity(path) == before, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  return result;
+}
+Json copy_file(const fs::path &source, const fs::path &destination, uint64_t limit,
+               const VxmImportCancel *cancel) {
+  absolute(source.u8string());
+  absolute(destination.u8string());
+  require(!present(destination), VXCORE_ERR_ALREADY_EXISTS);
+  File input(source);
+  const auto before = input.identity();
+  require(!before.directory && before.size <= limit, VXCORE_ERR_UNSUPPORTED);
+  File output(destination, true);
+  Hash hash;
+  std::array<uint8_t, kChunk> buffer;
+  uint64_t total = 0;
+  for (;;) {
+    cancelled(cancel);
+    const auto count = input.read(buffer.data(), buffer.size());
+    if (!count) break;
+    require(count <= before.size - total, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    output.write(std::string_view(reinterpret_cast<const char *>(buffer.data()), count));
+    hash.add(buffer.data(), count);
+    total += count;
+  }
+  require(total == before.size && input.identity() == before && identity(source) == before,
+          VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  output.flush();
+  auto result = full_identity(output.identity());
+  result["sha256"] = hash.finish();
+  directory_flush(destination.parent_path());
+  return result;
+}
+Json snapshot_tree(const fs::path &root, const VxmImportCancel *cancel,
+                   const fs::path *copy_to = nullptr) {
+  absolute(root.u8string());
+  require(identity(root).directory, VXCORE_ERR_UNSUPPORTED);
+  if (copy_to) {
+    absolute(copy_to->u8string());
+    require(!present(*copy_to) && fs::create_directory(*copy_to), VXCORE_ERR_ALREADY_EXISTS);
+  }
+  std::map<std::string, bool> paths;
+  Names names;
+  uint64_t bytes = 0;
+  size_t path_bytes = 0;
+  for (fs::recursive_directory_iterator it(root), end; it != end; ++it) {
+    cancelled(cancel);
+    const auto path = it->path().lexically_relative(root).generic_u8string();
+    names.add(path);
+    confined(root, path);
+    const auto current = identity(it->path());
+    require(paths.size() < 3 * kEntries && path.size() <= 32 * 1024 * 1024 - path_bytes,
+            VXCORE_ERR_UNSUPPORTED);
+    path_bytes += path.size();
+    paths.emplace(path, current.directory);
+  }
+  Hash digest;
+  for (const auto &entry : paths) {
+    cancelled(cancel);
+    const auto path = root / fs::u8path(entry.first);
+    Json row{{"path", entry.first}, {"type", entry.second ? "directory" : "file"},
+             {"size", 0}, {"sha256", ""}};
+    if (entry.second) {
+      require(identity(path).directory, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      if (copy_to) require(fs::create_directory(*copy_to / fs::u8path(entry.first)), VXCORE_ERR_IO);
+    } else {
+      const auto item = copy_to ? copy_file(path, *copy_to / fs::u8path(entry.first), kFile, cancel) :
+                                 snapshot_file(path, kFile, cancel);
+      const auto size = number(item.at("bytes"), kFile);
+      require(size <= kTree + 128ULL * 1024 * 1024 - bytes, VXCORE_ERR_UNSUPPORTED);
+      bytes += size;
+      row["size"] = size;
+      row["sha256"] = item.at("sha256");
+    }
+    const auto encoded = row.dump() + "\n";
+    digest.add(reinterpret_cast<const uint8_t *>(encoded.data()), encoded.size());
+  }
+  // Detect additions/removals during the snapshot, including empty directories.
+  size_t seen = 0;
+  for (fs::recursive_directory_iterator it(root), end; it != end; ++it) {
+    cancelled(cancel);
+    const auto key = it->path().lexically_relative(root).generic_u8string();
+    const auto found = paths.find(key);
+    require(found != paths.end() && identity(it->path()).directory == found->second,
+            VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    ++seen;
+  }
+  require(seen == paths.size(), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  if (copy_to) directory_flush(*copy_to);
+  return {{"bytes", bytes}, {"entries", paths.size()}, {"sha256", digest.finish()}};
+}
+Json quota(const fs::path &base, uint64_t required, const VxmImportCancel *cancel) {
   constexpr uint64_t maximum = 4ULL * 1024 * 1024 * 1024;
   constexpr uint64_t headroom = 64ULL * 1024 * 1024;
-  store.owned();
-  const auto current = store.state(false);
-  require(current.at("phase") == "staged", VXCORE_ERR_INVALID_STATE);
+  absolute(base.u8string());
   uint64_t bytes = 0;
   size_t entries = 0;
-  for (const auto &root : {store.imports, store.imports.parent_path() / "exports"}) {
+  for (const auto *group : {"imports", "exports", "cohorts", "resources"}) {
+    const auto root = base / group;
     no_link(root);
     if (!present(root)) continue;
     require(identity(root).directory, VXCORE_ERR_UNSUPPORTED);
     for (fs::recursive_directory_iterator it(root), end; it != end; ++it) {
-      cancelled(store.cancel);
-      // Staging prefixes add two components beyond a portable notebook path.
-      require(it.depth() <= 36 && ++entries <= 3 * kEntries, VXCORE_ERR_UNSUPPORTED);
+      cancelled(cancel);
+      require(it.depth() <= 40 && ++entries <= 12 * kEntries, VXCORE_ERR_UNSUPPORTED);
       no_link(it->path());
       const auto item = identity(it->path());
       if (!item.directory) {
@@ -1000,10 +1132,500 @@ Json check_space(const Store &store, uint64_t required) {
       }
     }
   }
+  const auto cohorts = base / "cohorts";
+  if (present(cohorts)) for (const auto &entry : fs::directory_iterator(cohorts)) {
+    cancelled(cancel);
+    if (!identity(entry.path()).directory) continue;
+    const auto intent_path = entry.path() / "intent.json";
+    if (!present(intent_path)) continue;
+    const auto intent = read_json(intent_path);
+    keys(intent, {"version", "id", "scope", "target", "cohortId", "preparedHash", "charge", "generation",
+                  "attemptIdentity", "contentIdentity", "metadataIdentity", "movedRelative"});
+    const auto id = entry.path().filename().u8string();
+    require(hex(id, 32) && intent.at("id") == id && intent.at("scope") == "cohort" &&
+            number(intent.at("version"), 1) == 1, VXCORE_ERR_JSON_PARSE);
+    const auto &target = intent.at("target");
+    keys(target, {"version", "id", "notebookId", "parentId", "notebookRelative", "folderName"});
+    require(target.at("id") == id && number(target.at("version"), 1) == 1, VXCORE_ERR_JSON_PARSE);
+    const auto notebook_name = text(target.at("notebookRelative"), 255);
+    basename(notebook_name);
+    const auto notebook = base / "notebooks" / fs::u8path(notebook_name);
+    const auto moved = "vx_notebook/vx_import/vnote-" + id;
+    require(intent.at("movedRelative") == moved && hex(text(intent.at("preparedHash"), 64), 64),
+            VXCORE_ERR_JSON_PARSE);
+    const auto charge = number(intent.at("charge"), maximum);
+    require(number(intent.at("generation"), 10000) != 0, VXCORE_ERR_JSON_PARSE);
+    for (const auto *key : {"attemptIdentity", "contentIdentity", "metadataIdentity"}) {
+      keys(intent.at(key), {"device", "low", "high"});
+      for (const auto *part : {"device", "low", "high"}) number(intent.at(key).at(part), UINT64_MAX);
+    }
+    if (present(entry.path() / "committed.json")) {
+      const auto receipt = read_json(entry.path() / "committed.json");
+      require(receipt == read_json(entry.path() / "outcome.json") && receipt.at("status") == "committed" &&
+              receipt.at("id") == id && receipt.at("cohortId") == intent.at("cohortId") &&
+              receipt.at("preparedHash") == intent.at("preparedHash"), VXCORE_ERR_INVALID_STATE);
+      continue;
+    }
+    const auto rollback_path = entry.path() / ("rollback-" + std::to_string(number(intent.at("generation"), 10000)) + ".json");
+    if (present(rollback_path)) {
+      const auto rollback = read_json(rollback_path);
+      keys(rollback, {"version", "id", "scope", "intent", "status"});
+      require(rollback.at("version") == 1 && rollback.at("id") == id && rollback.at("scope") == "cohort" &&
+              rollback.at("intent") == intent && rollback.at("status") == "absent", VXCORE_ERR_INVALID_STATE);
+      confined(notebook, moved);
+      require(!present(notebook / moved), VXCORE_ERR_INVALID_STATE);
+      continue; // Owner proved rollback; retained/rebuilt private bytes were scanned.
+    }
+    const auto attempt = entry.path() / "attempt";
+    if (present(attempt)) {
+      require(identity(attempt).matches(intent.at("attemptIdentity")) &&
+              identity(attempt / "content").matches(intent.at("contentIdentity")) &&
+              identity(attempt / "metadata").matches(intent.at("metadataIdentity")), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      continue; // This complete private copy has already been counted by the scan.
+    }
+    absolute(notebook.u8string());
+    require(read_json(notebook / "vx_notebook/config.json", kResponse).at("id") == target.at("notebookId"),
+            VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    confined(notebook, moved);
+    if (present(notebook / moved))
+      require(identity(notebook / moved).matches(intent.at("attemptIdentity")), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    // Missing wrapper is NOT rollback/commit proof: children may be in live paths.
+    require(charge <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
+    bytes += charge;
+  }
   require(required <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
-  const auto available = fs::space(store.imports).available;
+  const auto available = fs::space(base).available;
   require(required <= UINT64_MAX - headroom && available >= required + headroom, VXCORE_ERR_IO);
-  return {{"availableBytes", available}};
+  return {{"availableBytes", available}, {"stagedBytes", bytes}, {"remainingBytes", maximum - bytes}};
+}
+Json check_space(const Store &store, uint64_t required) {
+  return quota(store.imports.parent_path(), required, store.cancel);
+}
+struct TransferStore {
+  fs::path root, notebooks, transaction;
+  std::string id, scope;
+  const VxmImportCancel *cancel;
+  TransferStore(const Json &request, const VxmImportCancel *token) : cancel(token) {
+    scope = text(request.at("scope"));
+    require(scope == "cohort" || scope == "resource");
+    root = absolute(text(request.at("root")));
+    notebooks = absolute(text(request.at("notebooksRoot")));
+    id = text(request.at("id"), 32);
+    require(hex(id, 32) && root.filename() == (scope == "cohort" ? "cohorts" : "resources") &&
+            notebooks.filename() == "notebooks" && root.parent_path() == notebooks.parent_path());
+    require(identity(root).directory && identity(notebooks).directory, VXCORE_ERR_UNSUPPORTED);
+    transaction = root / id;
+  }
+  void owned() const {
+    confined(root, id);
+    require(identity(transaction).directory, VXCORE_ERR_UNSUPPORTED);
+  }
+  void target(const Json &value) const {
+    if (scope == "cohort") keys(value, {"version", "id", "notebookId", "parentId", "notebookRelative", "folderName"});
+    else keys(value, {"version", "id", "notebookId", "nodeId", "notebookRelative"});
+    require(number(value.at("version"), 1) == 1 && value.at("id") == id, VXCORE_ERR_JSON_PARSE);
+    basename(text(value.at("notebookId"), 127));
+    basename(text(value.at(scope == "cohort" ? "parentId" : "nodeId"), 127));
+    basename(text(value.at("notebookRelative"), 255));
+    if (scope == "cohort") basename(text(value.at("folderName"), 255));
+  }
+  Json marker(const char *name) const {
+    auto value = read_json(transaction / (std::string(name) + ".json"));
+    require(number(value.at("version"), 2) == (std::string(name) == "request" ? 2 : 1) &&
+            value.at("id") == id && value.at("scope") == scope, VXCORE_ERR_JSON_PARSE);
+    return value;
+  }
+  Json state() const {
+    owned();
+    const auto request = marker("request");
+    keys(request, {"version", "id", "scope", "kind"});
+    const auto kind = text(request.at("kind"));
+    require(scope == "cohort" ? (kind == "file" || kind == "folder" || kind == "zip") :
+            (kind == "file" || kind == "image"), VXCORE_ERR_JSON_PARSE);
+    const auto pinned = read_json(transaction / "target.json");
+    target(pinned);
+    Json out{{"id", id}, {"scope", scope}, {"kind", kind}, {"phase", "allocated"}, {"target", pinned},
+             {"captured", false}, {"source", false}, {"prepared", false}, {"intent", false},
+             {"committed", false}, {"canApply", false}, {"bytes", 0}, {"entries", 0}};
+    if (present(transaction / "captured.json")) {
+      const auto capture = marker("captured");
+      keys(capture, {"version", "id", "scope", "kind", "sourceName", "bytes", "entries"});
+      require(capture.at("kind") == kind, VXCORE_ERR_JSON_PARSE);
+      text(capture.at("sourceName"), 1024);
+      number(capture.at("bytes"), (kind == "file" || kind == "image") ? kFile : kind == "zip" ? kTree / 2 : kTree);
+      const auto count = number(capture.at("entries"), kEntries);
+      require((kind != "file" && kind != "image") || count == 1, VXCORE_ERR_JSON_PARSE);
+      for (const auto *key : {"sourceName", "bytes", "entries"}) out[key] = capture.at(key);
+      out["captured"] = true;
+      out["phase"] = "captured";
+    }
+    if (present(transaction / "source.json")) {
+      const auto source = marker("source");
+      keys(source, {"version", "id", "scope", "kind", "sourceName", "treeRelative", "inventoryHash", "bytes", "entries"});
+      require(out.at("captured") == true && source.at("kind") == kind && source.at("treeRelative") == "unpacked" &&
+              source.at("sourceName") == out.at("sourceName") && hex(text(source.at("inventoryHash"), 64), 64), VXCORE_ERR_JSON_PARSE);
+      number(source.at("bytes"), scope == "resource" ? kFile : kTree);
+      number(source.at("entries"), kEntries);
+      for (const auto *key : {"bytes", "entries", "inventoryHash", "treeRelative"}) out[key] = source.at(key);
+      out["source"] = true;
+      out["phase"] = "source";
+    }
+    for (const auto *stage : {"build", "prepared"}) if (present(transaction / (std::string(stage) + ".json"))) {
+      require(scope == "cohort" && out.at("source") == true, VXCORE_ERR_INVALID_STATE);
+      const auto value = marker(stage);
+      keys(value, {"version", "id", "scope", "target", "privateNotebookId", "cohortId", "contentRelative", "metadataRelative",
+                   "contentHash", "metadataHash", "idsHash", "assetLayout", "bytes", "entries"});
+      basename(text(value.at("privateNotebookId"), 127));
+      basename(text(value.at("cohortId"), 127));
+      relative(text(value.at("assetLayout"), 1024));
+      for (const auto *key : {"contentHash", "metadataHash", "idsHash"}) require(hex(text(value.at(key), 64), 64), VXCORE_ERR_JSON_PARSE);
+      number(value.at("bytes"), kTree + 128ULL * 1024 * 1024);
+      number(value.at("entries"), 3 * kEntries);
+      const auto folder_name = text(pinned.at("folderName"), 255);
+      require(value.at("contentRelative") == (std::string(stage) == "build" ? "workbook/" + folder_name : "prepared/content") &&
+              value.at("metadataRelative") == (std::string(stage) == "build" ? "workbook/vx_notebook/contents/" + folder_name : "prepared/metadata"),
+              VXCORE_ERR_JSON_PARSE);
+      require(value.at("target") == pinned, VXCORE_ERR_INVALID_STATE);
+      text(value.at("cohortId"), 127);
+      out["cohortId"] = value.at("cohortId");
+      out["phase"] = std::string(stage) == "build" ? "built" : "prepared";
+      if (std::string(stage) == "prepared") { out["prepared"] = true; out["canApply"] = true; }
+    }
+    if (present(transaction / "resource.json")) {
+      require(scope == "resource", VXCORE_ERR_INVALID_STATE);
+      const auto desired = marker("resource");
+      keys(desired, {"version", "id", "scope", "target", "operation", "name", "newName"});
+      require(desired.at("target") == pinned, VXCORE_ERR_INVALID_STATE);
+      for (const auto *key : {"operation", "name", "newName"}) out[key] = desired.at(key);
+      const auto operation = text(desired.at("operation"));
+      basename(text(desired.at("name"), 255));
+      require(operation == "add" || operation == "image" || operation == "track" || operation == "untrack" ||
+              operation == "rename" || operation == "remove" || operation == "export", VXCORE_ERR_JSON_PARSE);
+      if (operation == "rename") basename(text(desired.at("newName"), 255));
+      else require(desired.at("newName").is_null(), VXCORE_ERR_JSON_PARSE);
+      if (operation != "add" && operation != "image" && operation != "export") out["phase"] = "prepared";
+      if (present(transaction / "dispatch.json")) {
+        const auto dispatch = marker("dispatch");
+        keys(dispatch, {"version", "id", "scope", "desired", "notePath", "assetRelative", "old", "source", "wasMember"});
+        require(dispatch.at("desired") == desired && dispatch.at("wasMember").is_boolean(), VXCORE_ERR_INVALID_STATE);
+        relative(text(dispatch.at("notePath"), 1024));
+        relative(text(dispatch.at("assetRelative"), 1024));
+        out["intent"] = true; out["phase"] = "pending";
+      }
+    }
+    if (present(transaction / "intent.json")) {
+      require(scope == "cohort" && out.at("prepared") == true, VXCORE_ERR_INVALID_STATE);
+      const auto intent = marker("intent");
+      keys(intent, {"version", "id", "scope", "target", "cohortId", "preparedHash", "charge", "generation",
+                    "attemptIdentity", "contentIdentity", "metadataIdentity", "movedRelative"});
+      require(hex(text(intent.at("preparedHash"), 64), 64) && intent.at("movedRelative") == "vx_notebook/vx_import/vnote-" + id,
+              VXCORE_ERR_JSON_PARSE);
+      number(intent.at("charge"), 4ULL * 1024 * 1024 * 1024);
+      for (const auto *key : {"attemptIdentity", "contentIdentity", "metadataIdentity"}) {
+        keys(intent.at(key), {"device", "low", "high"});
+        for (const auto *part : {"device", "low", "high"}) number(intent.at(key).at(part), UINT64_MAX);
+      }
+      require(intent.at("target") == pinned && intent.at("cohortId") == out.at("cohortId"), VXCORE_ERR_INVALID_STATE);
+      out["intent"] = true;
+      out["phase"] = "pending";
+      out["canApply"] = false;
+      const auto generation = number(intent.at("generation"), 10000);
+      require(generation != 0, VXCORE_ERR_JSON_PARSE);
+      const auto rollback_path = transaction / ("rollback-" + std::to_string(generation) + ".json");
+      const auto absent_path = transaction / ("absent-" + std::to_string(generation) + ".json");
+      if (present(rollback_path) && present(absent_path)) {
+        const auto rollback = read_json(rollback_path), absent = read_json(absent_path);
+        keys(rollback, {"version", "id", "scope", "intent", "status"});
+        keys(absent, {"version", "id", "scope", "status", "cohortId", "preparedHash"});
+        require(rollback.at("version") == 1 && rollback.at("id") == id && rollback.at("scope") == scope &&
+                absent.at("version") == 1 && absent.at("id") == id && absent.at("scope") == scope &&
+                absent.at("cohortId") == out.at("cohortId"), VXCORE_ERR_JSON_PARSE);
+        require(rollback.at("intent") == intent && rollback.at("status") == "absent" &&
+                absent.at("status") == "absent" && absent.at("preparedHash") == intent.at("preparedHash"), VXCORE_ERR_INVALID_STATE);
+        const auto moved = notebooks / fs::u8path(text(pinned.at("notebookRelative"))) / fs::u8path(text(intent.at("movedRelative")));
+        absolute(moved.u8string());
+        require(!present(moved), VXCORE_ERR_INVALID_STATE);
+        out["canApply"] = true;
+        out["phase"] = "prepared";
+      }
+    }
+    if (present(transaction / "committed.json")) {
+      const auto receipt = marker("committed");
+      require(receipt == marker("outcome"), VXCORE_ERR_INVALID_STATE);
+      require(scope == "cohort" ? (receipt.at("status") == "committed" && receipt.at("cohortId") == out.at("cohortId")) :
+              receipt.at("committed") == true, VXCORE_ERR_INVALID_STATE);
+      out["committed"] = true;
+      out["phase"] = "committed";
+      out["canApply"] = false;
+      for (const auto *key : {"name", "relativeUrl", "path"}) if (receipt.contains(key)) out[key] = receipt.at(key);
+    }
+    if (present(transaction / "ready.json")) {
+      require(scope == "resource", VXCORE_ERR_INVALID_STATE);
+      const auto ready = marker("ready");
+      keys(ready, {"version", "id", "scope", "name", "bytes", "sha256"});
+      basename(text(ready.at("name"), 255));
+      number(ready.at("bytes"), kTree / 2);
+      require(hex(text(ready.at("sha256"), 64), 64), VXCORE_ERR_JSON_PARSE);
+      for (const auto *key : {"name", "bytes", "sha256"}) out[key] = ready.at(key);
+      out["operation"] = "export";
+      out["phase"] = "exportReady";
+    }
+    return out;
+  }
+  Json source() const {
+    const auto current = state();
+    require(current.at("source") == true && current.at("prepared") == false, VXCORE_ERR_INVALID_STATE);
+    const auto value = marker("source");
+    const auto totals = inventory(transaction, transaction / "unpacked", "unpacked", text(value.at("inventoryHash")), cancel, false);
+    require(totals.bytes == number(value.at("bytes"), kTree) && totals.entries == number(value.at("entries"), kEntries),
+            VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    return value;
+  }
+  Json resource_source() const {
+    require(scope == "resource");
+    source();
+    fs::path file;
+    size_t count = 0;
+    for (const auto &entry : fs::directory_iterator(transaction / "unpacked")) {
+      require(++count == 1 && !identity(entry.path()).directory, VXCORE_ERR_UNSUPPORTED);
+      file = entry.path();
+    }
+    require(count == 1, VXCORE_ERR_UNSUPPORTED);
+    auto info = snapshot_file(file, kFile, cancel);
+    return {{"name", file.filename().u8string()}, {"path", file.u8string()},
+            {"bytes", info.at("bytes")}, {"sha256", info.at("sha256")}};
+  }
+  Json seal() const {
+    require(scope == "cohort");
+    auto current = state();
+    if (current.at("prepared") == true) return current;
+    require(current.at("phase") == "built" && !present(transaction / "intent.json"), VXCORE_ERR_INVALID_STATE);
+    const auto build = marker("build");
+    require(build.at("contentRelative") == "workbook/" + text(current.at("target").at("folderName")) &&
+            build.at("metadataRelative") == "workbook/vx_notebook/contents/" + text(current.at("target").at("folderName")),
+            VXCORE_ERR_INVALID_STATE);
+    const auto ids = snapshot_file(transaction / "ids.json", kResponse, cancel);
+    require(ids.at("sha256") == build.at("idsHash"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    const auto prepared = transaction / "prepared";
+    if (!present(prepared)) require(fs::create_directory(prepared), VXCORE_ERR_IO);
+    require(identity(prepared).directory, VXCORE_ERR_UNSUPPORTED);
+    for (const auto *part : {"content", "metadata"}) {
+      const auto src = transaction / fs::u8path(text(build.at(std::string(part) + "Relative")));
+      const auto dst = prepared / part;
+      require(present(src) != present(dst), VXCORE_ERR_INVALID_STATE);
+      const auto actual = snapshot_tree(present(src) ? src : dst, cancel);
+      require(actual.at("sha256") == build.at(std::string(part) + "Hash"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      if (present(src)) rename_new(src, dst);
+    }
+    auto sealed = build;
+    sealed["contentRelative"] = "prepared/content";
+    sealed["metadataRelative"] = "prepared/metadata";
+    durable_json(transaction, "prepared.json", sealed);
+    // Only the durable seal permits reclamation of redundant complete input.
+    for (const auto *part : {"workbook", "engine", "unpacked", "input.zip"})
+      if (present(transaction / part)) Store::remove_private(transaction / part);
+    return state();
+  }
+  Json attempt() const {
+    require(scope == "cohort");
+    auto current = state();
+    require(current.at("prepared") == true, VXCORE_ERR_INVALID_STATE);
+    if (present(transaction / "intent.json")) return current;
+    const auto prepared = marker("prepared");
+    const auto charge = number(prepared.at("bytes"), kTree + 128ULL * 1024 * 1024) + 64ULL * 1024 * 1024;
+    const auto path = transaction / "attempt";
+    if (present(path)) Store::remove_private(path); // No intent: this is only an incomplete private derivation.
+    quota(root.parent_path(), charge, cancel);
+    require(fs::create_directory(path), VXCORE_ERR_IO);
+    for (const auto *part : {"content", "metadata"}) {
+      const auto destination = path / part;
+      const auto result = snapshot_tree(transaction / "prepared" / part, cancel, &destination);
+      require(result.at("sha256") == prepared.at(std::string(part) + "Hash"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    }
+    const auto prepared_hash = snapshot_file(transaction / "prepared.json", kRequest, cancel).at("sha256");
+    Json intent{{"version", 1}, {"id", id}, {"scope", scope}, {"target", current.at("target")},
+                {"cohortId", prepared.at("cohortId")}, {"preparedHash", prepared_hash}, {"charge", charge}, {"generation", 1},
+                {"attemptIdentity", identity(path).journal()}, {"contentIdentity", identity(path / "content").journal()},
+                {"metadataIdentity", identity(path / "metadata").journal()},
+                {"movedRelative", "vx_notebook/vx_import/vnote-" + id}};
+    cancelled(cancel);
+    durable_json(transaction, "intent.json", intent);
+    return state();
+  }
+  Json receipt() const {
+    auto current = state();
+    if (current.at("committed") == true) return current;
+    const auto outcome = marker("outcome");
+    require(scope == "cohort" ? outcome.at("status") == "committed" : outcome.at("committed") == true,
+            VXCORE_ERR_INVALID_STATE);
+    if (scope == "cohort") require(outcome.at("cohortId") == current.at("cohortId") &&
+            outcome.at("preparedHash") == marker("intent").at("preparedHash"), VXCORE_ERR_INVALID_STATE);
+    durable_json(transaction, "committed.json", outcome);
+    return state();
+  }
+  Json export_ready() const {
+    require(scope == "resource");
+    state();
+    const auto ready = marker("ready");
+    const auto name = text(ready.at("name"), 255);
+    basename(name);
+    const auto file = transaction / "output" / fs::u8path(name);
+    const auto info = snapshot_file(file, kTree / 2, cancel);
+    require(info.at("bytes") == ready.at("bytes") && info.at("sha256") == ready.at("sha256"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    return {{"name", name}, {"path", file.u8string()}, {"bytes", ready.at("bytes")}, {"sha256", ready.at("sha256")}};
+  }
+};
+Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
+  const auto op = text(request.at("op"));
+  std::set<std::string> required{"scope", "root", "notebooksRoot", "id", "op"}, optional;
+  if (op == "allocate") required.insert({"kind", "target"});
+  else if (op == "capture") required.insert({"sourceName", "bytes", "entries"});
+  else if (op == "source") required.insert({"treeRelative", "inventoryHash", "bytes", "entries"});
+  else if (op == "resetWork") optional.insert("folderName");
+  else if (op == "writeResourceIntent") required.insert({"operation", "name", "newName"});
+  else if (op == "checkSpace") required.insert("requiredBytes");
+  else if (op == "discard") optional.insert("abandon");
+  else require(op == "scan" || op == "sealCohort" || op == "prepareAttempt" || op == "recoverAttempt" ||
+               op == "writeReceipt" || op == "inspectResource" || op == "finishResource" ||
+               op == "exportReady" || op == "verifyExport" || op == "discardExport");
+  require(request.is_object(), VXCORE_ERR_JSON_PARSE);
+  for (const auto &key : required) require(request.contains(key), VXCORE_ERR_JSON_PARSE);
+  for (auto it = request.begin(); it != request.end(); ++it) require(required.count(it.key()) || optional.count(it.key()), VXCORE_ERR_JSON_PARSE);
+  TransferStore store(request, cancel);
+  cancelled(cancel);
+  if (op == "checkSpace") return quota(store.root.parent_path(), number(request.at("requiredBytes"), 4ULL * 1024 * 1024 * 1024), cancel);
+  if (op == "scan") {
+    Json entries = Json::array();
+    size_t output_bytes = 0;
+    for (const auto &entry : fs::directory_iterator(store.root)) {
+      cancelled(cancel);
+      const auto id = entry.path().filename().u8string();
+      Json state;
+      try {
+        require(hex(id, 32), VXCORE_ERR_INVALID_STATE);
+        auto args = request;
+        args["id"] = id;
+        state = TransferStore(args, cancel).state();
+      } catch (const Failure &error) {
+        if (error.code == VXCORE_ERR_CANCELLED) throw;
+        state = {{"id", id}, {"scope", store.scope}, {"phase", "quarantined"}, {"errorCode", error.code}};
+      } catch (...) {
+        state = {{"id", id}, {"scope", store.scope}, {"phase", "quarantined"}, {"errorCode", VXCORE_ERR_JSON_PARSE}};
+      }
+      output_bytes += state.dump().size() + 1;
+      require(entries.size() < 10000 && output_bytes < kResponse - 64, VXCORE_ERR_UNSUPPORTED);
+      entries.push_back(std::move(state));
+    }
+    return {{"entries", std::move(entries)}};
+  }
+  if (op == "allocate") {
+    const auto kind = text(request.at("kind"));
+    require(store.scope == "cohort" ? (kind == "file" || kind == "zip" || kind == "folder") :
+            (kind == "file" || kind == "image"));
+    store.target(request.at("target"));
+    quota(store.root.parent_path(), 128 * 1024, cancel);
+    require(!present(store.transaction) && fs::create_directory(store.transaction), VXCORE_ERR_ALREADY_EXISTS);
+    durable_json(store.transaction, "request.json", {{"version", 2}, {"id", store.id}, {"scope", store.scope}, {"kind", kind}});
+    durable_json(store.transaction, "target.json", request.at("target"));
+    return store.state();
+  }
+  auto current = store.state();
+  if (op == "recoverAttempt") return current;
+  if (op == "capture") {
+    require(current.at("prepared") == false && current.at("intent") == false, VXCORE_ERR_INVALID_STATE);
+    const auto kind = text(current.at("kind"));
+    const auto bytes = number(request.at("bytes"), (kind == "file" || kind == "image") ? kFile : kind == "zip" ? kTree / 2 : kTree);
+    const auto entries = number(request.at("entries"), kEntries);
+    require((kind != "file" && kind != "image") || entries == 1, VXCORE_ERR_UNSUPPORTED);
+    const auto name = text(request.at("sourceName"), 1024);
+    if (kind == "zip") require(!identity(store.transaction / "input.zip").directory && identity(store.transaction / "input.zip").size == bytes,
+                               VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    else require(identity(store.transaction / "unpacked").directory && !identity(store.transaction / "accepted.jsonl").directory,
+                 VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    durable_json(store.transaction, "captured.json", {{"version", 1}, {"id", store.id}, {"scope", store.scope}, {"kind", kind},
+                 {"sourceName", name}, {"bytes", bytes}, {"entries", entries}});
+    return store.state();
+  }
+  if (op == "source") {
+    require(current.at("captured") == true && current.at("prepared") == false && current.at("intent") == false &&
+            request.at("treeRelative") == "unpacked", VXCORE_ERR_INVALID_STATE);
+    const auto hash = text(request.at("inventoryHash"), 64);
+    const auto totals = inventory(store.transaction, store.transaction / "unpacked", "unpacked", hash, cancel, true);
+    require(totals.bytes == number(request.at("bytes"), store.scope == "resource" ? kFile : kTree) &&
+            totals.entries == number(request.at("entries"), kEntries), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    if (current.at("kind") != "zip") {
+      const auto captured = store.marker("captured");
+      require(captured.at("bytes") == totals.bytes && captured.at("entries") == totals.entries, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    }
+    durable_json(store.transaction, "source.json", {{"version", 1}, {"id", store.id}, {"scope", store.scope},
+                 {"kind", current.at("kind")}, {"sourceName", current.at("sourceName")}, {"treeRelative", "unpacked"},
+                 {"inventoryHash", hash}, {"bytes", totals.bytes}, {"entries", totals.entries}});
+    return store.state();
+  }
+  if (op == "resetWork") {
+    require(current.at("prepared") == false && current.at("intent") == false && !present(store.transaction / "dispatch.json"), VXCORE_ERR_INVALID_STATE);
+    for (const auto *name : {"workbook", "engine", "prepared", "build.json", "build.json.tmp", "ids.json", "ids.json.tmp", "preflight.json", "preflight.json.tmp"})
+      if (present(store.transaction / name)) Store::remove_private(store.transaction / name);
+    if (current.at("source") == false) {
+      for (const auto *name : {"inventory.jsonl", "inventory.jsonl.tmp"})
+        if (present(store.transaction / name)) Store::remove_private(store.transaction / name);
+      if (current.at("captured") == false) {
+        for (const auto *name : {"input.zip", "unpacked", "accepted.jsonl"})
+          if (present(store.transaction / name)) Store::remove_private(store.transaction / name);
+      } else if (current.at("kind") == "zip" && present(store.transaction / "unpacked")) Store::remove_private(store.transaction / "unpacked");
+    }
+    if (request.contains("folderName")) {
+      require(store.scope == "cohort");
+      basename(text(request.at("folderName"), 255));
+      auto target = current.at("target");
+      target["folderName"] = request.at("folderName");
+      replace_json(store.transaction, "target.json", current.at("target"), target);
+    }
+    return store.state();
+  }
+  if (op == "sealCohort") return store.seal();
+  if (op == "prepareAttempt") return store.attempt();
+  if (op == "writeReceipt" || op == "finishResource") return store.receipt();
+  if (op == "inspectResource") return store.resource_source();
+  if (op == "writeResourceIntent") {
+    require(store.scope == "resource" && !present(store.transaction / "ready.json"));
+    const auto operation = text(request.at("operation"));
+    require(operation == "add" || operation == "image" || operation == "track" || operation == "untrack" ||
+            operation == "rename" || operation == "remove" || operation == "export");
+    const auto name = text(request.at("name"), 255);
+    basename(name);
+    if (operation == "rename") { basename(text(request.at("newName"), 255)); require(request.at("newName") != name); }
+    else require(request.at("newName").is_null());
+    durable_json(store.transaction, "resource.json", {{"version", 1}, {"id", store.id}, {"scope", store.scope},
+                 {"target", current.at("target")}, {"operation", operation}, {"name", name}, {"newName", request.at("newName")}});
+    return store.state();
+  }
+  if (op == "exportReady" || op == "verifyExport") return store.export_ready();
+  require(op == "discard" || op == "discardExport");
+  if (request.contains("abandon")) require(request.at("abandon").is_boolean());
+  const bool abandon = request.value("abandon", false);
+  require(!abandon || store.scope == "resource");
+  if (store.scope == "cohort" && current.at("intent") == true && current.at("committed") == false) {
+    const auto intent = store.marker("intent");
+    const auto generation = number(intent.at("generation"), 10000);
+    const auto outcome = read_json(store.transaction / ("absent-" + std::to_string(generation) + ".json"));
+    const auto rollback = read_json(store.transaction / ("rollback-" + std::to_string(generation) + ".json"));
+    require(outcome.at("status") == "absent" && outcome.at("preparedHash") == intent.at("preparedHash") &&
+            rollback.at("intent") == intent && rollback.at("status") == "absent", VXCORE_ERR_INVALID_STATE);
+    const auto moved = store.notebooks / fs::u8path(text(intent.at("target").at("notebookRelative"))) /
+                       fs::u8path(text(intent.at("movedRelative")));
+    absolute(moved.u8string());
+    require(!present(moved), VXCORE_ERR_INVALID_STATE);
+  }
+  if (store.scope == "resource" && present(store.transaction / "dispatch.json") && current.at("committed") == false)
+    require(abandon, VXCORE_ERR_INVALID_STATE);
+  if (op == "discardExport") require(store.scope == "resource" && !present(store.transaction / "dispatch.json") &&
+      (!present(store.transaction / "resource.json") || store.marker("resource").at("operation") == "export"));
+  const auto retired = store.root / ("done-" + store.id);
+  rename_new(store.transaction, retired);
+  Store::remove_private(retired);
+  directory_flush(store.root);
+  return {{"discarded", true}};
 }
 Json run(const Json &request, VxmImportCancel *cancel) {
   const auto op = text(request.at("op"));
@@ -1055,6 +1677,100 @@ int32_t inspect_managed(const fs::path &root, const std::string &expected_id, In
     return VXCORE_OK;
   } catch (...) { return import_exception_code(); }
 }
+int32_t TransferRun(const Json &request, const std::atomic<bool> *cancel, Json &out) noexcept {
+  try {
+    VxmImportCancel token;
+    token.borrowed = cancel;
+    require(request.dump().size() <= kRequest);
+    out = transfer_run(request, &token);
+    require(out.dump().size() <= kResponse, VXCORE_ERR_OUT_OF_MEMORY);
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+namespace storage {
+void Check(bool condition, int32_t code) { require(condition, code); }
+void Name(const std::string &name) { basename(name); }
+void Relative(const std::string &path) { relative(path); }
+std::string Fold(const std::string &name) { return fold(name, true); }
+fs::path Absolute(const std::string &path) {
+  auto validated = absolute(path);
+  // Directory APIs may retain a trailing separator; it is not another node.
+  if (validated.has_relative_path() && validated.filename().empty()) validated = validated.parent_path();
+  return validated;
+}
+bool Exists(const fs::path &path) { absolute(path.u8string()); return present(path); }
+Json Info(const fs::path &path, bool hash, const std::atomic<bool> *cancel, uint64_t limit) {
+  VxmImportCancel token;
+  token.borrowed = cancel;
+  absolute(path.u8string());
+  return hash ? snapshot_file(path, limit, &token) : full_identity(identity(path));
+}
+Json ReadJson(const fs::path &path, size_t limit) { absolute(path.u8string()); return read_json(path, limit); }
+std::string Read(const fs::path &path, size_t limit) { absolute(path.u8string()); return read_bytes(path, limit); }
+std::string Header(const fs::path &path, size_t count) {
+  require(count <= 4096);
+  absolute(path.u8string());
+  File input(path);
+  const auto before = input.identity();
+  require(!before.directory, VXCORE_ERR_UNSUPPORTED);
+  std::string result(static_cast<size_t>(std::min<uint64_t>(count, before.size)), '\0');
+  size_t offset = 0;
+  while (offset != result.size()) {
+    const auto read = input.read(reinterpret_cast<uint8_t *>(&result[offset]), result.size() - offset);
+    require(read != 0, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    offset += read;
+  }
+  require(input.identity() == before && identity(path) == before, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  return result;
+}
+void Marker(const fs::path &directory, const std::string &name, const Json &value, size_t limit) {
+  absolute(directory.u8string());
+  basename(name);
+  durable_json(directory, name, value, limit);
+}
+void ReplaceMarker(const fs::path &directory, const std::string &name, const Json &expected, const Json &value) {
+  absolute(directory.u8string()); basename(name); replace_json(directory, name, expected, value);
+}
+void MakeDirectory(const fs::path &path) {
+  absolute(path.u8string());
+  require(!present(path) && fs::create_directory(path), VXCORE_ERR_ALREADY_EXISTS);
+  directory_flush(path.parent_path());
+}
+void Move(const fs::path &source, const fs::path &target) {
+  absolute(source.u8string()); absolute(target.u8string()); rename_new(source, target);
+}
+void RemovePrivate(const fs::path &path) { absolute(path.u8string()); Store::remove_private(path); }
+Json Copy(const fs::path &source, const fs::path &target, uint64_t limit, const std::atomic<bool> *cancel) {
+  VxmImportCancel token;
+  token.borrowed = cancel;
+  return copy_file(source, target, limit, &token);
+}
+Json Tree(const fs::path &root, const std::atomic<bool> *cancel) {
+  VxmImportCancel token;
+  token.borrowed = cancel;
+  return snapshot_tree(root, &token);
+}
+Json CopyTree(const fs::path &source, const fs::path &target, const std::atomic<bool> *cancel) {
+  VxmImportCancel token;
+  token.borrowed = cancel;
+  return snapshot_tree(source, &token, &target);
+}
+Json Command(const std::string &root, const std::string &scope, const std::string &op) {
+  const auto path = absolute(root);
+  return {{"scope", scope}, {"root", path.parent_path().u8string()},
+          {"notebooksRoot", (path.parent_path().parent_path() / "notebooks").u8string()},
+          {"id", path.filename().u8string()}, {"op", op}};
+}
+Json Transaction(const std::string &root, const std::string &scope) {
+  return TransferStore(Command(root, scope, "recoverAttempt"), nullptr).state();
+}
+Inspection Inspect(const fs::path &root, const std::string &expected_id, bool pending) {
+  auto out = inspect_metadata(root, false, nullptr, nullptr, pending);
+  require(out.notebook_id == expected_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  return out;
+}
+int32_t ErrorCode() noexcept { return import_exception_code(); }
+}  // namespace storage
 }  // namespace vxm_import
 
 extern "C" {
@@ -1099,6 +1815,22 @@ int32_t vxm_import_run(const char *request_json, VxmImportCancel *cancel, char *
     // can still fail after rename: callers must recover, never infer rollback.
     std::unique_ptr<char[]> result(new char[kResponse + 1]);
     const auto encoded = run(request, cancel).dump();
+    require(encoded.size() <= kResponse, VXCORE_ERR_OUT_OF_MEMORY);
+    std::memcpy(result.get(), encoded.c_str(), encoded.size() + 1);
+    *out_json = result.release();
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+int32_t vxm_transfer_run(const char *request_json, VxmImportCancel *cancel, char **out_json) {
+  if (out_json) *out_json = nullptr;
+  try {
+    require(request_json && out_json, VXCORE_ERR_NULL_POINTER);
+    size_t size = 0;
+    while (size <= kRequest && request_json[size]) ++size;
+    require(size <= kRequest);
+    const auto request = parse(std::string_view(request_json, size), kRequest);
+    std::unique_ptr<char[]> result(new char[kResponse + 1]);
+    const auto encoded = transfer_run(request, cancel).dump();
     require(encoded.size() <= kResponse, VXCORE_ERR_OUT_OF_MEMORY);
     std::memcpy(result.get(), encoded.c_str(), encoded.size() + 1);
     *out_json = result.release();

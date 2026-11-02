@@ -69,6 +69,25 @@ Map<String, Object?> edit({
   'selection': {'anchor': anchor, 'head': head},
 });
 
+Map<String, Object?> currentSelection(
+  Map<String, Object?> request, {
+  int revision = 0,
+  int anchor = 0,
+  int head = 0,
+}) => message('selection', revision, request['requestId']! as String, {
+  'mode': 'current',
+  'anchor': anchor,
+  'head': head,
+});
+
+Map<String, Object?> insertionReceipt(
+  Map<String, Object?> request, {
+  int revision = 1,
+}) => message('ack', revision, request['requestId']! as String, {
+  'stage': 'received',
+  'throughRevision': revision,
+});
+
 void expectRejectedWithoutMutation(
   EditorSession session,
   Map<String, Object?> request,
@@ -467,6 +486,535 @@ void main() {
           'selection': {'anchor': 0, 'head': 0},
         }),
       );
+    });
+  });
+
+  group('correlated literal insertion', () {
+    test('flush barrier precedes exact selection replacement and normal edit receipt', () async {
+      final session = sessionWith('prior');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      const link = '![日本語](assets/a%20b.png)\r\n</script>😀';
+      var completed = false;
+      final insertion = session
+          .insertText(sent.add, link)
+          .then((_) => completed = true);
+      expect(sent.single['type'], 'selection');
+      expect(sent.single['mode'], 'request');
+      expect(sent.single.containsKey('text'), isFalse);
+      expect(session.value.text, 'prior');
+      // Composition/pending typing finishes before the page supplies its cursor.
+      expect(deliver(session, edit(anchor: 1, head: 1))?['stage'], 'received');
+      expect(
+        deliver(
+          session,
+          currentSelection(sent.first, revision: 1, anchor: 6, head: 1),
+        ),
+        isNull,
+      );
+      final request = sent.last;
+      expect(sent.length, 2);
+      expect(request['type'], 'insert');
+      expect(request['revision'], 1);
+      expect(request['anchor'], 6);
+      expect(request['head'], 1);
+      expect(request['text'], link);
+      expect(session.value.text, 'xprior');
+      expect(
+        deliver(
+          session,
+          edit(
+            revision: 2,
+            baseRevision: 1,
+            requestId: 'editor-2',
+            from: 1,
+            to: 6,
+            insert: link,
+            anchor: link.length + 1,
+            head: link.length + 1,
+          ),
+        )?['stage'],
+        'received',
+      );
+      await Future<void>.value();
+      expect(completed, isFalse);
+      expect(session.value.text, 'x$link');
+      expect(deliver(session, insertionReceipt(request, revision: 2)), isNull);
+      await insertion;
+      expect(completed, isTrue);
+      expect(session.value.snapshotRevision, isNull);
+      expect(session.baseVersion, baseHash);
+      expect(session.value.ready, isTrue);
+    });
+
+    test(
+      'stale selection barrier fails only insertion without a cursor retry',
+      () async {
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final failure = expectLater(
+          session.insertText(sent.add, '[a](assets/a)'),
+          throwsStateError,
+        );
+        deliver(session, edit(anchor: 1, head: 1));
+        expect(deliver(session, currentSelection(sent.first)), isNull);
+        await failure;
+        expect(sent.length, 1);
+        expect(session.value.text, 'xabc');
+        expect(session.value.ready, isTrue);
+        expect(session.value.error, isNull);
+        expect(
+          deliver(
+            session,
+            edit(revision: 2, baseRevision: 1, requestId: 'editor-2'),
+          )?['stage'],
+          'received',
+        );
+      },
+    );
+
+    test(
+      'selection rejection and malformed barrier never reject unrelated edits',
+      () async {
+        for (final fields in [
+          {'mode': 'current', 'anchor': 2, 'head': 2},
+          {'mode': 'set', 'anchor': 0, 'head': 0},
+          {'mode': 'current', 'anchor': 0, 'head': 0, 'extra': true},
+          {'mode': 'current', 'anchor': 0},
+        ]) {
+          final session = sessionWith('a😀');
+          open(session);
+          final sent = <Map<String, Object?>>[];
+          final failure = expectLater(
+            session.insertText(sent.add, 'link'),
+            throwsStateError,
+          );
+          expect(
+            deliver(
+              session,
+              message(
+                'selection',
+                0,
+                sent.single['requestId']! as String,
+                fields,
+              ),
+            ),
+            isNull,
+          );
+          await failure;
+          expect(sent.length, 1);
+          expect(session.value.text, 'a😀');
+          expect(session.value.ready, isTrue);
+          expect(deliver(session, edit())?['stage'], 'received');
+        }
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final failure = expectLater(
+          session.insertText(sent.add, 'link'),
+          throwsStateError,
+        );
+        expect(
+          deliver(
+            session,
+            message('ack', 0, sent.single['requestId']! as String, {
+              'stage': 'rejected',
+              'throughRevision': 0,
+              'error': 'Composition could not finish',
+            }),
+          ),
+          isNull,
+        );
+        await failure;
+        expect(session.value.ready, isTrue);
+      },
+    );
+
+    test('typing after the cursor barrier is retained on stale insertion rejection', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final failure = expectLater(
+        session.insertText(sent.add, '[asset](assets/a)'),
+        throwsStateError,
+      );
+      deliver(session, currentSelection(sent.first, anchor: 1, head: 1));
+      deliver(session, edit(insert: 'typed', anchor: 5, head: 5));
+      expect(
+        deliver(
+          session,
+          message('ack', 1, sent.last['requestId']! as String, {
+            'stage': 'rejected',
+            'throughRevision': 1,
+            'error': 'Selection changed before insertion',
+          }),
+        ),
+        isNull,
+      );
+      await failure;
+      expect(sent.length, 2);
+      expect(session.value.text, 'typedabc');
+      expect(session.value.ready, isTrue);
+      expect(session.value.error, isNull);
+      // Explicit later insertion obtains a NEW barrier; the controller never re-copies an asset.
+      final later = session.insertText(sent.add, '[asset](assets/a)');
+      final laterFailure = expectLater(later, throwsStateError);
+      expect(sent.last['type'], 'selection');
+      session.reportTransportError('Channel ended');
+      await laterFailure;
+    });
+
+    test('malformed, early and stale insertion receipts fail without poisoning typing', () async {
+      for (final corruption in <Map<String, Object?>>[
+        {'stage': 'saved'},
+        {'throughRevision': 0},
+        {'throughRevision': '1'},
+        {'revision': 0, 'throughRevision': 0},
+        {'revision': -1},
+        {'revision': 2, 'throughRevision': 2},
+        {'v': 2},
+        {'error': 7},
+        {'extra': true},
+      ]) {
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final failure = expectLater(
+          session.insertText(sent.add, 'link'),
+          throwsStateError,
+        );
+        deliver(session, currentSelection(sent.first));
+        deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+        expect(
+          deliver(session, {...insertionReceipt(sent.last), ...corruption}),
+          isNull,
+        );
+        await failure;
+        expect(session.value.text, 'linkabc');
+        expect(session.value.ready, isTrue);
+        expect(session.value.error, isNull);
+        expect(
+          deliver(
+            session,
+            edit(revision: 2, baseRevision: 1, requestId: 'editor-2'),
+          )?['stage'],
+          'received',
+        );
+      }
+      for (final unrelatedEdit in [false, true]) {
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final failure = expectLater(
+          session.insertText(sent.add, 'link'),
+          throwsStateError,
+        );
+        deliver(session, currentSelection(sent.first));
+        if (unrelatedEdit) deliver(session, edit(insert: 'not the link'));
+        expect(deliver(session, insertionReceipt(sent.last)), isNull);
+        await failure;
+        expect(session.value.text, unrelatedEdit ? 'not the linkabc' : 'abc');
+        expect(session.value.ready, isTrue);
+      }
+    });
+
+    test('delayed receipt can settle the matching edit after subsequent ordinary typing', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final insertion = session.insertText(sent.add, 'link');
+      deliver(session, currentSelection(sent.first));
+      deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+      deliver(
+        session,
+        edit(revision: 2, baseRevision: 1, requestId: 'editor-2'),
+      );
+      expect(deliver(session, insertionReceipt(sent.last)), isNull);
+      await insertion;
+      expect(session.value.text, 'xlinkabc');
+      expect(session.value.revision, 2);
+      expect(session.value.snapshotRevision, isNull);
+    });
+
+    test('uncorrelated malformed acknowledgements cannot consume edit sequence numbers', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final insertion = session.insertText(sent.add, 'link');
+      deliver(session, currentSelection(sent.single));
+      expect(
+        deliver(
+          session,
+          message('ack', 0, 'editor-900', {
+            'stage': 'received',
+            'throughRevision': 0,
+          }),
+        ),
+        isNull,
+      );
+      expect(
+        deliver(
+          session,
+          message('ack', 0, 'host-999', {
+            'stage': 'received',
+            'throughRevision': 0,
+          }),
+        ),
+        isNull,
+      );
+      expect(
+        deliver(session, edit(insert: 'link', anchor: 4, head: 4))?['stage'],
+        'received',
+      );
+      deliver(session, insertionReceipt(sent.last));
+      await insertion;
+      expect(session.value.text, 'linkabc');
+      expect(session.value.ready, isTrue);
+      expect(session.value.error, isNull);
+    });
+
+    test('duplicate and evicted receipts cannot settle another insertion or freeze the session', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final insertion = session.insertText(sent.add, 'link');
+      final barrier = sent.single;
+      deliver(session, currentSelection(barrier));
+      final request = sent.last;
+      deliver(session, currentSelection(barrier));
+      expect(sent.length, 2);
+      deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+      final receipt = insertionReceipt(request);
+      deliver(session, receipt);
+      await insertion;
+      expect(deliver(session, receipt), isNull);
+      expect(deliver(session, {...receipt, 'throughRevision': 999}), isNull);
+      for (var index = 2; index < 70; index++) {
+        deliver(
+          session,
+          message('selection', 1, 'editor-$index', {'anchor': 4, 'head': 4}),
+        );
+      }
+      final nextFailure = expectLater(
+        session.insertText(sent.add, 'second'),
+        throwsStateError,
+      );
+      expect(deliver(session, receipt), isNull);
+      expect(deliver(session, {...receipt, 'stage': 'malformed'}), isNull);
+      expect(deliver(session, currentSelection(barrier)), isNull);
+      expect(sent.length, 3);
+      expect(session.value.ready, isTrue);
+      deliver(
+        session,
+        message('ack', 1, sent.last['requestId']! as String, {
+          'stage': 'rejected',
+          'throughRevision': 1,
+          'error': 'Cursor unavailable',
+        }),
+      );
+      await nextFailure;
+      expect(session.value.text, 'linkabc');
+      expect(
+        deliver(
+          session,
+          edit(revision: 2, baseRevision: 1, requestId: 'editor-70'),
+        )?['stage'],
+        'received',
+      );
+    });
+
+    test(
+      'one pending insertion and foreign-generation replies remain isolated',
+      () async {
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final insertion = session.insertText(sent.add, 'link');
+        await expectLater(
+          session.insertText(sent.add, 'other'),
+          throwsStateError,
+        );
+        expect(sent.length, 1);
+        expect(
+          deliver(session, {
+            ...currentSelection(sent.single),
+            'generation': 'f' * 32,
+          }),
+          isNull,
+        );
+        expect(sent.length, 1);
+        deliver(session, currentSelection(sent.single));
+        deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+        expect(
+          deliver(session, {
+            ...insertionReceipt(sent.last),
+            'generation': 'f' * 32,
+          }),
+          isNull,
+        );
+        deliver(session, insertionReceipt(sent.last));
+        await insertion;
+        expect(session.value.text, 'linkabc');
+      },
+    );
+
+    test('source/control bounds reject before sending and document bounds reject before inserting', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      for (final text in [
+        String.fromCharCode(0xd800),
+        String.fromCharCode(0xdc00),
+        'x' * (EditorSession.maxInsertedUnits + 1),
+        '中' * 3000,
+        '\u0000' * 1400,
+      ]) {
+        await expectLater(
+          session.insertText(sent.add, text),
+          throwsFormatException,
+        );
+      }
+      expect(sent, isEmpty);
+      expect(session.value.text, 'abc');
+      expect(session.value.ready, isTrue);
+      for (final source in [
+        'a' * EditorSession.maxSourceUnits,
+        '中' * (EditorSession.maxSourceBytes ~/ 3),
+      ]) {
+        final full = sessionWith(source);
+        open(full);
+        final requests = <Map<String, Object?>>[];
+        final failure = expectLater(
+          full.insertText(requests.add, '中'),
+          throwsStateError,
+        );
+        deliver(full, currentSelection(requests.single));
+        await failure;
+        expect(requests.length, 1);
+        expect(full.value.text, source);
+        expect(full.value.ready, isTrue);
+      }
+      final pair = sessionWith('\n');
+      open(pair);
+      final requests = <Map<String, Object?>>[];
+      final failure = expectLater(
+        pair.insertText(requests.add, '\r'),
+        throwsStateError,
+      );
+      deliver(pair, currentSelection(requests.single));
+      await failure;
+      expect(requests.length, 1);
+      expect(pair.value.text, '\n');
+    });
+
+    test('transport loss settles either barrier phase while preserving all received text', () async {
+      for (final afterEdit in [false, true]) {
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final failure = expectLater(
+          session.insertText(sent.add, 'link'),
+          throwsStateError,
+        );
+        if (afterEdit) {
+          deliver(session, currentSelection(sent.single));
+          deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+        }
+        session.reportTransportError('Channel disconnected');
+        await failure;
+        expect(session.value.text, afterEdit ? 'linkabc' : 'abc');
+        expect(session.value.ready, isFalse);
+      }
+    });
+
+    test(
+      'synchronous send failures settle insertion without mutating source',
+      () async {
+        for (final failInsert in [false, true]) {
+          final session = sessionWith('abc');
+          open(session);
+          final failure = expectLater(
+            session.insertText((request) {
+              if (failInsert && request['type'] == 'selection') {
+                deliver(session, currentSelection(request));
+              } else {
+                throw StateError('Channel unavailable');
+              }
+            }, 'link'),
+            throwsStateError,
+          );
+          await failure;
+          expect(session.value.text, 'abc');
+          expect(session.value.ready, isFalse);
+        }
+      },
+    );
+
+    test(
+      'close and disposal retire insertion futures without dropping source',
+      () async {
+        final session = sessionWith('abc');
+        open(session);
+        final sent = <Map<String, Object?>>[];
+        final failure = expectLater(
+          session.insertText(sent.add, 'link'),
+          throwsStateError,
+        );
+        final close = session.closeEditor(sent.add, discard: true);
+        await failure;
+        expect(deliver(session, currentSelection(sent.first)), isNull);
+        expect(sent.length, 2);
+        deliver(
+          session,
+          message('close', 0, sent.last['requestId']! as String, {
+            'mode': 'ready',
+            'disposition': 'discard',
+          }),
+        );
+        await close;
+        expect(session.value.text, 'abc');
+        final retired = EditorSession(
+          initialText: 'keep',
+          documentId: documentId,
+          baseVersion: baseHash,
+          language: 'markdown',
+          generationFactory: () => generation,
+        );
+        open(retired);
+        final retiredFailure = expectLater(
+          retired.insertText((_) {}, 'link'),
+          throwsStateError,
+        );
+        retired.dispose();
+        await retiredFailure;
+        expect(retired.value.text, 'keep');
+        expect(deliver(retired, edit()), isNull);
+      },
+    );
+
+    test('synchronous channel reentrancy still requires the real edit before completion', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <String>[];
+      await session.insertText((request) {
+        sent.add(request['type']! as String);
+        if (request['type'] == 'selection') {
+          deliver(session, currentSelection(request, anchor: 1, head: 1));
+        } else {
+          expect(
+            deliver(
+              session,
+              edit(from: 1, to: 1, insert: 'link', anchor: 5, head: 5),
+            )?['stage'],
+            'received',
+          );
+          expect(deliver(session, insertionReceipt(request)), isNull);
+        }
+      }, 'link');
+      expect(sent, ['selection', 'insert']);
+      expect(session.value.text, 'alinkbc');
+      expect(session.value.ready, isTrue);
     });
   });
 

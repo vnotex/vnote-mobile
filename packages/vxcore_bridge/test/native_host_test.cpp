@@ -31,7 +31,7 @@
 namespace {
 namespace fs = std::filesystem;
 using Json = nlohmann::json;
-#define CHECK(expression) do { if (!(expression)) throw std::runtime_error("Check failed: " #expression); } while (false)
+#define CHECK(expression) do { if (!(expression)) throw std::runtime_error(std::string(__func__) + ":" + std::to_string(__LINE__) + ": Check failed: " #expression); } while (false)
 using Event = std::unique_ptr<VxmEvent, decltype(&vxm_event_free)>;
 
 // Tests deliberately latch a notification AFTER native releases its queue lock.
@@ -123,6 +123,7 @@ std::string text(const Event &event) {
 }
 
 struct ExportOnly {};
+struct ResourceOnly {};
 struct Host {
   Notifications signals;
   VxmHost *handle = nullptr;
@@ -143,6 +144,12 @@ struct Host {
   Host(Fixture &fixture, ExportOnly, bool hold = false) {
     VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
                            nullptr, fixture.notebook_id.c_str(), nullptr, VXM_MODE_CATALOG, 0, 1};
+    start(options, hold);
+  }
+  Host(Fixture &fixture, ResourceOnly, bool hold = false) {
+    VxmOpenOptions options{fixture.app.c_str(), fixture.local.c_str(), fixture.notebook.c_str(),
+                           nullptr, fixture.notebook_id.c_str(), fixture.node_id.c_str(),
+                           VXM_MODE_RESOURCES, 0, 0, nullptr};
     start(options, hold);
   }
   void start(const VxmOpenOptions &options, bool hold) {
@@ -1537,16 +1544,6 @@ void catalog_export_open_does_not_recover_or_migrate() {
     }
     CHECK(snapshot(root) == before);
   }
-  // Ordinary opens retain core's documented malformed-import cleanup behavior.
-  Fixture ordinary;
-  ordinary.seed("ordinary owner recovery");
-  const auto directory = fs::u8path(ordinary.notebook) / "vx_notebook/vx_import/stale";
-  fs::create_directories(directory);
-  external_write(directory / "journal.json", "not-json");
-  Host host(ordinary, VXM_MODE_CATALOG);
-  CHECK(host.next()->code == VXCORE_OK);
-  CHECK(!fs::exists(directory));
-  host.close();
 }
 void catalog_export_guards_and_limits() {
   Fixture fixture;
@@ -1893,6 +1890,139 @@ void import_pure_helpers_are_bounded() {
   vxm_import_result_free(result);
 }
 
+void resources_metadata_only_and_note_owner() {
+  Fixture fixture;
+  fixture.seed("original note\r\n");
+  // An ordinary note can have unsupported body encoding without preventing
+  // resource-only recovery. No body decoding or editor-sized allocation occurs.
+  const std::string opaque("\xff\0\xfe", 3);
+  external_write(fixture.note(), opaque);
+  const auto assets = fs::u8path(fixture.notebook) / "vx_assets" / fixture.node_id;
+  {
+    Host host(fixture, ResourceOnly{});
+    auto opened = host.next();
+    CHECK(opened->kind == VXM_EVENT_RESOURCE_OPEN && opened->code == VXCORE_OK);
+    CHECK(opened->size == 0 && opened->data == nullptr && std::string(opened->base_hash).empty());
+    CHECK(vxm_host_read(host.handle, 2, host.generation) == VXCORE_ERR_INVALID_STATE);
+    CHECK(vxm_host_resource(host.handle, 2, host.generation, "{\"op\":\"list\",\"extra\":true}") == VXCORE_ERR_INVALID_PARAM);
+    CHECK(vxm_host_resource(host.handle, 2, host.generation, "{\"op\":\"list\"}") == VXCORE_OK);
+    auto listed = host.next();
+    CHECK(listed->code == VXCORE_OK && listed->kind == VXM_EVENT_RESOURCE);
+    const auto json = Json::parse(text(listed));
+    CHECK(json.at("notebookId") == fixture.notebook_id && json.at("nodeId") == fixture.node_id);
+    CHECK(json.at("entries").empty() && !fs::exists(assets));
+    CHECK(disk(fixture.note()) == opaque);
+    host.close();
+  }
+  external_write(fixture.note(), "ordinary source\r\n");
+  fs::create_directories(assets);
+  external_write(assets / "opaque.bin", opaque);
+  {
+    Host host(fixture, "ignored");
+    CHECK(host.next()->code == VXCORE_OK);
+    CHECK(vxm_host_resource(host.handle, 2, host.generation, "{\"op\":\"list\"}") == VXCORE_OK);
+    auto listed = host.next();
+    CHECK(listed->code == VXCORE_OK);
+    const auto rows = Json::parse(text(listed)).at("entries");
+    CHECK(rows.size() == 1 && rows[0].at("name") == "opaque.bin");
+    CHECK(rows[0].at("exists") == true && rows[0].at("tracked") == false && rows[0].at("bytes") == 3);
+    CHECK(disk(fixture.note()) == "ordinary source\r\n" && disk(assets / "opaque.bin") == opaque);
+    host.close();
+  }
+}
+
+void resources_protected_open_is_refused() {
+  for (int kind = 0; kind < 3; ++kind) {
+    Fixture fixture;
+    fixture.seed("untouched");
+    if (kind == 0) external_write(fixture.note(), std::string("VNOTEE1\0cipher", 14));
+    else {
+      auto config = Json::parse(disk(root_metadata(fixture)));
+      if (kind == 1) config["files"][0]["metadata"]["encrypted"] = true;
+      else {
+        config["files"][0]["name"] = "Welcome.md.vne";
+        fs::rename(fixture.note(), fs::u8path(fixture.notebook) / "Welcome.md.vne");
+      }
+      external_write(root_metadata(fixture), config.dump());
+    }
+    const auto before = snapshot(fs::u8path(fixture.notebook));
+    Host host(fixture, ResourceOnly{});
+    auto opened = host.next();
+    CHECK(opened->kind == VXM_EVENT_RESOURCE_OPEN && opened->code != VXCORE_OK);
+    CHECK(opened->size == 0 && opened->data == nullptr);
+    CHECK(snapshot(fs::u8path(fixture.notebook)) == before);
+    host.close();
+  }
+}
+
+void resource_owner_refuses_persisted_restore() {
+  Fixture fixture, foreign;
+  fixture.seed("selected body");
+  foreign.seed("foreign body");
+  const auto session_path = fs::u8path(fixture.local) / "vxsession.json";
+  auto session = Json::parse(disk(session_path));
+  session["notebooks"] = Json::array({Json{{"id", foreign.notebook_id},
+      {"rootFolder", foreign.notebook}, {"type", "bundled"}, {"readOnly", false}}});
+  session["buffers"] = Json::array({Json::object()});
+  const auto bytes = session.dump();
+  external_write(session_path, bytes);
+  const auto before = snapshot(fs::u8path(foreign.notebook));
+  Host host(fixture, ResourceOnly{});
+  auto opened = host.next();
+  CHECK(opened->kind == VXM_EVENT_RESOURCE_OPEN && opened->code != VXCORE_OK);
+  CHECK(opened->size == 0 && opened->data == nullptr);
+  CHECK(disk(session_path) == bytes && snapshot(fs::u8path(foreign.notebook)) == before);
+  host.close();
+}
+
+void resource_raw_attachment_names_are_not_normalized() {
+  Fixture fixture;
+  fixture.seed("untouched");
+  auto metadata = Json::parse(disk(root_metadata(fixture)));
+  metadata["files"][0]["attachments"] = Json::array({"foreign/path.bin"});
+  external_write(root_metadata(fixture), metadata.dump());
+  const auto before = disk(root_metadata(fixture));
+  Host host(fixture, ResourceOnly{});
+  auto opened = host.next();
+  CHECK(opened->kind == VXM_EVENT_RESOURCE_OPEN && opened->code != VXCORE_OK);
+  CHECK(disk(root_metadata(fixture)) == before && disk(fixture.note()) == "untouched");
+  host.close();
+}
+
+void resource_output_credit_and_cancellation() {
+  Fixture fixture;
+  fixture.seed("original");
+  Host host(fixture, ResourceOnly{}, true);
+  host.signals.wait_entered();
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK);
+  CHECK(vxm_host_resource(host.handle, 2, host.generation, "{\"op\":\"list\"}") == VXCORE_OK);
+  CHECK(vxm_host_resource(host.handle, 3, host.generation, "{\"op\":\"list\"}") == VXCORE_ERR_OUT_OF_MEMORY);
+  CHECK(vxm_host_cancel(host.handle, 2, host.generation) == VXCORE_OK);
+  host.signals.release();
+  auto cancelled = host.next();
+  CHECK(cancelled->code == VXCORE_ERR_CANCELLED && cancelled->size == 0);
+  CHECK(vxm_host_resource(host.handle, 3, host.generation, "{\"op\":\"list\"}") == VXCORE_OK);
+  auto listed = host.next();
+  CHECK(listed->code == VXCORE_OK);
+  CHECK(vxm_host_resource(host.handle, 4, host.generation, "{\"op\":\"list\"}") == VXCORE_ERR_OUT_OF_MEMORY);
+  listed.reset();
+  CHECK(vxm_host_resource(host.handle, 4, host.generation, "{\"op\":\"list\"}") == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_OK);
+  host.close();
+}
+
+void cohort_admission_never_uses_export_owner() {
+  Fixture fixture;
+  fixture.seed("original");
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  const auto request = Json{{"op", "apply"}, {"transactionRoot", fixture.root.u8string()}}.dump();
+  CHECK(vxm_host_cohort(host.handle, 2, host.generation, request.c_str()) == VXCORE_ERR_INVALID_STATE);
+  CHECK(vxm_host_resource(host.handle, 2, host.generation, "{\"op\":\"list\"}") == VXCORE_ERR_INVALID_STATE);
+  host.close();
+}
+
 }  // namespace
 
 int main() {
@@ -1932,6 +2062,12 @@ int main() {
     catalog_export_refuses_persisted_foreign_restore();
     catalog_collects_exact_disk_identities();
     import_pure_helpers_are_bounded();
+    resources_metadata_only_and_note_owner();
+    resources_protected_open_is_refused();
+    resource_output_credit_and_cancellation();
+    cohort_admission_never_uses_export_owner();
+    resource_owner_refuses_persisted_restore();
+    resource_raw_attachment_names_are_not_normalized();
     std::cout << "Native host real-storage tests passed\n";
     return 0;
   } catch (const std::exception &error) {

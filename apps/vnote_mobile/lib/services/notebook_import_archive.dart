@@ -18,6 +18,8 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'document_transfer_platform.dart';
 
+enum ImportPreparationFormat { notebook, files }
+
 class ImportPreparedTree {
   const ImportPreparedTree({
     required this.treeRelative,
@@ -38,9 +40,16 @@ class NotebookImportArchive {
   static Future<ImportPreparedTree> prepare({
     required String transactionRoot,
     required DocumentImportKind kind,
+    required DocumentTransferScope scope,
+    required ImportPreparationFormat format,
     required int cancellationAddress,
   }) async {
-    final worker = _Preparation(transactionRoot, cancellationAddress);
+    final worker = _Preparation(
+      transactionRoot,
+      cancellationAddress,
+      scope,
+      format,
+    );
     return worker.prepare(kind);
   }
 }
@@ -178,19 +187,32 @@ int _comparePaths(String a, String b) {
 }
 
 class _Preparation {
-  _Preparation(String root, int address)
+  _Preparation(String root, int address, this.scope, this.format)
     : root = p.normalize(p.absolute(root)),
       cancel = _Cancellation(address);
 
   final String root;
   final _Cancellation cancel;
+  final DocumentTransferScope scope;
+  final ImportPreparationFormat format;
   String get unpacked => p.join(root, 'unpacked');
 
   Future<ImportPreparedTree> prepare(DocumentImportKind kind) async {
     cancel.check();
+    final namespace = switch (scope) {
+      DocumentTransferScope.notebook => 'imports',
+      DocumentTransferScope.cohort => 'cohorts',
+      DocumentTransferScope.resource => 'resources',
+    };
     if (!RegExp(r'^[0-9a-f]{32}$').hasMatch(p.basename(root)) ||
-        p.basename(p.dirname(root)) != 'imports') {
-      _bad('Invalid import transaction location.');
+        p.basename(p.dirname(root)) != namespace ||
+        (format == ImportPreparationFormat.notebook &&
+            (scope != DocumentTransferScope.notebook ||
+                (kind != DocumentImportKind.zip &&
+                    kind != DocumentImportKind.folder))) ||
+        (format == ImportPreparationFormat.files &&
+            scope == DocumentTransferScope.notebook)) {
+      _bad('Invalid import transaction location or preparation format.');
     }
     _directory(root);
     // Native no-follow traversal rejects hardlinks/reparse/special files before
@@ -223,7 +245,9 @@ class _Preparation {
     if (actual.length != accepted.entries.length) {
       _bad('The physical tree differs from the accepted names.');
     }
-    final treeRelative = _candidate(kind, accepted);
+    final treeRelative = format == ImportPreparationFormat.files
+        ? 'unpacked'
+        : _candidate(kind, accepted);
     return _inventory(actual, treeRelative);
   }
 
@@ -234,13 +258,24 @@ class _Preparation {
   }
 
   void _checkSpace(int requiredBytes) {
-    CoreImportStore.run({
-      'op': 'checkSpace',
-      'importsRoot': p.dirname(root),
-      'notebooksRoot': p.join(p.dirname(p.dirname(root)), 'notebooks'),
-      'id': p.basename(root),
-      'requiredBytes': requiredBytes,
-    }, cancellationAddress: cancel.address);
+    if (scope == DocumentTransferScope.notebook) {
+      CoreImportStore.run({
+        'op': 'checkSpace',
+        'importsRoot': p.dirname(root),
+        'notebooksRoot': p.join(p.dirname(p.dirname(root)), 'notebooks'),
+        'id': p.basename(root),
+        'requiredBytes': requiredBytes,
+      }, cancellationAddress: cancel.address);
+    } else {
+      CoreImportStore.runTransfer({
+        'op': 'checkSpace',
+        'scope': scope.name,
+        'root': p.dirname(root),
+        'notebooksRoot': p.join(p.dirname(p.dirname(root)), 'notebooks'),
+        'id': p.basename(root),
+        'requiredBytes': requiredBytes,
+      }, cancellationAddress: cancel.address);
+    }
     cancel.check();
   }
 

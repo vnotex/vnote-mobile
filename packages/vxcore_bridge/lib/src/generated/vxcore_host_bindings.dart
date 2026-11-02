@@ -109,6 +109,21 @@ external int vxm_host_catalog_tag(
 
 @ffi.Native<
   ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_cohort(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> json,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
     ffi.Pointer<VxmOpenOptions>,
     VxmNotify,
     ffi.Int64,
@@ -137,6 +152,21 @@ external int vxm_host_read(
 
 @ffi.Native<ffi.Void Function(ffi.Pointer<VxmHost>)>()
 external void vxm_host_request_close(ffi.Pointer<VxmHost> host);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_resource(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> json,
+);
 
 @ffi.Native<ffi.Pointer<VxmEvent> Function(ffi.Pointer<VxmHost>)>()
 external ffi.Pointer<VxmEvent> vxm_host_take_event(ffi.Pointer<VxmHost> host);
@@ -216,6 +246,19 @@ external int vxm_import_run(
 @ffi.Native<ffi.Pointer<ffi.Char> Function()>()
 external ffi.Pointer<ffi.Char> vxm_native_notices();
 
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<VxmImportCancel>,
+    ffi.Pointer<ffi.Pointer<ffi.Char>>,
+  )
+>()
+external int vxm_transfer_run(
+  ffi.Pointer<ffi.Char> request_json,
+  ffi.Pointer<VxmImportCancel> cancel,
+  ffi.Pointer<ffi.Pointer<ffi.Char>> out_json,
+);
+
 const int VXM_CREATE_FOLDER = 2;
 
 const int VXM_CREATE_NOTE = 1;
@@ -230,6 +273,10 @@ const int VXM_EVENT_CATALOG_OPEN = 5;
 
 const int VXM_EVENT_CLOSED = 4;
 
+const int VXM_EVENT_COHORT = 13;
+
+const int VXM_EVENT_COHORT_OPEN = 11;
+
 const int VXM_EVENT_EXPORT = 10;
 
 const int VXM_EVENT_LIST = 6;
@@ -241,6 +288,10 @@ const int VXM_EVENT_OPEN = 1;
 const int VXM_EVENT_QUERY = 8;
 
 const int VXM_EVENT_READ = 2;
+
+const int VXM_EVENT_RESOURCE = 14;
+
+const int VXM_EVENT_RESOURCE_OPEN = 12;
 
 const int VXM_EVENT_TAG = 9;
 
@@ -262,7 +313,11 @@ const int VXM_MAX_SOURCE_BYTES = 4194304;
 
 const int VXM_MODE_CATALOG = 2;
 
+const int VXM_MODE_COHORT_BUILDER = 3;
+
 const int VXM_MODE_NOTE = 1;
+
+const int VXM_MODE_RESOURCES = 4;
 
 const int VXM_MOVE = 4;
 
@@ -430,6 +485,8 @@ final class VxmOpenOptions extends ffi.Struct {
   @ffi.Int32()
   external int export_only;
 
+  external ffi.Pointer<ffi.Char> transaction_root;
+
   static ffi.Pointer<VxmOpenOptions> $allocate(
     ffi.Allocator $allocator, {
     required ffi.Pointer<ffi.Char> app_data_path,
@@ -441,6 +498,7 @@ final class VxmOpenOptions extends ffi.Struct {
     required int mode,
     required int create_notebook,
     required int export_only,
+    required ffi.Pointer<ffi.Char> transaction_root,
   }) => $allocator<VxmOpenOptions>()
     ..ref.app_data_path = app_data_path
     ..ref.local_data_path = local_data_path
@@ -450,5 +508,6 @@ final class VxmOpenOptions extends ffi.Struct {
     ..ref.node_id = node_id
     ..ref.mode = mode
     ..ref.create_notebook = create_notebook
-    ..ref.export_only = export_only;
+    ..ref.export_only = export_only
+    ..ref.transaction_root = transaction_root;
 }

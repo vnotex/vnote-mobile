@@ -18,6 +18,7 @@ class NotebookSessionState {
     this.loading = false,
     this.writing = false,
     this.transitioning = false,
+    this.resourcesBusy = false,
     this.closed = false,
     this.error,
   });
@@ -28,10 +29,11 @@ class NotebookSessionState {
   final bool loading;
   final bool writing;
   final bool transitioning;
+  final bool resourcesBusy;
   final bool closed;
   final String? error;
   bool get dirty => editor != null && editor!.value.revision != onDiskRevision;
-  bool get busy => loading || writing || transitioning;
+  bool get busy => loading || writing || transitioning || resourcesBusy;
 }
 
 /// Owns one native notebook and one editor generation. Native writes are never
@@ -46,10 +48,18 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   Future<void>? _initialization;
   Future<void>? _shutdownFuture;
   Completer<void>? _active;
+  Completer<void>? _resources;
+  String? _resourceBlock;
   bool _disposed = false;
   bool _shuttingDown = false;
 
   String get nativeNotices => _core?.nativeNotices ?? '';
+
+  void setResourceBlock(String? message) {
+    if (_resourceBlock == message) return;
+    _resourceBlock = message;
+    _publish(error: message, clearError: message == null);
+  }
 
   Future<void> initialize() =>
       _shuttingDown ? Future<void>.value() : _initialization ??= _initialize();
@@ -107,7 +117,32 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
 
   void _editorChanged() => _publish();
 
+  /// Borrows the existing NOTE owner, never a competing native context. The
+  /// entire transfer (including provider leases) remains inside this barrier.
+  Future<T> withResources<T>(
+    Future<T> Function(ResourceCore core) action,
+  ) async {
+    if (_core == null || value.note == null || !_admit()) {
+      throw StateError('The note is not available for a resource operation.');
+    }
+    final barrier = Completer<void>();
+    _resources = barrier;
+    _publish(resourcesBusy: true, clearError: true);
+    try {
+      return await action(_core!);
+    } finally {
+      _resources = null;
+      _publish(resourcesBusy: false);
+      _retire();
+      barrier.complete();
+    }
+  }
+
   Future<bool> write(EditorSend send) async {
+    final editor = value.editor;
+    final barrier = _resources;
+    if (barrier != null) await barrier.future;
+    if (!identical(editor, value.editor)) return false;
     if (!_admit()) return false;
     try {
       return await _write(send);
@@ -119,6 +154,10 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   Future<bool> _write(EditorSend send) async {
     final editor = value.editor;
     if (editor == null || _core == null) return false;
+    if (_resourceBlock != null) {
+      _publish(error: _resourceBlock);
+      return false;
+    }
     _publish(writing: true, clearError: true);
     try {
       final snapshot = await editor.captureSnapshot(send);
@@ -158,9 +197,16 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     EditorSend send, {
     required bool reopen,
   }) async {
-    if (disposition == NotebookDisposition.cancel || !_admit()) return false;
+    if (disposition == NotebookDisposition.cancel) return false;
+    final editor = value.editor;
+    final barrier = _resources;
+    if (barrier != null) await barrier.future;
+    if (!identical(editor, value.editor) || !_admit()) return false;
     _publish(transitioning: true, clearError: true);
     try {
+      if (reopen && _resourceBlock != null) {
+        throw StateError(_resourceBlock!);
+      }
       if (disposition == NotebookDisposition.write && !await _write(send)) {
         return false;
       }
@@ -248,6 +294,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     bool? loading,
     bool? writing,
     bool? transitioning,
+    bool? resourcesBusy,
     bool? closed,
     int? onDiskRevision,
     String? error,
@@ -261,6 +308,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       loading: loading ?? value.loading,
       writing: writing ?? value.writing,
       transitioning: transitioning ?? value.transitioning,
+      resourcesBusy: resourcesBusy ?? value.resourcesBusy,
       closed: closed ?? value.closed,
       error: clearError ? null : error ?? value.error,
     );

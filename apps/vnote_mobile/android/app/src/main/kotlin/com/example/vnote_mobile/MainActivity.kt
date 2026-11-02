@@ -11,12 +11,13 @@ import android.os.Handler
 import android.os.Looper
 import android.os.ParcelFileDescriptor
 import android.provider.DocumentsContract
-import android.provider.OpenableColumns
 import android.system.ErrnoException
 import android.system.Os
 import android.system.OsConstants
 import android.system.StructStat
 import android.util.TypedValue
+import android.webkit.MimeTypeMap
+import java.util.Locale
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.embedding.engine.plugins.FlutterPlugin
@@ -64,6 +65,8 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
 
     private class ExportOperation(
         val id: String,
+        val scope: String,
+        val name: String,
         val root: File,
         val source: File,
         val resolver: ContentResolver,
@@ -135,21 +138,25 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
             "saveExport" -> save(call, result)
             "pickImport" -> pickImport(call, result)
             "cancelImport" -> {
-                val id = (call.arguments as? Map<*, *>)?.get("operationId") as? String
-                if (id == null || !validId(id)) {
+                val args = call.arguments as? Map<*, *>
+                val id = args?.get("operationId") as? String
+                val scope = args?.get("scope") as? String
+                if (args?.size != 2 || id == null || !validId(id) || !validScope(scope)) {
                     result.error("invalid_request", "Invalid import request.", null)
                     return
                 }
-                importing?.takeIf { it.id == id }?.let { cancelImport(it) }
+                importing?.takeIf { it.id == id && it.scope == scope }?.let { cancelImport(it) }
                 result.success(null)
             }
             "cancelExport" -> {
-                val id = (call.arguments as? Map<*, *>)?.get("operationId") as? String
-                if (id == null || !validId(id)) {
+                val args = call.arguments as? Map<*, *>
+                val id = args?.get("operationId") as? String
+                val scope = args?.get("scope") as? String
+                if (args?.size != 2 || id == null || !validId(id) || !validScope(scope)) {
                     result.error("invalid_request", "Invalid export request.", null)
                     return
                 }
-                active?.takeIf { it.id == id }?.let { cancelOperation(it) }
+                active?.takeIf { it.id == id && it.scope == scope }?.let { cancelOperation(it) }
                 // This is an acknowledgement only. saveExport settles after IO closes.
                 result.success(null)
             }
@@ -172,9 +179,13 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         }
         val args = call.arguments as? Map<*, *>
         val id = args?.get("operationId") as? String
+        val scope = args?.get("scope") as? String
         val path = args?.get("path") as? String
         val name = args?.get("suggestedName") as? String
-        if (id == null || path == null || name == null || !validId(id) || !validName(name)) {
+        if (args?.size != 4 || id == null || scope == null || path == null || name == null ||
+            !validId(id) || (scope != "notebook" && scope != "resource") ||
+            (scope == "notebook" && !validName(name))
+        ) {
             reply(result, "failed", false)
             return
         }
@@ -182,16 +193,18 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         val source: File
         try {
             root = prepareStorage(app)
-            source = validateSource(root, id, path)
+            source = validateSource(root, id, scope, name, path)
         } catch (_: Exception) {
             reply(result, "failed", false)
             return
         }
-        val operation = ExportOperation(id, root, source, app.contentResolver, nextRequestCode++, result)
+        val operation = ExportOperation(id, scope, name, root, source, app.contentResolver, nextRequestCode++, result)
         active = operation
         val intent = Intent(Intent.ACTION_CREATE_DOCUMENT).apply {
             addCategory(Intent.CATEGORY_OPENABLE)
-            type = "application/zip"
+            type = if (scope == "notebook") "application/zip" else
+                MimeTypeMap.getSingleton().getMimeTypeFromExtension(
+                    name.substringAfterLast('.', "").lowercase(Locale.ROOT)) ?: "application/octet-stream"
             putExtra(Intent.EXTRA_TITLE, name)
         }
         try {
@@ -242,7 +255,7 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
 
     private fun copy(operation: ExportOperation, uri: Uri) {
         checkCancelled(operation)
-        val source = validateSource(operation.root, operation.id, operation.source.path)
+        val source = validateSource(operation.root, operation.id, operation.scope, operation.name, operation.source.path)
         val before = Os.lstat(source.path)
         val descriptor = Os.open(source.path, OsConstants.O_RDONLY or OsConstants.O_CLOEXEC or
             OsConstants.O_NOFOLLOW, 0)
@@ -250,7 +263,7 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
             FileInputStream(descriptor).use { input ->
                 val opened = Os.fstat(descriptor)
                 requireSameFile(before, opened)
-                validateSource(operation.root, operation.id, source.path)
+                validateSource(operation.root, operation.id, operation.scope, operation.name, source.path)
                 checkCancelled(operation)
                 val destination = operation.resolver.openFileDescriptor(uri, "wt", operation.signal)
                     ?: throw IOException("Export destination unavailable")
@@ -267,7 +280,8 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
                                 val count = input.read(copyBuffer)
                                 if (count < 0) break
                                 copied += count
-                                if (copied > opened.st_size || copied > MAX_ARCHIVE_BYTES) {
+                                val maximum = if (operation.scope == "resource") MAX_INPUT_BYTES else MAX_ARCHIVE_BYTES
+                                if (copied > opened.st_size || copied > maximum) {
                                     throw IOException("Export source changed")
                                 }
                                 output.write(copyBuffer, 0, count)
@@ -334,6 +348,7 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
 
     private class ImportOperation(
         val id: String,
+        val scope: String,
         val kind: String,
         val root: File,
         val transaction: File,
@@ -365,9 +380,10 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         }
         val args = call.arguments as? Map<*, *>
         val id = args?.get("operationId") as? String
+        val scope = args?.get("scope") as? String
         val kind = args?.get("kind") as? String
-        if (active != null || importing != null || args?.size != 2 || id == null ||
-            !validId(id) || kind == null || (kind != "zip" && kind != "folder")
+        if (active != null || importing != null || args?.size != 3 || id == null ||
+            !validId(id) || scope == null || kind == null || !validImport(scope, kind)
         ) {
             replyImport(result, "failed")
             return
@@ -376,22 +392,27 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         val transaction: File
         try {
             root = prepareStorage(app)
-            transaction = validateImportRequest(root, id, kind)
+            transaction = validateImportRequest(root, id, scope, kind)
         } catch (_: Exception) {
             replyImport(result, "failed")
             return
         }
-        val operation = ImportOperation(id, kind, root, transaction, app.contentResolver,
+        val operation = ImportOperation(id, scope, kind, root, transaction, app.contentResolver,
             nextRequestCode++, result)
         importing = operation
-        val intent = if (kind == "zip") {
+        val intent = if (kind == "folder") {
+            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
+        } else {
             Intent(Intent.ACTION_OPEN_DOCUMENT).apply {
                 addCategory(Intent.CATEGORY_OPENABLE)
-                type = "application/zip"
-                putExtra(Intent.EXTRA_MIME_TYPES, arrayOf("application/zip", "application/x-zip-compressed"))
+                type = when (kind) {
+                    "zip" -> "application/zip"
+                    "image" -> "image/*"
+                    else -> "*/*"
+                }
+                if (kind == "zip") putExtra(Intent.EXTRA_MIME_TYPES,
+                    arrayOf("application/zip", "application/x-zip-compressed"))
             }
-        } else {
-            Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)
         }
         // Request only the temporary read lease. Never persist provider grants.
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
@@ -433,13 +454,23 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         return true
     }
 
-    private fun validateImportRequest(root: File, id: String, kind: String): File {
+    private fun validateImportRequest(root: File, id: String, scope: String, kind: String): File {
+        if (!validImport(scope, kind)) throw IOException("Invalid import request")
         requireDirectory(root)
-        val imports = File(root, "imports")
-        val transaction = File(imports, id)
-        requireDirectory(imports)
+        val group = File(root, importNamespace(scope))
+        val transaction = File(group, id)
+        requireDirectory(group)
         requireDirectory(transaction)
-        val marker = File(transaction, "request.json")
+        val request = readMarker(File(transaction, "request.json"))
+        val legacy = scope == "notebook" && request.length() == 3 && request.opt("version") == 1
+        val scoped = request.length() == 4 && request.opt("version") == 2 && request.opt("scope") == scope
+        if ((!legacy && !scoped) || request.opt("id") != id || request.opt("kind") != kind) {
+            throw IOException("Invalid import request")
+        }
+        return transaction
+    }
+
+    private fun readMarker(marker: File): JSONObject {
         val before = Os.lstat(marker.path)
         if (!OsConstants.S_ISREG(before.st_mode) || before.st_nlink != 1L ||
             before.st_size <= 0 || before.st_size > 16384
@@ -461,34 +492,42 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
                 requireSameFile(before, Os.lstat(marker.path))
                 val text = Charsets.UTF_8.newDecoder().onMalformedInput(CodingErrorAction.REPORT)
                     .decode(java.nio.ByteBuffer.wrap(bytes)).toString()
-                val request = JSONObject(text)
-                if (request.length() != 3 || request.opt("version") != 1 ||
-                    request.opt("id") != id || request.opt("kind") != kind
-                ) throw IOException("Invalid import request")
+                return JSONObject(text)
             }
         } finally {
             Os.close(descriptor)
         }
-        return transaction
     }
 
     private fun copyImport(operation: ImportOperation, uri: Uri) {
         checkImportCancelled(operation)
-        validateImportRequest(operation.root, operation.id, operation.kind)
-        if (operation.kind == "zip") {
-            var name: String? = null
-            var size: Long? = null
-            operation.resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE),
-                null, null, null, operation.signal)?.use { cursor ->
-                if (!cursor.moveToFirst()) throw IOException("Import source unavailable")
-                name = cursor.getString(0)
-                if (!cursor.isNull(1)) size = cursor.getLong(1)
-                if (cursor.moveToNext()) throw IOException("Invalid import source")
-            } ?: throw IOException("Import source unavailable")
-            operation.sourceName = checkedSourceName(name)
-            reserveImportSpace(operation, size, MAX_INPUT_BYTES)
-            copyProviderFile(operation, uri, File(operation.transaction, "input.zip"), size, MAX_INPUT_BYTES)
-            if (operation.bytes == 0L) throw IOException("Empty import")
+        validateImportRequest(operation.root, operation.id, operation.scope, operation.kind)
+        if (operation.kind != "folder") {
+            val entry = queryDocument(operation, uri)
+            if (entry.directory) throw IOException("Invalid import file")
+            operation.sourceName = checkedSourceName(entry.name)
+            val maximum = if (operation.kind == "zip") MAX_INPUT_BYTES else MAX_FILE_BYTES
+            reserveImportSpace(operation, entry.size, maximum)
+            if (operation.kind == "zip") {
+                copyProviderFile(operation, uri, File(operation.transaction, "input.zip"), entry.size, maximum)
+                if (operation.bytes == 0L) throw IOException("Empty import")
+            } else {
+                validateImportName(entry.name, entry.name)
+                val unpacked = File(operation.transaction, "unpacked")
+                Os.mkdir(unpacked.path, 448)
+                requireDirectory(unpacked)
+                copyProviderFile(operation, uri, File(unpacked, entry.name), entry.size, maximum)
+                if (operation.transaction.usableSpace < SPACE_HEADROOM + 16384) {
+                    throw IOException("Import storage unavailable")
+                }
+                exclusiveOutput(File(operation.transaction, "accepted.jsonl")) { stream ->
+                    val inventory = BufferedWriter(OutputStreamWriter(stream, Charsets.UTF_8))
+                    inventory.write(JSONObject().put("path", entry.name).put("type", "file").toString())
+                    inventory.newLine()
+                    inventory.flush()
+                    stream.fd.sync()
+                }
+            }
             operation.entries = 1
         } else {
             val rootId = DocumentsContract.getTreeDocumentId(uri)
@@ -632,7 +671,8 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
 
     private fun reserveImportSpace(operation: ImportOperation, declared: Long?, maximum: Long) {
         if (declared != null && (declared < 0 || declared > maximum)) throw IOException("Import limit exceeded")
-        if (operation.transaction.usableSpace < (declared ?: maximum) + SPACE_HEADROOM) {
+        val metadata = 64L * 1024 + if (operation.kind == "folder") MAX_ENTRIES.toLong() * 8192 else 0L
+        if (operation.transaction.usableSpace < (declared ?: maximum) + metadata + SPACE_HEADROOM) {
             throw IOException("Import storage unavailable")
         }
     }
@@ -746,7 +786,9 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         val root = File(data, "files")
         if (app.filesDir.canonicalFile != root) throw IOException("Invalid support namespace")
         ensureDirectory(root)
-        for (name in arrayOf("core", "notebooks", "exports", "imports")) ensureDirectory(File(root, name))
+        for (name in arrayOf("core", "notebooks", "exports", "imports", "cohorts", "resources")) {
+            ensureDirectory(File(root, name))
+        }
         return root
     }
 
@@ -766,27 +808,53 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         }
     }
 
-    private fun validateSource(root: File, id: String, path: String): File {
+    private fun validateSource(root: File, id: String, scope: String, name: String, path: String): File {
         if (path.length > 16384 || path.indexOf('\u0000') >= 0) throw IOException("Invalid export source")
         requireDirectory(root)
-        val exports = File(root, "exports")
-        val transaction = File(exports, id)
-        requireDirectory(exports)
+        val group = File(root, if (scope == "resource") "resources" else "exports")
+        val transaction = File(group, id)
+        requireDirectory(group)
         requireDirectory(transaction)
-        val source = File(transaction, "notebook.zip")
+        val source = if (scope == "resource") {
+            validateImportName(name, name)
+            val request = readMarker(File(transaction, "request.json"))
+            val kind = request.opt("kind") as? String ?: throw IOException("Invalid export request")
+            validateImportRequest(root, id, scope, kind)
+            val output = File(transaction, "output")
+            requireDirectory(output)
+            val ready = readMarker(File(transaction, "ready.json"))
+            val size = when (val value = ready.opt("bytes")) {
+                is Int -> value.toLong()
+                is Long -> value
+                else -> throw IOException("Invalid resource size")
+            }
+            if (ready.length() != 6 || ready.opt("version") != 1 || ready.opt("id") != id ||
+                ready.opt("scope") != scope || ready.opt("name") != name ||
+                size < 0 || size > MAX_INPUT_BYTES || ready.opt("sha256") !is String ||
+                !DIGEST.matches(ready.getString("sha256"))
+            ) throw IOException("Invalid ready resource")
+            File(output, name).also {
+                if (Os.lstat(it.path).st_size != size) throw IOException("Resource source changed")
+            }
+        } else {
+            if (scope != "notebook") throw IOException("Invalid export scope")
+            File(transaction, "notebook.zip")
+        }
         if (path != source.path || source.canonicalFile != source) throw IOException("Invalid export source")
-        requireRegularFile(Os.lstat(source.path))
+        val value = Os.lstat(source.path)
+        requireRegularFile(value, allowEmpty = scope == "resource")
+        if (scope == "resource" && value.st_size > MAX_INPUT_BYTES) throw IOException("Resource limit exceeded")
         return source
     }
 
-    private fun requireRegularFile(stat: StructStat) {
+    private fun requireRegularFile(stat: StructStat, allowEmpty: Boolean = false) {
         if (!OsConstants.S_ISREG(stat.st_mode) || stat.st_nlink != 1L ||
-            stat.st_size <= 0L || stat.st_size > MAX_ARCHIVE_BYTES
+            stat.st_size < (if (allowEmpty) 0L else 1L) || stat.st_size > MAX_ARCHIVE_BYTES
         ) throw IOException("Invalid export source")
     }
 
     private fun requireSameFile(before: StructStat, after: StructStat) {
-        requireRegularFile(after)
+        requireRegularFile(after, allowEmpty = true)
         if (before.st_dev != after.st_dev || before.st_ino != after.st_ino ||
             before.st_size != after.st_size || before.st_mtime != after.st_mtime ||
             before.st_ctime != after.st_ctime
@@ -807,7 +875,21 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         private val RESERVED = Regex("(?i)(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])")
         private val ID = Regex("[0-9a-f]{32}")
         private val NAME = Regex("[A-Za-z0-9][A-Za-z0-9._-]*\\.zip")
+        private val DIGEST = Regex("[0-9a-f]{64}")
         private fun validId(id: String) = ID.matches(id)
         private fun validName(name: String) = name.length <= 100 && !name.contains("..") && NAME.matches(name)
+        private fun validScope(scope: String?) = scope == "notebook" || scope == "cohort" || scope == "resource"
+        private fun validImport(scope: String, kind: String) = when (scope) {
+            "notebook" -> kind == "zip" || kind == "folder"
+            "cohort" -> kind == "zip" || kind == "folder" || kind == "file"
+            "resource" -> kind == "file" || kind == "image"
+            else -> false
+        }
+        private fun importNamespace(scope: String) = when (scope) {
+            "notebook" -> "imports"
+            "cohort" -> "cohorts"
+            "resource" -> "resources"
+            else -> throw IOException("Invalid transfer scope")
+        }
     }
 }

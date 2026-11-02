@@ -75,6 +75,9 @@ class _VNoteAppState extends State<VNoteApp> {
                     ? NotebookBrowser(
                         key: ObjectKey(workspace),
                         workspace: workspace,
+                        transferReserved: libraryState.transferReserved,
+                        onImportFiles: (directory, kind, name) => library
+                            .importFiles(workspace, directory, kind, name),
                         dark: _dark,
                         onThemeChanged: (dark) => setState(() => _dark = dark),
                         onShowNotebooks: () =>
@@ -83,6 +86,7 @@ class _VNoteAppState extends State<VNoteApp> {
                     : NotebookEditor(
                         key: ObjectKey(state.session),
                         workspace: workspace,
+                        library: library,
                         session: state.session!,
                         dark: _dark,
                         onThemeChanged: (dark) => setState(() => _dark = dark),

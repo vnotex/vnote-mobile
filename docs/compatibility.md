@@ -27,6 +27,10 @@ refuses this profile rather than being decrypted or partially skipped. Unsupport
 ordinary files stay opaque, not converted. Metadata-dependent and external links
 may not work; the content export does not normalize or rewrite source text.
 
+Standalone file/ZIP/folder import creates one new child cohort with core-generated IDs, sealed once for retry. Original hierarchy, Unicode spelling and opaque bytes remain unchanged; local Markdown dependencies must be present and confined. A files/assets ZIP can use this path but does not restore its former notebook IDs or metadata. Publication limits include the wrapper ID and bounded parent/journal images, in addition to the source entry/byte caps.
+
+Ordinary-note resource operations preserve the body and unrelated assets. Metadata-only recovery never decrypts a protected body; tracking changes membership, not bytes. Exact-name collision/ambiguous outcomes retain files rather than accepting a suffix. Image/link insertion modifies only volatile source until Write. The current core prerequisite adds fail-closed cohort recovery and checked resource outcomes; malformed legacy journals are not disposable trash.
+
 ## Tool/platform selection
 
 [toolchains.json](../toolchains.json) records exact initialization pins. Flutter 3.47.9 / Dart 3.13.7 and Node 24.22.2 / npm 11.19.1 were executed locally. Android native builds select API 36, minimum API 28 (Bionic Iconv availability), NDK 28.2.13676358, Gradle 9.3.1, AGP 9.1.0 and Kotlin 2.4.0 from the pinned Flutter template. iOS selects deployment 15.0 and Xcode 26.6 (17F113), SDK 26.5; the [macOS CI image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md) lists that Xcode. This selection is not iOS build evidence or the completed full-native dependency intersection.

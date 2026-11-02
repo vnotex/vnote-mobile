@@ -19,3 +19,4 @@ export 'src/core_notebook.dart'
         CoreTag,
         CoreTags,
         NotebookCore;
+export 'src/transfer_models.dart';

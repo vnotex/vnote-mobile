@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
+import 'dart:convert';
+
 import 'package:flutter/services.dart';
+
+enum DocumentTransferScope { notebook, cohort, resource }
 
 enum DocumentExportStatus { saved, cancelled, failed, unavailable }
 
@@ -13,7 +17,7 @@ class DocumentExportResult {
   final bool externalMayBeIncomplete;
 }
 
-enum DocumentImportKind { zip, folder }
+enum DocumentImportKind { zip, folder, file, image }
 
 enum DocumentImportStatus { ready, cancelled, failed, unavailable }
 
@@ -35,15 +39,23 @@ abstract interface class DocumentTransferPlatform {
   Future<void> prepareStorage();
   Future<DocumentExportResult> save({
     required String operationId,
+    required DocumentTransferScope scope,
     required String path,
     required String suggestedName,
   });
-  Future<void> cancel(String operationId);
+  Future<void> cancel(
+    String operationId, {
+    required DocumentTransferScope scope,
+  });
   Future<DocumentImportResult> pickImport({
     required String operationId,
+    required DocumentTransferScope scope,
     required DocumentImportKind kind,
   });
-  Future<void> cancelImport(String operationId);
+  Future<void> cancelImport(
+    String operationId, {
+    required DocumentTransferScope scope,
+  });
 }
 
 /// Transfer futures, not cancellation acknowledgements, release IO leases.
@@ -60,6 +72,32 @@ class MethodChannelDocumentTransferPlatform
   static bool _validId(String value) =>
       value.length == 32 && _id.hasMatch(value);
 
+  static bool _validResourceName(String value) {
+    if (value.isEmpty ||
+        value == '.' ||
+        value == '..' ||
+        value.endsWith('.') ||
+        value.endsWith(' ') ||
+        RegExp(r'[\x00-\x1f\x7f-\x9f/\\:*?"<>|]').hasMatch(value) ||
+        RegExp(
+          r'^(CON|PRN|AUX|NUL|COM[1-9¹²³]|LPT[1-9¹²³])$',
+          caseSensitive: false,
+        ).hasMatch(value.split('.').first)) {
+      return false;
+    }
+    for (var index = 0; index < value.length; index++) {
+      final unit = value.codeUnitAt(index);
+      if (unit >= 0xd800 && unit <= 0xdbff) {
+        if (++index >= value.length) return false;
+        final low = value.codeUnitAt(index);
+        if (low < 0xdc00 || low > 0xdfff) return false;
+      } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+        return false;
+      }
+    }
+    return utf8.encode(value).length <= 255;
+  }
+
   @override
   Future<void> prepareStorage() async {
     try {
@@ -74,6 +112,7 @@ class MethodChannelDocumentTransferPlatform
   @override
   Future<DocumentExportResult> save({
     required String operationId,
+    required DocumentTransferScope scope,
     required String path,
     required String suggestedName,
   }) async {
@@ -81,9 +120,13 @@ class MethodChannelDocumentTransferPlatform
         path.isEmpty ||
         path.length > 16384 ||
         path.contains('\u0000') ||
-        suggestedName.length > 100 ||
-        suggestedName.contains('..') ||
-        _name.firstMatch(suggestedName)?.end != suggestedName.length) {
+        scope == DocumentTransferScope.cohort ||
+        (scope == DocumentTransferScope.resource
+            ? !_validResourceName(suggestedName)
+            : suggestedName.length > 100 ||
+                  suggestedName.contains('..') ||
+                  _name.firstMatch(suggestedName)?.end !=
+                      suggestedName.length)) {
       return const DocumentExportResult(
         status: DocumentExportStatus.failed,
         externalMayBeIncomplete: false,
@@ -92,6 +135,7 @@ class MethodChannelDocumentTransferPlatform
     try {
       final raw = await _channel.invokeMethod<Object?>('saveExport', {
         'operationId': operationId,
+        'scope': scope.name,
         'path': path,
         'suggestedName': suggestedName,
       });
@@ -131,13 +175,17 @@ class MethodChannelDocumentTransferPlatform
   }
 
   @override
-  Future<void> cancel(String operationId) async {
+  Future<void> cancel(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {
     if (!_validId(operationId)) {
       throw StateError('Document export cancellation is unavailable.');
     }
     try {
       final result = await _channel.invokeMethod<Object?>('cancelExport', {
         'operationId': operationId,
+        'scope': scope.name,
       });
       if (result != null) throw const FormatException();
     } catch (_) {
@@ -148,6 +196,7 @@ class MethodChannelDocumentTransferPlatform
   @override
   Future<DocumentImportResult> pickImport({
     required String operationId,
+    required DocumentTransferScope scope,
     required DocumentImportKind kind,
   }) async {
     const failed = DocumentImportResult(
@@ -156,10 +205,21 @@ class MethodChannelDocumentTransferPlatform
       bytes: 0,
       entries: 0,
     );
-    if (!_validId(operationId)) return failed;
+    if (!_validId(operationId) ||
+        (scope == DocumentTransferScope.notebook &&
+            kind != DocumentImportKind.zip &&
+            kind != DocumentImportKind.folder) ||
+        (scope == DocumentTransferScope.cohort &&
+            kind == DocumentImportKind.image) ||
+        (scope == DocumentTransferScope.resource &&
+            kind != DocumentImportKind.file &&
+            kind != DocumentImportKind.image)) {
+      return failed;
+    }
     try {
       final raw = await _channel.invokeMethod<Object?>('pickImport', {
         'operationId': operationId,
+        'scope': scope.name,
         'kind': kind.name,
       });
       if (raw is! Map ||
@@ -179,16 +239,24 @@ class MethodChannelDocumentTransferPlatform
       final bytes = raw['bytes'] as int;
       final entries = raw['entries'] as int;
       if (status == DocumentImportStatus.ready) {
-        final maximum = kind == DocumentImportKind.zip ? 1 << 30 : 2 << 30;
+        final maximum = switch (kind) {
+          DocumentImportKind.zip => 1 << 30,
+          DocumentImportKind.folder => 2 << 30,
+          DocumentImportKind.file || DocumentImportKind.image => 256 << 20,
+        };
         if (name is! String ||
             name.isEmpty ||
             name.length > 1024 ||
             name.contains('\u0000') ||
+            ((kind == DocumentImportKind.file ||
+                    kind == DocumentImportKind.image) &&
+                !_validResourceName(name)) ||
             bytes < 0 ||
             bytes > maximum ||
             entries < 0 ||
             entries > 100000 ||
-            (kind == DocumentImportKind.zip && (bytes == 0 || entries != 1))) {
+            (kind != DocumentImportKind.folder && entries != 1) ||
+            (kind == DocumentImportKind.zip && bytes == 0)) {
           throw const FormatException();
         }
       } else if (name != null || bytes != 0 || entries != 0) {
@@ -213,13 +281,17 @@ class MethodChannelDocumentTransferPlatform
   }
 
   @override
-  Future<void> cancelImport(String operationId) async {
+  Future<void> cancelImport(
+    String operationId, {
+    required DocumentTransferScope scope,
+  }) async {
     if (!_validId(operationId)) {
       throw StateError('Document import cancellation is unavailable.');
     }
     try {
       final result = await _channel.invokeMethod<Object?>('cancelImport', {
         'operationId': operationId,
+        'scope': scope.name,
       });
       if (result != null) throw const FormatException();
     } catch (_) {

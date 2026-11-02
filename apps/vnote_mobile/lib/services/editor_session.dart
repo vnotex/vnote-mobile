@@ -108,6 +108,8 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
   Completer<void>? _closeCompletion;
   String? _closeDisposition;
   int? _closeTarget;
+  _PendingInsertion? _insertion;
+  bool _disposed = false;
 
   static String _randomGeneration() {
     final random = Random.secure();
@@ -150,6 +152,62 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
   Map<String, Object?>? theme({required bool dark}) {
     if (!_canControl) return null;
     return _request('theme', {'theme': dark ? 'dark' : 'light'});
+  }
+
+  /// Inserts literal source at a freshly flushed cursor, never a cached cursor.
+  /// Asset durability and explicit notebook Write remain separate operations.
+  Future<void> insertText(EditorSend send, String text) {
+    if (!_canControl || _insertion != null) {
+      return Future.error(
+        StateError('Insertion is unavailable or already pending.'),
+      );
+    }
+    try {
+      _require(
+        text.length <= maxInsertedUnits,
+        'Insertion exceeds its source limit.',
+      );
+      _utf8Size(text, limit: maxControlBytes);
+      // Reserve worst-case counters/offsets before asking the page for a cursor.
+      // JSON escaping counts too; no full-document snapshot is allocated.
+      _utf8Size(
+        jsonEncode({
+          'v': 1,
+          'type': 'insert',
+          'documentId': documentId,
+          'generation': generation,
+          'revision': maxRevision,
+          'requestId': 'host-$maxRevision',
+          'text': text,
+          'anchor': maxSourceUnits,
+          'head': maxSourceUnits,
+        }),
+        limit: maxControlBytes,
+      );
+      _require(
+        _hostSequence <= maxRevision - 2,
+        'Host request numbers exhausted.',
+      );
+    } on FormatException catch (error) {
+      return Future.error(error);
+    }
+    final request = _request('selection', {'mode': 'request'});
+    final insertion = _PendingInsertion(
+      send,
+      text,
+      request['requestId']! as String,
+      value.revision,
+    );
+    _insertion = insertion;
+    _pending[insertion.selectionRequest] = 'insertSelection';
+    try {
+      send(request);
+    } on Object catch (_) {
+      reportTransportError(
+        'Unable to request the insertion cursor. Text is retained.',
+      );
+    }
+    return insertion.completion.future;
   }
 
   /// Flushes one correlated current snapshot; receipt alone is not a write.
@@ -203,7 +261,8 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
     return completion.future;
   }
 
-  bool get _canControl => value.ready && !value.closing && !_faulted;
+  bool get _canControl =>
+      !_disposed && value.ready && !value.closing && !value.closed && !_faulted;
 
   Map<String, Object?>? _requestClose(String disposition) {
     if (value.closed || value.closing || _loadRequest == null) return null;
@@ -211,6 +270,9 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
       'mode': 'request',
       'disposition': disposition,
     });
+    _settleInsertion(
+      'The editor is closing. Received text and the asset are retained.',
+    );
     _closeDisposition = disposition;
     _closeTarget = value.revision;
     _pending[message['requestId']! as String] = 'close';
@@ -219,12 +281,191 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
   }
 
   void reportTransportError(String error) {
+    if (_disposed) return;
     _faulted = true;
+    _settleInsertion(error);
     _snapshotCompletion?.completeError(StateError(error));
     _snapshotCompletion = null;
     _closeCompletion?.completeError(StateError(error));
     _closeCompletion = null;
     value = value._with(ready: false, error: error);
+  }
+
+  @override
+  void dispose() {
+    _settleInsertion(
+      'The editor session was retired. Received text and the asset are retained.',
+    );
+    _disposed = true;
+    super.dispose();
+  }
+
+  bool _isInsertionRequest(String? requestId) =>
+      requestId != null &&
+      _insertion != null &&
+      (requestId == _insertion!.selectionRequest ||
+          requestId == _insertion!.requestId);
+
+  void _settleInsertion([String? error]) {
+    final insertion = _insertion;
+    if (insertion == null) return;
+    _insertion = null;
+    for (final id in [insertion.selectionRequest, insertion.requestId]) {
+      if (id == null) continue;
+      _pending.remove(id);
+      // Late/changed receipts are tombstones, not new operations or edit faults.
+      _remember(id, null, null);
+    }
+    if (error == null) {
+      insertion.completion.complete();
+    } else {
+      insertion.completion.completeError(StateError(error));
+    }
+  }
+
+  void _receiveInsertionSelection(
+    Map<String, dynamic> message,
+    String requestId,
+  ) {
+    _keys(message, {'mode', 'anchor', 'head'});
+    _require(
+      _canControl &&
+          _insertion != null &&
+          _pending[requestId] == 'insertSelection' &&
+          message['mode'] == 'current',
+      'Unexpected insertion selection barrier.',
+    );
+    final insertion = _insertion!;
+    final revision = message['revision'] as int;
+    _require(
+      revision == value.revision && revision >= insertion.minimumRevision,
+      'Insertion selection no longer matches the received source.',
+    );
+    final selection = _selection(message, value.text);
+    final from = min(selection.$1, selection.$2);
+    final to = max(selection.$1, selection.$2);
+    final text = insertion.text;
+    _require(from != to || text.isNotEmpty, 'Insertion must change source.');
+    _require(
+      revision < maxRevision,
+      'Revision exhausted; retain this session.',
+    );
+    _require(
+      _hostSequence < maxRevision,
+      'Host request numbers exhausted; retain this session.',
+    );
+    _require(
+      value.text.length + text.length - (to - from) <= maxSourceUnits &&
+          _sourceBytes +
+                  _utf8Size(text) -
+                  _utf8Size(value.text, start: from, end: to) <=
+              maxSourceBytes,
+      'Insertion exceeds the document limit.',
+    );
+    // Do not create a CRLF pair with the resulting cursor inside it.
+    _require(
+      to == value.text.length ||
+          value.text.codeUnitAt(to) != 10 ||
+          (text.isNotEmpty
+              ? text.codeUnitAt(text.length - 1) != 13
+              : from == 0 || value.text.codeUnitAt(from - 1) != 13),
+      'Insertion would split a CRLF at its resulting cursor.',
+    );
+    final request = _request('insert', {
+      'revision': revision,
+      'text': text,
+      'anchor': selection.$1,
+      'head': selection.$2,
+    });
+    _utf8Size(jsonEncode(request), limit: maxControlBytes);
+    insertion.requestId = request['requestId']! as String;
+    insertion.baseRevision = revision;
+    insertion.from = from;
+    insertion.to = to;
+    _pending.remove(requestId);
+    _remember(requestId, null, null);
+    _pending[insertion.requestId!] = 'insert';
+    value = value._with(anchor: selection.$1, head: selection.$2);
+    // A listener may retire this session while the cursor is published.
+    if (!identical(_insertion, insertion)) return;
+    try {
+      insertion.send(request);
+    } on Object catch (_) {
+      reportTransportError(
+        'Unable to send the insertion. Received text and the asset are retained.',
+      );
+    }
+  }
+
+  void _failControl(String? requestId, String error) {
+    if (_isInsertionRequest(requestId)) {
+      _settleInsertion(error);
+      return;
+    }
+    final pending = _pending.remove(requestId);
+    if (pending == 'snapshot') {
+      _snapshotTarget = null;
+      _snapshotCompletion?.completeError(StateError(error));
+      _snapshotCompletion = null;
+    } else if (pending == 'close') {
+      value = value._with(closing: false);
+      _closeCompletion?.completeError(StateError(error));
+      _closeCompletion = null;
+    } else if (pending == 'ready') {
+      reportTransportError(error);
+    }
+  }
+
+  void _receiveAcknowledgement(Map<String, dynamic> message, String requestId) {
+    _keys(message, {'stage', 'throughRevision', 'error'}, optional: {'error'});
+    _require(
+      requestId.startsWith('host-'),
+      'Acknowledgements must answer a host request.',
+    );
+    final stage = message['stage'];
+    _require(
+      stage == 'received' || stage == 'rejected',
+      'Invalid acknowledgement stage.',
+    );
+    final revision = message['revision'] as int;
+    _require(
+      _integer(message['throughRevision']) &&
+          message['throughRevision'] == revision &&
+          revision <= value.revision,
+      'Invalid acknowledgement revision.',
+    );
+    _require(
+      !message.containsKey('error') ||
+          (message['error'] is String &&
+              (message['error'] as String).length <= 1024),
+      'Invalid acknowledgement error.',
+    );
+    if (stage == 'rejected') {
+      _require(
+        message['error'] is String && (message['error'] as String).isNotEmpty,
+        'Missing rejection error.',
+      );
+      _failControl(requestId, message['error'] as String);
+      return;
+    }
+    final insertion = _insertion;
+    if (insertion != null &&
+        _pending[requestId] == 'insert' &&
+        insertion.requestId == requestId) {
+      _require(
+        insertion.matchedRevision == revision &&
+            revision == insertion.baseRevision! + 1,
+        'Insertion receipt arrived without its matching edit batch.',
+      );
+      _settleInsertion();
+    } else {
+      _require(
+        !_pending.containsKey(requestId),
+        'Unexpected received acknowledgement.',
+      );
+      // A late receipt outside the bounded replay window cannot become a fault
+      // or settle a newer insertion. Host controls never get a rejected reply.
+    }
   }
 
   Map<String, Object?> _request(String type, Map<String, Object?> fields) {
@@ -245,6 +486,7 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
   /// Receives only the narrow VNoteEditor channel's JSON string. Any returned
   /// message is sent as JSON data; this controller never constructs JavaScript.
   Map<String, Object?>? receive(String wire) {
+    if (_disposed) return null;
     Map<String, dynamic>? message;
     String? requestId;
     var rememberWire = false;
@@ -285,11 +527,21 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
                 : maxControlBytes),
         'Message exceeds its encoded size limit.',
       );
+      // A malformed acknowledgement must not consume an editor sequence and
+      // make the next unrelated edit look like a replay.
+      _require(
+        type != 'ack' || requestId.startsWith('host-'),
+        'Acknowledgements must answer a host request.',
+      );
       // Full snapshots are never retained in the replay cache.
       rememberWire = type != 'save' || bytes <= maxControlBytes;
       if (value.closed) return null;
       // Stale selection is intentionally dropped, even outside the replay window.
-      if (type == 'selection' && revision < value.revision) return null;
+      if (type == 'selection' &&
+          requestId.startsWith('editor-') &&
+          revision < value.revision) {
+        return null;
+      }
       final completed = _completed[requestId];
       if (completed != null) {
         // Retired full transfers are tombstones, not repeatable mutations.
@@ -318,7 +570,11 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
           'Unknown host request.',
         );
         _require(
-          type == 'ready' || type == 'save' || type == 'close' || type == 'ack',
+          type == 'ready' ||
+              type == 'save' ||
+              type == 'close' ||
+              type == 'ack' ||
+              type == 'selection',
           'Invalid host request reply.',
         );
       }
@@ -356,6 +612,12 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
           _applyEdit(message);
           response = _ack(requestId, 'received');
         case 'selection':
+          if (requestId.startsWith('host-')) {
+            // Old cursor replies after cache eviction are inert too.
+            if (!_pending.containsKey(requestId)) return null;
+            _receiveInsertionSelection(message, requestId);
+            break;
+          }
           _keys(message, {'anchor', 'head'});
           _require(value.ready && !_faulted, 'Editor is not ready.');
           _require(
@@ -420,52 +682,32 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
           _closeCompletion?.complete();
           _closeCompletion = null;
         case 'ack':
-          _keys(message, {'stage', 'throughRevision', 'error'});
-          _require(
-            requestId.startsWith('host-'),
-            'Rejections must answer a host request.',
-          );
-          _require(
-            message['stage'] == 'rejected',
-            'Only rejected editor acknowledgements are supported.',
-          );
-          _require(
-            _integer(message['throughRevision']) &&
-                message['throughRevision'] == revision,
-            'Invalid rejection revision.',
-          );
-          _require(
-            message['error'] is String &&
-                (message['error'] as String).isNotEmpty,
-            'Missing rejection error.',
-          );
-          final pending = _pending.remove(requestId);
-          if (pending == 'snapshot') {
-            _snapshotTarget = null;
-            _snapshotCompletion?.completeError(
-              StateError(message['error'] as String),
-            );
-            _snapshotCompletion = null;
-            break;
-          }
-          if (pending == 'close') {
-            value = value._with(closing: false);
-            _closeCompletion?.completeError(
-              StateError(message['error'] as String),
-            );
-            _closeCompletion = null;
-            break;
-          }
-          reportTransportError(
-            'Editor rejected a request: ${message['error']}',
-          );
+          _receiveAcknowledgement(message, requestId);
         default:
           throw const FormatException('Unknown editor message type.');
       }
-      _remember(requestId, type == 'save' ? null : wire, response);
+      _remember(
+        requestId,
+        type == 'save' ||
+                type == 'ack' ||
+                (type == 'selection' && requestId.startsWith('host-'))
+            ? null
+            : wire,
+        response,
+      );
       return response;
     } on FormatException catch (error) {
+      final correlatedId =
+          requestId ??
+          (message?['requestId'] is String
+              ? message!['requestId'] as String
+              : null);
+      if (_isInsertionRequest(correlatedId) || message?['type'] == 'ack') {
+        _failControl(correlatedId, error.message);
+        return null;
+      }
       reportTransportError(error.message);
+
       // Never acknowledge an acknowledgement, or respond to an unbound message.
       if (requestId == null || message?['type'] == 'ack') return null;
       final response = _ack(requestId, 'rejected', error: error.message);
@@ -564,8 +806,25 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
       'Invalid selection fields.',
     );
     final positions = _selection(selection, next);
+    // Correlation does not mutate the mirror: this still is an ordinary edit.
+    final insertion = _insertion;
+    if (insertion != null &&
+        insertion.requestId != null &&
+        insertion.baseRevision == value.revision &&
+        changes.length == 1) {
+      final change = changes.single as Map<String, dynamic>;
+      final position = insertion.from! + insertion.text.length;
+      if (change['from'] == insertion.from &&
+          change['to'] == insertion.to &&
+          change['insert'] == insertion.text &&
+          positions.$1 == position &&
+          positions.$2 == position) {
+        insertion.matchedRevision = message['revision'] as int;
+      }
+    }
     // Publish only after every range, byte limit, and selection has passed.
     _sourceBytes = bytes;
+
     value = value._with(
       text: next,
       revision: message['revision'] as int,
@@ -697,6 +956,26 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
   static void _require(bool condition, String message) {
     if (!condition) throw FormatException(message);
   }
+}
+
+class _PendingInsertion {
+  _PendingInsertion(
+    this.send,
+    this.text,
+    this.selectionRequest,
+    this.minimumRevision,
+  );
+
+  final EditorSend send;
+  final String text;
+  final String selectionRequest;
+  final int minimumRevision;
+  final completion = Completer<void>();
+  String? requestId;
+  int? baseRevision;
+  int? from;
+  int? to;
+  int? matchedRevision;
 }
 
 class _CompletedRequest {

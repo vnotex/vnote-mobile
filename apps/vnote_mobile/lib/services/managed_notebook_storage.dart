@@ -86,6 +86,8 @@ class ManagedNotebookStorage {
 
   Future<String> obtainExportRoot() => _obtainTransferRoot('exports');
   Future<String> obtainImportRoot() => _obtainTransferRoot('imports');
+  Future<String> obtainCohortRoot() => _obtainTransferRoot('cohorts');
+  Future<String> obtainResourceRoot() => _obtainTransferRoot('resources');
 
   Future<String> _obtainTransferRoot(String name) async {
     await _validateParent();
