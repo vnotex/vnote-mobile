@@ -9,5 +9,6 @@ dependencies:
   hooks: 2.2.0
   code_assets: 2.1.0
 dev_dependencies:
+  crypto: 3.0.8
   ffigen: 23.0.0
   test: 1.31.1

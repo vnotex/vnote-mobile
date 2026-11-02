@@ -1505,6 +1505,85 @@ void catalog_export_refuses_persisted_foreign_restore() {
   }
 }
 
+void catalog_collects_exact_disk_identities() {
+  Fixture fixture;
+  fixture.seed("identity oracle");
+  std::string root_id;
+  {
+    Host host(fixture, ExportOnly{});
+    auto opened = host.next();
+    CHECK(opened->code == VXCORE_OK);
+    root_id = opened->node_id;
+    CHECK(host.query(2, {{"op", "collectNodeIds"}}) == VXCORE_OK);
+    auto collected = host.next();
+    CHECK(collected->kind == VXM_EVENT_QUERY && collected->code == VXCORE_OK);
+    const auto json = Json::parse(text(collected));
+    CHECK(json.at("notebookId") == fixture.notebook_id);
+    const auto ids = json.at("nodeIds").get<std::vector<std::string>>();
+    const std::set<std::string> expected{root_id, fixture.node_id};
+    CHECK(ids.size() == expected.size());
+    CHECK(std::set<std::string>(ids.begin(), ids.end()) == expected);
+    CHECK(host.query(3, {{"op", "collectNodeIds"}, {"unknown", true}}) == VXCORE_ERR_INVALID_PARAM);
+    host.close();
+  }
+  const auto metadata = fs::u8path(fixture.notebook) / "vx_notebook/contents/vx.json";
+  const auto original = Json::parse(disk(metadata));
+  for (const auto *failure : {"missing-child", "unsafe-child", "duplicate-id", "empty-id"}) {
+    auto broken = original;
+    if (std::string(failure) == "missing-child") broken["folders"].push_back("Absent");
+    else if (std::string(failure) == "unsafe-child") broken["folders"].push_back("../escape");
+    else broken["files"][0]["id"] = std::string(failure) == "duplicate-id" ? root_id : "";
+    external_write(metadata, broken.dump());
+    Host host(fixture, ExportOnly{});
+    if (host.next()->code == VXCORE_OK) {
+      CHECK(host.query(2, {{"op", "collectNodeIds"}}) == VXCORE_OK);
+      CHECK(host.next()->code != VXCORE_OK);
+    }
+    host.close();
+    CHECK(Json::parse(disk(metadata)) == broken);
+  }
+  external_write(metadata, original.dump());
+  fs::remove(fixture.note());
+  Host host(fixture, ExportOnly{});
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(host.query(2, {{"op", "collectNodeIds"}}) == VXCORE_OK);
+  auto collected = host.next();
+  CHECK(collected->code == VXCORE_OK);
+  CHECK(Json::parse(text(collected)).at("nodeIds").size() == 2);
+  host.close();
+}
+
+void import_pure_helpers_are_bounded() {
+  auto *cancel = vxm_import_cancel_create();
+  CHECK(cancel != nullptr && vxm_import_cancel_query(cancel) == 0);
+  vxm_import_cancel_request(cancel);
+  CHECK(vxm_import_cancel_query(cancel) == 1);
+  vxm_import_cancel_request(cancel);
+  CHECK(vxm_import_cancel_query(cancel) == 1);
+  vxm_import_cancel_free(cancel);
+  CHECK(vxm_import_cancel_query(nullptr) == 0);
+  uint8_t nfc[64]{}, nfd[64]{};
+  uint64_t nfc_size = 0, nfd_size = 0;
+  const std::string input = u8"Straße/É/Σ";
+  CHECK(vxm_import_path_keys(reinterpret_cast<const uint8_t *>(input.data()), input.size(),
+                            nfc, sizeof(nfc), &nfc_size, nfd, sizeof(nfd), &nfd_size) == VXCORE_OK);
+  CHECK(std::string(reinterpret_cast<char *>(nfc), nfc_size) == u8"strasse/é/σ");
+  CHECK(std::string(reinterpret_cast<char *>(nfd), nfd_size) == u8"strasse/e\u0301/σ");
+  nfc[0] = 77;
+  nfd[0] = 88;
+  CHECK(vxm_import_path_keys(reinterpret_cast<const uint8_t *>(input.data()), input.size(),
+                            nfc, 1, &nfc_size, nfd, 1, &nfd_size) != VXCORE_OK);
+  CHECK(nfc[0] == 77 && nfd[0] == 88 && nfc_size > 1 && nfd_size > 1);
+  const uint8_t invalid[]{0xc0, 0x80};
+  CHECK(vxm_import_path_keys(invalid, sizeof(invalid), nfc, sizeof(nfc), &nfc_size,
+                            nfd, sizeof(nfd), &nfd_size) != VXCORE_OK);
+  CHECK(vxm_import_path_keys(nullptr, 1025, nfc, sizeof(nfc), &nfc_size,
+                            nfd, sizeof(nfd), &nfd_size) != VXCORE_OK);
+  char *result = nullptr;
+  CHECK(vxm_import_run("{\"op\":\"unknown\"}", nullptr, &result) != VXCORE_OK && result == nullptr);
+  vxm_import_result_free(result);
+}
+
 }  // namespace
 
 int main() {
@@ -1537,6 +1616,8 @@ int main() {
     catalog_export_active_copy_and_source_change();
     catalog_export_entry_limit();
     catalog_export_refuses_persisted_foreign_restore();
+    catalog_collects_exact_disk_identities();
+    import_pure_helpers_are_bounded();
     std::cout << "Native host real-storage tests passed\n";
     return 0;
   } catch (const std::exception &error) {

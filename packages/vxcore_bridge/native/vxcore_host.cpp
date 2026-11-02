@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "vxcore_host.h"
+#include "notebook_import.h"
 
 #include <algorithm>
 #include <array>
@@ -553,7 +554,7 @@ std::string identity(const Json &json) {
 }
 
 // JSON input has one bounded, validated shape before it can consume a request ID.
-enum CatalogOperation { kSearch = 1, kTags, kCreateTag, kSetTags };
+enum CatalogOperation { kSearch = 1, kTags, kCreateTag, kSetTags, kCollectNodeIds };
 const std::string &json_string(const Json &value, bool empty = false,
                                int32_t code = VXCORE_ERR_JSON_PARSE) {
   require(value.is_string(), code);
@@ -584,6 +585,8 @@ int32_t catalog_operation(const uint8_t *data, size_t size, int32_t kind) {
     operation = kSearch;
   } else if (kind == VXM_EVENT_QUERY && op == "tags") {
     operation = kTags;
+  } else if (kind == VXM_EVENT_QUERY && op == "collectNodeIds") {
+    operation = kCollectNodeIds;
   } else if (kind == VXM_EVENT_TAG && op == "createTag") {
     json_string(json.at("name"), false, VXCORE_ERR_INVALID_PARAM);
     operation = kCreateTag;
@@ -1340,6 +1343,30 @@ struct VxmHost {
     }
     append_query(out, "]}");
   }
+  void collect_node_ids(Request &request) {
+    vxm_import::Inspection strict;
+    check(static_cast<VxCoreError>(vxm_import::inspect_managed(fs::u8path(notebook_path), notebook_id, strict)));
+    CoreString collected;
+    check(vxcore_notebook_collect_node_ids(context, notebook_id.c_str(), &collected.value));
+    const auto size = bounded_length(collected.value, kCatalog);
+    const auto values = Json::parse(collected.value, collected.value + size, nullptr, false);
+    require(values.is_array() && values.size() == strict.node_ids.size(), VXCORE_ERR_JSON_PARSE);
+    std::set<std::string> unique;
+    for (const auto &value : values) {
+      const auto &id = json_string(value);
+      require(id.size() < 128 && unique.insert(id).second, VXCORE_ERR_JSON_PARSE);
+    }
+    require(std::equal(unique.begin(), unique.end(), strict.node_ids.begin(), strict.node_ids.end()),
+            VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    append_query(*request.result, "{\"notebookId\":" + Json(notebook_id).dump() + ",\"nodeIds\":[");
+    bool comma = false;
+    for (const auto &id : strict.node_ids) {
+      if (comma) append_query(*request.result, ",");
+      append_query(*request.result, Json(id).dump());
+      comma = true;
+    }
+    append_query(*request.result, "]}");
+  }
   void query_catalog(Request &request) {
     require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
     if (request.operation == kSearch) check_read_cancelled();
@@ -1349,6 +1376,7 @@ struct VxmHost {
     auto &out = *request.result;
     copy_field(out.notebook, notebook_id);
     if (request.operation == kSearch) search_catalog(request, query);
+    else if (request.operation == kCollectNodeIds) collect_node_ids(request);
     else tags_catalog(request, query);
     out.event.data = out.body.get();
     // Keep the full reservation while the preallocated body is retained. Charging

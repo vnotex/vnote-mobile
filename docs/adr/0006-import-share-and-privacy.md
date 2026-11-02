@@ -1,6 +1,6 @@
 # ADR 0006: Managed import, share transactions and privacy
 
-Status: whole-notebook ZIP export, retained-artifact recovery and platform Save As adapters are implemented; Android is exercised. iOS build/runtime and actual backup/transfer artifacts remain unverified. Import, share-in and Markdown/assets-only export remain selected designs, not implemented paths.
+Status: whole-notebook ZIP/folder import, ZIP export, retained-artifact recovery and system picker adapters are implemented; Android is exercised. iOS build/runtime and actual backup/transfer artifacts remain unverified. Share-in and Markdown/assets-only import/export remain selected designs, not implemented paths.
 
 Scope: [mobile plan sections 5.3 and 5.7](../mobile-client-plan.md). Retain the full first-release import/export/share boundary, including opaque content preservation. Related boundaries: editor drafts in [ADR 0003](0003-editor-protocol-and-durability.md), preview resources in [ADR 0004](0004-rendering-security.md), and the native host's owner-thread/notebook gate.
 
@@ -13,7 +13,7 @@ At core pin `c3319ca9a7dfd5432cad1f7c35de6be099fc87bf`:
 - `vxcore_folder_attach_imported` accepts staged `content/` and `metadata/` trees with final IDs/name and journals their publication. Its documented commit point is replacement of the destination parent's `vx.json`; recovery runs before metadata-cache rebuild. ID collection walks authoritative JSON rather than the incomplete lazy SQLite index.
 - `vxcore_file_import`/`vxcore_folder_import` copy and can generate unique destination names. They are not documented as an idempotent, atomic multi-item share transaction. Repeating them blindly after an ambiguous crash is therefore not selected.
 
-The application services own incoming transactions, quotas, permissions and recovery. Core owns notebook metadata and mutation. The extension/intent receiver may write only the incoming inbox; **it never opens or writes the live notebook**. All labels and states below are proposed application contracts, not new platform/core API names.
+The application services own incoming transactions, quotas, permissions and recovery. Core owns notebook metadata and mutation. The extension/intent receiver may write only the incoming inbox; **it never opens or writes the live notebook**. Implemented whole-notebook transfer states are described below; cohort/share states remain proposed application contracts, not new platform/core API names.
 
 ## Managed copies, import and export
 
@@ -27,6 +27,62 @@ Use platform document pickers to read provider documents into app-private persis
 4. Register success only after core open/recovery succeeds. A crash between rename and registration is reconciled from the manifest and matching root/UUID; do not create another copy. An open failure leaves the owned copy quarantined/retryable and does not publish it in the notebook list as usable. Cleanup may delete only this transaction's owned staging/root, never a preexisting user notebook.
 
 Whole-notebook publication is an application-owned directory transaction, not direct mutation of an existing notebook. No core open may make a partially copied tree authoritative. Core schema migration, if any, remains core-owned and must satisfy preservation fixtures; a format that cannot be safely preserved is rejected before live publication.
+
+### Implemented whole-notebook import
+
+The library takes a synchronous transfer reservation before any provider await.
+Import and export cannot allocate overlapping staging, including retained or
+recovered artifacts. Existing notebooks may open during provider copy/extraction;
+validation/publication requires return through the editor disposition barrier.
+A complete private source is prepared first; publication requires a separate
+**Validate and import** confirmation. Cancelled or refused input remains available
+for retry or explicit discard, not silently evicted.
+
+Android uses `ACTION_OPEN_DOCUMENT`/`ACTION_OPEN_DOCUMENT_TREE` with temporary
+capabilities, bounded worker copying and no broad/persistable grants. Activity
+detachment cancels import, including configuration changes; results wait for copy
+leases to settle. Raw Android descriptors have explicit `finally` ownership;
+streams created from an existing descriptor do not own it. iOS acquires security
+scope before returning from the picker callback and releases it after coordinated
+worker copying, including early cancellation. In-place opening is declared for the
+`asCopy: false` picker; no iOS runtime evidence is claimed. Provider folders
+record accepted original names in `accepted.jsonl`. The completed copy must match
+those names and types byte-for-byte, including hidden files.
+
+ZIP headers are independently preflighted before the maintained archive decoder:
+local/central fields, ZIP64 bounds, descriptors, CRC/size expectations, overlapping
+ranges, encoding, entry types and all path collision keys. Pinned utf8proc 2.12.0
+provides NFC/NFD plus full Unicode case folding consistently across platforms.
+Store/deflate extraction runs on a worker through a bounded disk-backed sink,
+checking actual bytes, CRC and cancellation. A sole wrapper directory is accepted
+only when it contains the whole notebook; extra siblings are never dropped.
+Preparation records the complete actual tree in sorted, hashed `inventory.jsonl`.
+No notebook metadata is regenerated or normalized.
+
+Before core open, the native strict walker validates configuration, reachable
+folder/file metadata, references, unique identities and runtime/credential guards.
+Ordinary Boolean sync preferences are preserved; their presence is not itself an
+active sync operation. A fresh transaction-local read-only core owner must return
+exactly the strict walk's identities. Current managed candidates undergo the same
+strict identity walk and guarded collection; unresolved candidates cannot prove
+absence. Duplicate notebook UUIDs offer **Open existing notebook**; other identity
+collisions refuse. The permissive upstream collector alone is not an absence proof.
+
+`publication.json` is intent, not success. It binds the inventory, original directory
+identity and fixed `nb-<transaction>` destination before a same-filesystem,
+no-replace rename. Cancellation is honored before rename; afterward the real outcome
+is drained. Guarded destination open/close precedes `committed.json`. Startup checks
+actual source/destination identities and reconciles this journal before ordinary
+discovery. Unregistered targets stay quarantined; missing committed targets are
+never replayed from old input. Explicit discard may remove an unregistered target
+only when its journal and physical directory identity match. Foreign/preexisting
+and committed live roots are never cleanup targets. Invalid private leftovers
+require current-token confirmation; ambiguous live ownership remains blocked.
+
+Stable private records are `request.json`, `captured.json`, `prepared.json`,
+`publication.json` and `committed.json`, schema version 1. `inspection/` is disposable
+derived core state only after owner join. The shared `DocumentTransferPlatform`
+channel owns both directions; the former export-only channel has no alias.
 
 ### Markdown/assets and share cohorts into an existing notebook
 
@@ -85,7 +141,7 @@ streamed deflate and incremental 64 KiB steps on a worker isolate; no full-file 
 full-archive buffering. The central-directory finalizer is bounded by the entry/path
 limits but synchronous; cancel waits through it and is checked before publishing
 ready state. ZIP64 is supported. Import-specific expansion and destination
-normalization checks below remain import requirements, not an implemented decoder.
+normalization checks below are enforced by the separate import decoder.
 Backslashes and ambiguous components are refused before the encoder can normalize
 them; accepted spelling is retained.
 
@@ -189,7 +245,7 @@ Implemented controls: Android explicitly disables backup and provides old/new XM
 exclusions for all documented credential/device-protected storage domains, including
 both cloud backup and device transfer. No `device_external` domain is invented.
 iOS storage preparation sets/verifies exclusion on stable Application Support,
-`core/`, `notebooks/` and `exports/` directories before child writes, repeats at
+`core/`, `notebooks/`, `exports/` and `imports/` directories before child writes, repeats at
 startup/before export, and never replaces those group directories. This follows
 [Apple's directory-group guidance](https://developer.apple.com/documentation/foundation/optimizing-your-app-s-data-for-icloud-backup),
 which explicitly says exclusion is guidance, not a guarantee. Failure is visible;
@@ -210,7 +266,10 @@ Draft/inbox retention contains private content by design and is visible in stora
 - A share extension as a second notebook writer, acknowledging temporary URI references, or memory-only inbox dedup: loses accepted items under termination/grant expiry.
 - Automatic unresolved-item eviction, default cloud backup of private transient data, or blanket stripping unknown notebook files: privacy/retention/compatibility violations.
 
-## Observable acceptance cases (not executed)
+## Observable acceptance cases
+
+See [verification](../verification.md) for executed whole-notebook cases. Share-in,
+physical power-loss and iOS/backup cases below remain unexecuted gates.
 
 1. Import/export a desktop notebook with 10,000 notes, Unicode names, IDs/tags/unknown supported metadata, attachments, encrypted/unsupported bodies and opaque sidecars. Reopen on desktop and compare semantic metadata plus exact untouched bytes. Unsupported unsafe notebooks reject before publication.
 2. Every quota boundary and one over it, ZIP bombs, false sizes/CRC, overlapping headers, traversal, absolute paths, symlinks/reparse swaps, device names, case/NFC/NFD collisions and file-directory prefix collisions leave the live destination unchanged.

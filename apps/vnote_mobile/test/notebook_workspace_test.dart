@@ -11,6 +11,8 @@ import 'package:vnote_mobile/features/library/notebook_library_screen.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
+import 'package:vnote_mobile/services/notebook_import.dart';
+import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
@@ -139,6 +141,9 @@ class _Catalog implements CatalogCore {
 
   @override
   void cancelSearch() => searchCancellations++;
+  @override
+  Future<List<String>> collectNodeIds() async =>
+      throw StateError('Identity validation requires real storage.');
   @override
   Future<CoreExportSnapshot> exportSnapshot(
     String destination, {
@@ -312,6 +317,24 @@ Future<String> _createNotebook(ManagedNotebookPaths paths) async {
 // A presentation driver only: lifecycle/storage proof uses the real library
 // service tests. These callbacks record which snapshot the consumer selected.
 class _Library extends NotebookLibrary {
+  final importedKinds = <DocumentImportKind>[];
+  final committedImports = <ImportAttempt>[];
+  final discardedImports = <ImportAttempt>[];
+  @override
+  Future<void> prepareImport(DocumentImportKind kind) async {
+    importedKinds.add(kind);
+  }
+
+  @override
+  Future<void> commitImport(ImportAttempt attempt) async {
+    committedImports.add(attempt);
+  }
+
+  @override
+  Future<void> discardImport(ImportAttempt attempt) async {
+    discardedImports.add(attempt);
+  }
+
   final exportedEntries = <ManagedNotebookEntry>[];
   final discardedExports = <PreparedNotebookExport>[];
   final discardedLeftovers = <ExportLeftover>[];
@@ -379,6 +402,71 @@ class _Library extends NotebookLibrary {
 }
 
 void main() {
+  testWidgets(
+    'prepared import confirmation rejects stale attempts and blocks competing transfer starts',
+    (tester) async {
+      final first = ImportAttempt(
+        id: 'a' * 32,
+        kind: DocumentImportKind.zip,
+        phase: NotebookImportPhase.prepared,
+        treeRelative: 'unpacked',
+        inventoryHash: 'a' * 64,
+      );
+      final second = ImportAttempt(
+        id: 'b' * 32,
+        kind: DocumentImportKind.folder,
+        phase: NotebookImportPhase.prepared,
+        treeRelative: 'unpacked',
+        inventoryHash: 'b' * 64,
+      );
+      final library = _Library()
+        ..value = NotebookLibraryState(
+          stale: false,
+          transferReserved: true,
+          importState: NotebookImportState(
+            phase: NotebookImportPhase.prepared,
+            current: first,
+          ),
+        );
+      addTearDown(library.dispose);
+      await tester.pumpWidget(
+        MaterialApp(
+          home: NotebookLibraryScreen(
+            library: library,
+            dark: false,
+            onThemeChanged: (_) {},
+          ),
+        ),
+      );
+      await tester.tap(find.text('Validate and import'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(library.committedImports, isEmpty);
+      await tester.tap(find.text('Validate and import'));
+      await tester.pumpAndSettle();
+      library.value = NotebookLibraryState(
+        stale: false,
+        transferReserved: true,
+        importState: NotebookImportState(
+          phase: NotebookImportPhase.prepared,
+          current: second,
+        ),
+      );
+      await tester.tap(find.text('Import notebook'));
+      await tester.pumpAndSettle();
+      expect(library.committedImports, isEmpty);
+      await tester.tap(find.byTooltip('Import notebook'));
+      await tester.pumpAndSettle();
+      expect(find.text('Import ZIP'), findsNothing);
+      await tester.tap(find.text('Validate and import'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Import notebook'));
+      await tester.pumpAndSettle();
+      expect(library.committedImports, [same(second)]);
+    },
+  );
+
   testWidgets(
     'export confirmation rejects cancellation and stale library snapshots',
     (tester) async {

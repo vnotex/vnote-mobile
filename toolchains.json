@@ -35,6 +35,13 @@
     "url": "https://github.com/openssl/openssl/releases/download/openssl-3.5.9/openssl-3.5.9.tar.gz",
     "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a"
   },
+  "utf8proc": {
+    "version": "2.12.0",
+    "revision": "79cdd5ab40c79afa559f689ffc13b76812dee1ac",
+    "url": "https://codeload.github.com/JuliaStrings/utf8proc/tar.gz/79cdd5ab40c79afa559f689ffc13b76812dee1ac",
+    "sha256": "e8fadfcd531d65525cbef157b866c5408e2e3f0d7c0f3aefb0bce01a7a08e35d",
+    "license": "LICENSE.md (MIT and Unicode data license)"
+  },
   "ffigen": "23.0.0",
   "libclang": "18.1.1",
   "perlModules": [

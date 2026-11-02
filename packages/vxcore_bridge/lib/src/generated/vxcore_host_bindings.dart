@@ -160,6 +160,57 @@ external int vxm_host_write(
   int size,
 );
 
+@ffi.Native<ffi.Pointer<VxmImportCancel> Function()>()
+external ffi.Pointer<VxmImportCancel> vxm_import_cancel_create();
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<VxmImportCancel>)>()
+external void vxm_import_cancel_free(ffi.Pointer<VxmImportCancel> cancel);
+
+@ffi.Native<ffi.Int32 Function(ffi.Pointer<VxmImportCancel>)>()
+external int vxm_import_cancel_query(ffi.Pointer<VxmImportCancel> cancel);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<VxmImportCancel>)>()
+external void vxm_import_cancel_request(ffi.Pointer<VxmImportCancel> cancel);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint64>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Uint64>,
+  )
+>()
+external int vxm_import_path_keys(
+  ffi.Pointer<ffi.Uint8> input,
+  int size,
+  ffi.Pointer<ffi.Uint8> nfc,
+  int nfc_capacity,
+  ffi.Pointer<ffi.Uint64> nfc_size,
+  ffi.Pointer<ffi.Uint8> nfd,
+  int nfd_capacity,
+  ffi.Pointer<ffi.Uint64> nfd_size,
+);
+
+@ffi.Native<ffi.Void Function(ffi.Pointer<ffi.Char>)>()
+external void vxm_import_result_free(ffi.Pointer<ffi.Char> result);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<VxmImportCancel>,
+    ffi.Pointer<ffi.Pointer<ffi.Char>>,
+  )
+>()
+external int vxm_import_run(
+  ffi.Pointer<ffi.Char> request_json,
+  ffi.Pointer<VxmImportCancel> cancel,
+  ffi.Pointer<ffi.Pointer<ffi.Char>> out_json,
+);
+
 @ffi.Native<ffi.Pointer<ffi.Char> Function()>()
 external ffi.Pointer<ffi.Char> vxm_native_notices();
 
@@ -344,6 +395,8 @@ final class VxmEvent extends ffi.Struct {
 }
 
 final class VxmHost extends ffi.Opaque {}
+
+final class VxmImportCancel extends ffi.Opaque {}
 
 typedef VxmNotify = ffi.Pointer<ffi.NativeFunction<VxmNotifyFunction>>;
 typedef VxmNotifyFunction = ffi.Void Function(ffi.Int64 token);

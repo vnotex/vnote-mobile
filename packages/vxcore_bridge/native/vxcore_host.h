@@ -21,6 +21,7 @@ extern "C" {
 
 typedef struct VxmHost VxmHost;
 typedef void (*VxmNotify)(int64_t token);
+typedef struct VxmImportCancel VxmImportCancel;
 
 enum {
   VXM_EVENT_OPEN = 1,
@@ -116,6 +117,8 @@ VXM_API int32_t vxm_host_catalog_mutate(VxmHost *host, uint64_t request_id,
                                       const char *destination_folder_id);
 // Catalog-only bounded JSON requests (at most 16 KiB, UTF-8, no embedded NUL).
 // QUERY: {op:"search",text,tag?,caseSensitive} or {op:"tags",nodeId?}.
+// QUERY: {op:"collectNodeIds"} returns {notebookId,nodeIds:[string]}; strict
+// disk graph and core collector must agree exactly, without duplicate IDs.
 // Search returns {notebookId,matches:[{id,path,line,snippet}],limited,skipped}.
 // Tags returns complete {notebookId,tags:[{name,parent}],assigned:[string]}.
 // TAG: {op:"createTag",name} or {op:"setTags",nodeId,tags:[string]}.
@@ -155,6 +158,46 @@ VXM_API void vxm_event_free(VxmEvent *event);
 VXM_API void vxm_host_destroy(VxmHost *host);
 // Borrowed process-lifetime UTF-8 text generated from actual dependency licenses.
 VXM_API const char *vxm_native_notices(void);
+
+// Pure cancellation/Unicode helpers: no filesystem access and no core context.
+// Cancellation is borrowed by workers; free ONLY after every borrower has joined.
+VXM_API VxmImportCancel *vxm_import_cancel_create(void);
+VXM_API void vxm_import_cancel_request(VxmImportCancel *cancel);
+VXM_API int32_t vxm_import_cancel_query(const VxmImportCancel *cancel);
+VXM_API void vxm_import_cancel_free(VxmImportCancel *cancel);
+// Input <=1024 UTF-8 bytes; output <=16384 bytes per key, no NUL terminator.
+// Both sizes are set before checking capacity. Buffers are untouched on error.
+VXM_API int32_t vxm_import_path_keys(const uint8_t *input, uint64_t size,
+                                    uint8_t *nfc, uint64_t nfc_capacity, uint64_t *nfc_size,
+                                    uint8_t *nfd, uint64_t nfd_capacity, uint64_t *nfd_size);
+// Synchronous worker-only filesystem commands. Request <=16 KiB, response <=8 MiB.
+// No core context is created or transferred. Errors may follow publication;
+// ALWAYS recover actual journal/path state rather than guessing from an error.
+// Every command has {op,importsRoot,notebooksRoot,id}; roots are absolute
+// sibling imports/ and notebooks/ directories, id is exactly 32 lowercase hex.
+// inspect: +treeRelative,inventoryHash -> {notebookId,notebookName,nodeIds}.
+// inspectManaged: +location,expectedNotebookId? -> same strict result, read-only.
+// publish: +treeRelative,inventoryHash,notebookId,notebookName -> durable phase.
+// recover,commit: no extra fields -> durable phase; commit ignores cancellation
+// after its caller's guarded destination owner has closed successfully.
+// discard: +allowPublished? (default false) -> {discarded:true}. A valid committed
+// receipt permits PRIVATE cleanup only, even after legitimate live edits/removal.
+// writeMarker: +marker(request|captured|prepared),data -> durable phase.
+// checkSpace: +requiredBytes (additional bytes, not headroom) -> {availableBytes};
+// no-follow imports+exports bytes + requiredBytes <=4GiB, free space includes
+// an additional 64MiB headroom. It also rejects hardlinks/reparse/special files.
+// Durable phase fields: id,kind,phase(staged|published|committed),captured,prepared,
+// treeRelative,inventoryHash,notebookId,notebookName,destination,bytes,entries;
+// sourceName is included once captured. Unknown identity/path states are errors,
+// never invented phases. destination is absolute, journal destination relative.
+// A publication intent with matching source only is staged; matching target only
+// is published. Both/neither or foreign identity fails closed. Committed data is
+// never rehashed against its old inventory, and missing committed data never replays.
+// Results are NUL-terminated UTF-8. On any failure *out_json is null; messages
+// are redacted by the Dart facade. The borrowed token may be null (no cancellation).
+VXM_API int32_t vxm_import_run(const char *request_json, VxmImportCancel *cancel,
+                              char **out_json);
+VXM_API void vxm_import_result_free(char *result);
 
 #ifdef __cplusplus
 }

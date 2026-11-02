@@ -6,7 +6,7 @@ import 'dart:math';
 import 'package:path_provider/path_provider.dart';
 import 'package:path/path.dart' as p;
 
-import 'document_export_platform.dart';
+import 'document_transfer_platform.dart';
 
 class ManagedNotebookPaths {
   const ManagedNotebookPaths({
@@ -43,7 +43,7 @@ class ManagedNotebookStorage {
   static const maxNotebooks = 1000;
 
   static Future<ManagedNotebookStorage> obtain() async {
-    await MethodChannelDocumentExportPlatform().prepareStorage();
+    await MethodChannelDocumentTransferPlatform().prepareStorage();
     final support = await getApplicationSupportDirectory();
     final excluded = [
       await getTemporaryDirectory(),
@@ -84,18 +84,21 @@ class ManagedNotebookStorage {
     return ManagedNotebookStorage(app: app, local: local, root: notebooks);
   }
 
-  Future<String> obtainExportRoot() async {
+  Future<String> obtainExportRoot() => _obtainTransferRoot('exports');
+  Future<String> obtainImportRoot() => _obtainTransferRoot('imports');
+
+  Future<String> _obtainTransferRoot(String name) async {
     await _validateParent();
     final support = Directory(root).parent;
-    final expected = Directory.fromUri(support.uri.resolve('exports/'));
+    final expected = Directory.fromUri(support.uri.resolve('$name/'));
     final canonical = await _canonical(expected);
     if (!_within(canonical, support.path) ||
         _key(canonical) != _key(expected.path)) {
-      throw StateError('Export storage escapes its persistent support root.');
+      throw StateError('Transfer storage escapes its persistent support root.');
     }
     await expected.create(recursive: true);
     if (_key(await expected.resolveSymbolicLinks()) != _key(canonical)) {
-      throw StateError('Export storage changed during initialization.');
+      throw StateError('Transfer storage changed during initialization.');
     }
     return p.normalize(canonical);
   }

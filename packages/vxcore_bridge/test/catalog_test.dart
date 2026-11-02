@@ -186,6 +186,77 @@ void main() {
   });
   tearDown(() => fixture.dispose());
 
+  test('collector is the exact unique disk set on a guarded owner', () async {
+    final catalog = await fixture.catalog();
+    final root = catalog.initialDirectory.folderId;
+    final first = await catalog.createNote(root, 'first.md');
+    final folder = await catalog.createFolder(root, 'Nested');
+    final nested = await catalog.createNote(folder, 'nested.md');
+    await catalog.close();
+    final guarded = await fixture.exportCatalog();
+    final ids = await guarded.collectNodeIds();
+    expect(ids, unorderedEquals([root, first, folder, nested]));
+    expect(ids.toSet().length, ids.length);
+    expect(() => ids.add('not mutable'), throwsUnsupportedError);
+    await guarded.close();
+  });
+
+  test(
+    'collector refuses omissions, duplicates, unsafe edges and orphan metadata',
+    () async {
+      final created = await fixture.catalog();
+      final root = created.initialDirectory.folderId;
+      await created.createNote(root, 'first.md');
+      await created.close();
+      final original = await fixture.json('vx_notebook/contents/vx.json');
+      for (final broken in [
+        'missing',
+        'unsafe',
+        'duplicate',
+        'empty',
+        'orphan',
+      ]) {
+        final config = jsonDecode(jsonEncode(original)) as Map<String, dynamic>;
+        if (broken == 'missing' || broken == 'unsafe') {
+          (config['folders'] as List<dynamic>).add(
+            broken == 'missing' ? 'Absent' : '../escape',
+          );
+        } else if (broken == 'duplicate' || broken == 'empty') {
+          (config['files'] as List<dynamic>).first['id'] = broken == 'empty'
+              ? ''
+              : root;
+        } else {
+          await fixture
+              .file('vx_notebook/contents/Orphan/vx.json')
+              .parent
+              .create(recursive: true);
+          await fixture.putJson('vx_notebook/contents/Orphan/vx.json', {
+            'id': 'orphan',
+            'name': 'Orphan',
+            'files': <Object>[],
+            'folders': <Object>[],
+          });
+        }
+        await fixture.putJson('vx_notebook/contents/vx.json', config);
+        await expectLater(() async {
+          final guarded = await fixture.exportCatalog();
+          try {
+            await guarded.collectNodeIds();
+          } finally {
+            await guarded.close();
+          }
+        }(), throwsA(_failure));
+        expect(await fixture.json('vx_notebook/contents/vx.json'), config);
+        if (broken == 'orphan') {
+          await fixture
+              .file('vx_notebook/contents/Orphan/vx.json')
+              .parent
+              .delete(recursive: true);
+        }
+      }
+    },
+  );
+
   test(
     'export snapshot preserves raw portable bytes and exact runtime exclusions',
     () async {

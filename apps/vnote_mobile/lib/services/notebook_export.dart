@@ -19,7 +19,7 @@ import 'package:flutter/foundation.dart';
 import 'package:path/path.dart' as p;
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
-import 'document_export_platform.dart';
+import 'document_transfer_platform.dart';
 
 enum NotebookExportPhase { idle, reconciling, preparing, archiving, saving }
 
@@ -119,12 +119,17 @@ const _restartWarning =
 /// callback, which must close/join its owner before returning, even on failure.
 /// Filesystem work runs in joined worker isolates, never on the UI isolate.
 class NotebookExporter extends ValueNotifier<NotebookExportState> {
-  NotebookExporter({required this.root, DocumentExportPlatform? platform})
-    : _platform = platform ?? MethodChannelDocumentExportPlatform(),
-      super(const NotebookExportState());
+  NotebookExporter({
+    required this.root,
+    DocumentTransferPlatform? platform,
+    this._checkAdmission,
+  }) : _platform = platform ?? MethodChannelDocumentTransferPlatform(),
+       super(const NotebookExportState());
 
+  final VoidCallback? _checkAdmission;
+  bool get initialized => _initialized;
   final String root;
-  final DocumentExportPlatform _platform;
+  final DocumentTransferPlatform _platform;
   Future<void>? _active;
   Future<void>? _shutdown;
   ExportCancellation? _cancellation;
@@ -210,6 +215,7 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
     required String notebookName,
     required ExportSnapshotCapture capture,
   }) {
+    _checkAdmission?.call();
     _admit();
     if (!_initialized) throw StateError('Initialize export storage first.');
     if (value.prepared != null || value.leftovers.isNotEmpty) {

@@ -4,10 +4,12 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path/path.dart' as p;
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
-import 'package:vnote_mobile/services/document_export_platform.dart';
+import 'package:vnote_mobile/services/notebook_import.dart';
+import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
@@ -120,6 +122,8 @@ class _Catalog implements CatalogCore {
   @override
   void cancelSearch() => core.cancelSearch();
   @override
+  Future<List<String>> collectNodeIds() => core.collectNodeIds();
+  @override
   Future<CoreExportSnapshot> exportSnapshot(
     String destination, {
     required int stagingBudgetBytes,
@@ -148,7 +152,20 @@ class _Catalog implements CatalogCore {
   }
 }
 
-class _ExportProvider implements DocumentExportPlatform {
+class _ExportProvider implements DocumentTransferPlatform {
+  @override
+  Future<DocumentImportResult> pickImport({
+    required String operationId,
+    required DocumentImportKind kind,
+  }) async => const DocumentImportResult(
+    status: DocumentImportStatus.unavailable,
+    sourceName: null,
+    bytes: 0,
+    entries: 0,
+  );
+  @override
+  Future<void> cancelImport(String operationId) async {}
+
   final entered = Completer<String>();
   final result = Completer<DocumentExportResult>();
   int saves = 0;
@@ -183,6 +200,60 @@ class _ExportProvider implements DocumentExportPlatform {
   }
 }
 
+class _ImportProvider implements DocumentTransferPlatform {
+  _ImportProvider(this.source, this.importsRoot);
+  final String source;
+  final String importsRoot;
+  Completer<void>? gate;
+  Completer<void>? entered;
+  @override
+  Future<void> prepareStorage() async {}
+  @override
+  Future<DocumentExportResult> save({
+    required String operationId,
+    required String path,
+    required String suggestedName,
+  }) async => const DocumentExportResult(
+    status: DocumentExportStatus.unavailable,
+    externalMayBeIncomplete: false,
+  );
+  @override
+  Future<void> cancel(String operationId) async {}
+  @override
+  Future<void> cancelImport(String operationId) async {}
+  @override
+  Future<DocumentImportResult> pickImport({
+    required String operationId,
+    required DocumentImportKind kind,
+  }) async {
+    if (entered != null && !entered!.isCompleted) entered!.complete();
+    await gate?.future;
+    final transaction = p.join(importsRoot, operationId);
+    final target = p.join(transaction, 'unpacked');
+    await _copyTree(Directory(source), Directory(target));
+    final accepted = <Map<String, Object>>[];
+    var bytes = 0;
+    await for (final entity in Directory(
+      source,
+    ).list(recursive: true, followLinks: false)) {
+      final path = p.relative(entity.path, from: source).replaceAll('\\', '/');
+      accepted.add({
+        'path': path,
+        'type': entity is Directory ? 'directory' : 'file',
+      });
+      if (entity is File) bytes += await entity.length();
+    }
+    await File(p.join(transaction, 'accepted.jsonl'))
+        .writeAsString('${accepted.map(jsonEncode).join('\n')}\n', flush: true);
+    return DocumentImportResult(
+      status: DocumentImportStatus.ready,
+      sourceName: 'Desktop fixture',
+      bytes: bytes,
+      entries: accepted.length,
+    );
+  }
+}
+
 Future<void> _copyTree(Directory source, Directory target) async {
   await target.create();
   await for (final entity in source.list(recursive: true, followLinks: false)) {
@@ -205,13 +276,23 @@ void main() {
   late NotebookLibrary library;
   NotebookLibrary makeLibrary({
     LibraryCreateCatalog? create,
-    DocumentExportPlatform? exportPlatform,
+    DocumentTransferPlatform? exportPlatform,
+    DocumentTransferPlatform? importPlatform,
   }) => NotebookLibrary(
     obtainStorage: () async => storage,
     openCatalog: owners.open,
     openExportCatalog: owners.openExport,
-    createExporter: (root) =>
-        NotebookExporter(root: root, platform: exportPlatform),
+    createExporter: (root, admission) => NotebookExporter(
+      root: root,
+      platform: exportPlatform,
+      checkAdmission: admission,
+    ),
+    createImporter: (root, notebooksRoot, admission) => NotebookImporter(
+      root: root,
+      notebooksRoot: notebooksRoot,
+      platform: importPlatform,
+      checkAdmission: admission,
+    ),
     createCatalog: create ?? owners.create,
     createWorkspace: (paths, id) => NotebookWorkspace(
       paths: paths,
@@ -235,6 +316,115 @@ void main() {
     library.dispose();
     expect(owners.active, 0);
     await temp.delete(recursive: true);
+  });
+
+  test('import reservation prevents a racing export while provider lease is pending', () async {
+    await library.shutdown();
+    library.dispose();
+    final source = await Directory(p.join(temp.path, 'provider')).create();
+    await File(p.join(source.path, 'opaque')).writeAsString('not published');
+    final provider = _ImportProvider(source.path, p.join(temp.path, 'imports'));
+    final gate = Completer<void>();
+    final entered = Completer<void>();
+    provider.gate = gate;
+    provider.entered = entered;
+    library = makeLibrary(importPlatform: provider);
+    await library.initialize();
+    await library.createNotebook('Existing');
+    await library.returnToLibrary(library.value.workspace!);
+    final existing = library.value.entries.single;
+    final preparing = library.prepareImport(DocumentImportKind.folder);
+    try {
+      await Future.any([
+        entered.future,
+        preparing.then<void>(
+          (_) => throw StateError(
+            library.value.importState.error ?? 'Provider not entered.',
+          ),
+        ),
+      ]);
+      await library.exportNotebook(existing);
+      expect(
+        await Directory(await storage.obtainExportRoot()).list().isEmpty,
+        isTrue,
+      );
+      expect(library.value.transferReserved, isTrue);
+      library.cancelImport();
+      expect(library.value.importState.busy, isTrue);
+    } finally {
+      gate.complete();
+    }
+    await preparing;
+    expect((await storage.candidates()).length, 1);
+    expect(library.value.entries.single.notebookId, existing.notebookId);
+    final retained = library.value.importState.current;
+    if (retained != null) await library.discardImport(retained);
+  });
+
+  test('whole folder import preserves desktop bytes and duplicate UUID never creates another root', () async {
+    await library.shutdown();
+    library.dispose();
+    final fixture = jsonDecode(
+      await File(
+        '../../packages/vxcore_bridge/test/fixtures/desktop_notebook.json',
+      ).readAsString(),
+    ) as Map<String, dynamic>;
+    final source = Directory(p.join(temp.path, 'provider-book'));
+    await source.create();
+    final expected = <String, List<int>>{};
+    for (final item in fixture['files'] as List) {
+      final path = item['path'] as String;
+      final bytes = base64Decode(item['base64'] as String);
+      expected[path] = bytes;
+      final file = File(p.join(source.path, path));
+      await file.parent.create(recursive: true);
+      await file.writeAsBytes(bytes);
+    }
+    final provider = _ImportProvider(source.path, p.join(temp.path, 'imports'));
+    library = makeLibrary(importPlatform: provider);
+    await library.initialize();
+    await library.prepareImport(DocumentImportKind.folder);
+    final attempt = library.value.importState.current;
+    expect(attempt, isNotNull, reason: library.value.importState.error);
+    expect(
+      attempt!.treeRelative,
+      isNotNull,
+      reason: library.value.importState.error,
+    );
+    expect(library.value.entries, isEmpty);
+    expect(library.value.transferReserved, isTrue);
+    await library.commitImport(attempt);
+    expect(
+      library.value.entries.single.notebookId,
+      fixture['notebookId'],
+      reason: library.value.importState.error ?? library.value.error,
+    );
+    final imported = library.value.entries.single;
+    for (final item in expected.entries) {
+      expect(
+        await File(p.join(imported.location, item.key)).readAsBytes(),
+        item.value,
+      );
+      expect(
+        await File(p.join(source.path, item.key)).readAsBytes(),
+        item.value,
+      );
+    }
+    expect(owners.maximum, 1);
+    await library.prepareImport(DocumentImportKind.folder);
+    final duplicate = library.value.importState.current!;
+    await library.commitImport(duplicate);
+    expect(library.value.importState.existingNotebookId, fixture['notebookId']);
+    expect((await storage.candidates()).length, 1);
+    expect(await library.openExistingImportNotebook(), isTrue);
+    expect(
+      library.value.workspace!.value.directory!.notebookId,
+      fixture['notebookId'],
+    );
+    await library.returnToLibrary(library.value.workspace!);
+    await library.discardImport(library.value.importState.current!);
+    expect(library.value.entries.single.notebookId, fixture['notebookId']);
+    expect(library.value.transferReserved, isFalse);
   });
 
   test('export releases native owner before provider IO and never retires a newer library operation', () async {

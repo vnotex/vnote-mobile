@@ -27,6 +27,17 @@ if(ANDROID)
 endif()
 add_subdirectory("${VXM_CORE_ROOT}" "${CMAKE_CURRENT_BINARY_DIR}/vxcore")
 
+include(FetchContent)
+# The host is the only delivered shared object; utf8proc is linked into it.
+set(BUILD_SHARED_LIBS OFF)
+set(UTF8PROC_INSTALL OFF CACHE BOOL "" FORCE)
+set(UTF8PROC_ENABLE_TESTING OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(vxm_utf8proc
+  URL https://codeload.github.com/JuliaStrings/utf8proc/tar.gz/79cdd5ab40c79afa559f689ffc13b76812dee1ac
+  URL_HASH SHA256=e8fadfcd531d65525cbef157b866c5408e2e3f0d7c0f3aefb0bce01a7a08e35d
+  DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(vxm_utf8proc)
+
 # Notices come from the exact built dependency sources, not a hand-maintained
 # description of their licenses. Missing notices fail packaging.
 set(NATIVE_NOTICES "VNote Mobile native host — GNU LGPL version 3\nApplication license texts are bundled separately.\n\n")
@@ -47,6 +58,7 @@ append_notice("libsodium CMake adapter" "${sodium_source}/LICENSE")
 append_notice("libsodium" "${sodium_source}/libsodium/LICENSE")
 get_target_property(pugi_notice pugixml VXCORE_LICENSE_FILE)
 append_notice("pugixml" "${pugi_notice}")
+append_notice("utf8proc 2.12.0 (MIT and Unicode data license)" "${vxm_utf8proc_SOURCE_DIR}/LICENSE.md")
 if(NOT APPLE OR CMAKE_SYSTEM_NAME STREQUAL "iOS")
   get_target_property(curl_notice vxcore_webdav_curl VXCORE_LICENSE_FILE)
   append_notice("libcurl" "${curl_notice}")
@@ -80,10 +92,10 @@ string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," NATIVE_NOTICE_BYTES "${notice
 string(REGEX REPLACE "(0x..,0x..,0x..,0x..,0x..,0x..,0x..,0x..,)" "\\1\n" NATIVE_NOTICE_BYTES "${NATIVE_NOTICE_BYTES}")
 configure_file(licenses.cpp.in "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp" @ONLY)
 
-add_library(vnote_host SHARED vxcore_host.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
+add_library(vnote_host SHARED vxcore_host.cpp notebook_import.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
 target_compile_definitions(vnote_host PRIVATE VXM_HOST_BUILD)
 target_include_directories(vnote_host PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
-target_link_libraries(vnote_host PRIVATE vxcore nlohmann_json sodium cmark)
+target_link_libraries(vnote_host PRIVATE vxcore nlohmann_json sodium cmark utf8proc)
 set_target_properties(vnote_host PROPERTIES
   CXX_VISIBILITY_PRESET hidden
   C_VISIBILITY_PRESET hidden

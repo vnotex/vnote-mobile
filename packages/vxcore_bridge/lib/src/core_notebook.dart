@@ -123,6 +123,10 @@ abstract interface class CatalogCore {
   CoreDirectory get initialDirectory;
   String get nativeNotices;
   Future<CoreDirectory> list([String? folderId]);
+
+  /// Complete unique on-disk node IDs, including the root folder. The strict
+  /// metadata graph and core's authoritative collector must agree exactly.
+  Future<List<String>> collectNodeIds();
   Future<String> createNote(String folderId, String name);
   Future<String> createFolder(String folderId, String name);
   Future<void> rename(String nodeId, String name);
@@ -471,6 +475,21 @@ CoreSearchResult _searchResult(native.VxmEvent event) {
     limited: limited,
     skipped: skipped,
   );
+}
+
+List<String> _nodeIdsResult(native.VxmEvent event) {
+  final json = _queryObject(event);
+  _queryString(json['notebookId'], maximum: 127);
+  final values = json['nodeIds'];
+  if (values is! List || values.isEmpty || values.length > 100000) _badQuery();
+  final unique = <String>{};
+  final ids = <String>[];
+  for (final value in values) {
+    final id = _queryString(value, maximum: 127);
+    if (!unique.add(id)) _badQuery();
+    ids.add(id);
+  }
+  return List<String>.unmodifiable(ids);
 }
 
 CoreTags _tagsResult(native.VxmEvent event) {
@@ -886,6 +905,11 @@ final class CoreNotebook implements NotebookCore, CatalogCore {
       search: true,
     );
   }
+
+  @override
+  Future<List<String>> collectNodeIds() => _catalogJson<List<String>>({
+    'op': 'collectNodeIds',
+  }, decode: _nodeIdsResult);
 
   @override
   Future<CoreTags> tags([String? nodeId]) async {

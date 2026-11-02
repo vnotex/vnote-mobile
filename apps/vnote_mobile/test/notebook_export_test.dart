@@ -7,11 +7,24 @@ import 'dart:typed_data';
 import 'package:archive/archive.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
-import 'package:vnote_mobile/services/document_export_platform.dart';
+import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
-class _Platform implements DocumentExportPlatform {
+class _Platform implements DocumentTransferPlatform {
+  @override
+  Future<DocumentImportResult> pickImport({
+    required String operationId,
+    required DocumentImportKind kind,
+  }) async => const DocumentImportResult(
+    status: DocumentImportStatus.unavailable,
+    sourceName: null,
+    bytes: 0,
+    entries: 0,
+  );
+  @override
+  Future<void> cancelImport(String operationId) async {}
+
   int preparations = 0;
   int saves = 0;
   int cancellations = 0;
@@ -86,7 +99,7 @@ void main() {
   final exporters = <NotebookExporter>[];
 
   NotebookExporter makeExporter({
-    DocumentExportPlatform? adapter,
+    DocumentTransferPlatform? adapter,
     String? location,
   }) {
     final value = NotebookExporter(

@@ -1,6 +1,8 @@
+import CoreFoundation
 import Darwin
 import Flutter
 import UIKit
+import UniformTypeIdentifiers
 
 @main
 @objc class AppDelegate: FlutterAppDelegate, FlutterImplicitEngineDelegate {
@@ -13,14 +15,14 @@ import UIKit
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
-    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "DocumentExportPlugin") {
-      DocumentExportPlugin.register(with: registrar)
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "DocumentTransferPlugin") {
+      DocumentTransferPlugin.register(with: registrar)
     }
   }
 }
 
-/// The picker owns a lease on one immutable ZIP, not on a notebook or core owner.
-private final class DocumentExportPlugin: NSObject, FlutterPlugin,
+/// Owns transfer leases only; provider URLs never become notebook storage.
+private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
   FlutterSceneLifeCycleDelegate, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate
 {
   private enum ExportError: Error { case unavailable }
@@ -28,9 +30,11 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
   private var channel: FlutterMethodChannel?
   private var attached = true
   private var active: Operation?
+  private var importing: ImportOperation?
+  private let importWorker = DispatchQueue(label: "vnote.document-import", qos: .userInitiated)
   // The registrar can release us on engine detach while UIKit still reads the
   // source. Break this self-retention only at delegate/dismissal completion.
-  private var leaseOwner: DocumentExportPlugin?
+  private var leaseOwner: DocumentTransferPlugin?
 
   private final class Operation {
     let id: String
@@ -66,9 +70,9 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
   }
 
   static func register(with registrar: FlutterPluginRegistrar) {
-    let instance = DocumentExportPlugin()
+    let instance = DocumentTransferPlugin()
     let channel = FlutterMethodChannel(
-      name: "vnote.mobile/document_export", binaryMessenger: registrar.messenger())
+      name: "vnote.mobile/document_transfer", binaryMessenger: registrar.messenger())
     instance.channel = channel
     registrar.addMethodCallDelegate(instance, channel: channel)
     registrar.addSceneDelegate(instance)
@@ -88,6 +92,16 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
       }
     case "saveExport":
       save(call, result: result)
+    case "pickImport":
+      pickImport(call, result: result)
+    case "cancelImport":
+      guard let args = call.arguments as? [String: Any],
+            let id = args["operationId"] as? String, Self.validID(id) else {
+        result(FlutterError(code: "invalid_request", message: "Invalid import request.", details: nil))
+        return
+      }
+      if let operation = importing, operation.id == id { stopImport(operation, status: "cancelled") }
+      result(nil)
     case "cancelExport":
       guard let args = call.arguments as? [String: Any],
             let id = args["operationId"] as? String, Self.validID(id) else {
@@ -109,6 +123,7 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
     channel?.setMethodCallHandler(nil)
     channel = nil
     if let operation = active { requestStop(operation, status: "unavailable") }
+    if let operation = importing { stopImport(operation, status: "unavailable") }
   }
 
   func sceneDidDisconnect(_ scene: UIScene) {
@@ -116,10 +131,11 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
       // Disconnect is never successful export, even if a provider was copying.
       requestStop(operation, status: "cancelled")
     }
+    if let operation = importing, operation.scene === scene { stopImport(operation, status: "cancelled") }
   }
 
   private func save(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
-    guard attached, active == nil else {
+    guard attached, active == nil, importing == nil else {
       reply(result, status: "unavailable", incomplete: false)
       return
     }
@@ -198,6 +214,10 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
   }
 
   func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
+    if let operation = importing, operation.picker === controller {
+      receiveImport(operation, urls: urls)
+      return
+    }
     guard let operation = active, operation.picker === controller else { return }
     // System/provider completion, not a claim of remote durable synchronization.
     // The returned external URLs are neither retained nor logged.
@@ -205,11 +225,20 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
   }
 
   func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
+    if let operation = importing, operation.picker === controller {
+      stopImport(operation, status: "cancelled")
+      return
+    }
     guard let operation = active, operation.picker === controller else { return }
     finish(operation, status: "cancelled")
   }
 
   func presentationControllerDidDismiss(_ presentationController: UIPresentationController) {
+    if let operation = importing,
+       operation.picker.presentationController === presentationController {
+      if !operation.copying { stopImport(operation, status: "cancelled") }
+      return
+    }
     guard let operation = active,
           operation.picker.presentationController === presentationController else { return }
     finish(operation, status: "cancelled")
@@ -237,6 +266,453 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
     result(["status": status, "externalMayBeIncomplete": incomplete])
   }
 
+  private enum ImportError: Error { case unavailable, cancelled }
+  private static let maximumInputBytes: Int64 = 1024 * 1024 * 1024
+  private static let maximumTreeBytes: Int64 = 2 * 1024 * 1024 * 1024
+  private static let maximumFileBytes: Int64 = 256 * 1024 * 1024
+  private static let importHeadroom: Int64 = 64 * 1024 * 1024
+
+  private final class ImportOperation {
+    let id: String
+    let kind: String
+    let root: URL
+    let transaction: URL
+    let picker: UIDocumentPickerViewController
+    let scene: UIScene // Retained through picker, worker and security-scope settlement.
+    var result: FlutterResult?
+    var presenting = false
+    var dismissing = false
+    var copying = false
+    var stopStatus: String?
+    var completedStatus: String?
+    var sourceName: String?
+    var bytes: Int64 = 0
+    var entries = 0
+    private let lock = NSLock()
+    private var cancelled = false
+    private var coordinator: NSFileCoordinator?
+
+    init(id: String, kind: String, root: URL, transaction: URL,
+         picker: UIDocumentPickerViewController, scene: UIScene,
+         result: @escaping FlutterResult) {
+      self.id = id
+      self.kind = kind
+      self.root = root
+      self.transaction = transaction
+      self.picker = picker
+      self.scene = scene
+      self.result = result
+    }
+
+    func checkCancellation() throws {
+      lock.lock()
+      let stopped = cancelled
+      lock.unlock()
+      if stopped { throw ImportError.cancelled }
+    }
+
+    func setCoordinator(_ value: NSFileCoordinator?) {
+      lock.lock()
+      coordinator = value
+      let stopped = cancelled
+      lock.unlock()
+      if stopped { value?.cancel() }
+    }
+
+    func cancel() {
+      lock.lock()
+      cancelled = true
+      let current = coordinator
+      lock.unlock()
+      current?.cancel()
+    }
+  }
+
+  private func pickImport(_ call: FlutterMethodCall, result: @escaping FlutterResult) {
+    guard attached, active == nil, importing == nil,
+          let (presenter, scene) = activePresenter() else {
+      replyImport(result, status: "unavailable")
+      return
+    }
+    guard let args = call.arguments as? [String: Any], args.count == 2,
+          let id = args["operationId"] as? String, Self.validID(id),
+          let kind = args["kind"] as? String, kind == "zip" || kind == "folder" else {
+      replyImport(result, status: "failed")
+      return
+    }
+    let root: URL
+    let transaction: URL
+    do {
+      root = try prepareStorage()
+      transaction = try validateImportRequest(root: root, id: id, kind: kind)
+    } catch {
+      replyImport(result, status: "failed")
+      return
+    }
+    let picker = UIDocumentPickerViewController(
+      forOpeningContentTypes: kind == "zip" ? [UTType.zip] : [UTType.folder], asCopy: false)
+    picker.allowsMultipleSelection = false
+    picker.delegate = self
+    picker.modalPresentationStyle = .formSheet
+    picker.shouldShowFileExtensions = true
+    let operation = ImportOperation(id: id, kind: kind, root: root, transaction: transaction,
+                                    picker: picker, scene: scene, result: result)
+    importing = operation
+    leaseOwner = self
+    operation.presenting = true
+    presenter.present(picker, animated: false) {
+      guard self.importing === operation else { return }
+      operation.presenting = false
+      picker.presentationController?.delegate = self
+      if let status = operation.stopStatus ?? operation.completedStatus {
+        self.completeImport(operation, status: status)
+      }
+    }
+    picker.presentationController?.delegate = self
+    if picker.presentingViewController == nil && !picker.isBeingPresented {
+      operation.presenting = false
+      completeImport(operation, status: "failed")
+    }
+  }
+
+  private func receiveImport(_ operation: ImportOperation, urls: [URL]) {
+    guard importing === operation, !operation.copying, operation.completedStatus == nil else { return }
+    guard operation.stopStatus == nil, urls.count == 1, let source = urls.first, source.isFileURL else {
+      completeImport(operation, status: operation.stopStatus ?? "failed")
+      return
+    }
+    // Acquire the temporary picker capability before its delegate returns.
+    guard source.startAccessingSecurityScopedResource() else {
+      completeImport(operation, status: "failed")
+      return
+    }
+    operation.copying = true
+    importWorker.async {
+      var status = "ready"
+      do {
+        try self.copyCoordinatedImport(operation, source: source)
+      } catch ImportError.cancelled {
+        status = "cancelled"
+      } catch {
+        status = "failed"
+      }
+      // Handles, coordination and security scope have ended before this handoff.
+      let settledStatus = status
+      DispatchQueue.main.async {
+        operation.copying = false
+        self.completeImport(operation, status: settledStatus)
+      }
+    }
+  }
+
+  private func stopImport(_ operation: ImportOperation, status: String) {
+    guard importing === operation else { return }
+    if operation.stopStatus == nil { operation.stopStatus = status }
+    operation.cancel()
+    completeImport(operation, status: status)
+  }
+
+  private func completeImport(_ operation: ImportOperation, status: String) {
+    guard importing === operation else { return }
+    operation.completedStatus = status
+    guard !operation.copying, !operation.presenting, !operation.dismissing else { return }
+    if operation.picker.presentingViewController != nil || operation.picker.isBeingDismissed {
+      operation.dismissing = true
+      operation.picker.dismiss(animated: false) { self.finishImport(operation) }
+    } else {
+      finishImport(operation)
+    }
+  }
+
+  private func finishImport(_ operation: ImportOperation) {
+    guard importing === operation, !operation.copying else { return }
+    let terminal = operation.stopStatus ?? operation.completedStatus ?? "failed"
+    let result = operation.result
+    operation.result = nil
+    operation.picker.delegate = nil
+    operation.picker.presentationController?.delegate = nil
+    importing = nil
+    leaseOwner = nil
+    if attached, let result = result {
+      replyImport(result, status: terminal,
+                  sourceName: terminal == "ready" ? operation.sourceName : nil,
+                  bytes: terminal == "ready" ? operation.bytes : 0,
+                  entries: terminal == "ready" ? operation.entries : 0)
+    }
+  }
+
+  private func replyImport(_ result: FlutterResult, status: String,
+                           sourceName: String? = nil, bytes: Int64 = 0, entries: Int = 0) {
+    result(["status": status, "sourceName": sourceName as Any? ?? NSNull(),
+            "bytes": bytes, "entries": entries])
+  }
+
+  private func validateImportRequest(root: URL, id: String, kind: String) throws -> URL {
+    try requireDirectory(root)
+    let imports = root.appendingPathComponent("imports", isDirectory: true)
+    let transaction = imports.appendingPathComponent(id, isDirectory: true)
+    try requireDirectory(imports)
+    try requireDirectory(transaction)
+    let marker = transaction.appendingPathComponent("request.json")
+    let before = try metadata(marker)
+    try requireRegularFile(before)
+    guard before.st_size <= 16384 else { throw ImportError.unavailable }
+    let descriptor = try openImportInput(marker, expected: before)
+    defer { Darwin.close(descriptor) }
+    var bytes = [UInt8](repeating: 0, count: Int(before.st_size))
+    try bytes.withUnsafeMutableBytes { buffer in
+      var offset = 0
+      while offset < buffer.count {
+        let count = Darwin.read(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+        if count < 0 && errno == EINTR { continue }
+        guard count > 0 else { throw ImportError.unavailable }
+        offset += count
+      }
+    }
+    var extra: UInt8 = 0
+    guard Darwin.read(descriptor, &extra, 1) == 0 else { throw ImportError.unavailable }
+    try requireImportUnchanged(descriptor, url: marker, expected: before)
+    let decoded = try JSONSerialization.jsonObject(with: Data(bytes))
+    guard let request = decoded as? [String: Any], request.count == 3,
+          let version = request["version"] as? NSNumber,
+          CFGetTypeID(version) != CFBooleanGetTypeID(), version == 1,
+          request["id"] as? String == id, request["kind"] as? String == kind
+    else { throw ImportError.unavailable }
+    return transaction
+  }
+
+  private func copyCoordinatedImport(_ operation: ImportOperation, source: URL) throws {
+    // The delegate acquired this scope; release it even on early cancellation.
+    defer { source.stopAccessingSecurityScopedResource() }
+    try operation.checkCancellation()
+    _ = try validateImportRequest(root: operation.root, id: operation.id, kind: operation.kind)
+    let coordinator = NSFileCoordinator(filePresenter: nil)
+    operation.setCoordinator(coordinator)
+    defer { operation.setCoordinator(nil) }
+    var coordinationError: NSError?
+    var copyError: Error?
+    var copied = false
+    coordinator.coordinate(readingItemAt: source, options: [], error: &coordinationError) { coordinated in
+      do {
+        try operation.checkCancellation()
+        guard coordinated.isFileURL else { throw ImportError.unavailable }
+        let name = source.lastPathComponent
+        guard !name.isEmpty, name.utf8.count <= 1024,
+              !name.unicodeScalars.contains(where: { $0.value < 32 || (127...159).contains($0.value) })
+        else { throw ImportError.unavailable }
+        operation.sourceName = name
+        let value = try self.metadata(coordinated)
+        let reserve: Int64
+        if operation.kind == "zip" {
+          try self.requireImportFile(value, maximum: Self.maximumInputBytes)
+          guard value.st_size > 0 else { throw ImportError.unavailable }
+          reserve = value.st_size
+        } else {
+          guard (value.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR) else { throw ImportError.unavailable }
+          reserve = Self.maximumTreeBytes
+        }
+        try self.requireImportSpace(operation.transaction, bytes: reserve)
+        var buffer = [UInt8](repeating: 0, count: 256 * 1024)
+        try buffer.withUnsafeMutableBytes { buffer in
+          if operation.kind == "zip" {
+            try self.copyImportFile(operation, source: coordinated,
+              destination: operation.transaction.appendingPathComponent("input.zip"),
+              expected: value, maximum: Self.maximumInputBytes, buffer: buffer)
+            operation.entries = 1
+          } else {
+            let destination = operation.transaction.appendingPathComponent("unpacked", isDirectory: true)
+            try self.createImportDirectory(destination)
+            let accepted = try self.createImportOutput(operation.transaction.appendingPathComponent("accepted.jsonl"))
+            defer { Darwin.close(accepted) }
+            var visited = Set<String>()
+            try self.copyImportDirectory(operation, source: coordinated, destination: destination,
+              prefix: "", depth: 0, visited: &visited, inventory: accepted, buffer: buffer)
+            guard Darwin.fsync(accepted) == 0 else { throw ImportError.unavailable }
+          }
+        }
+        try operation.checkCancellation()
+        copied = true
+      } catch { copyError = error }
+    }
+    if let error = copyError { throw error }
+    guard coordinationError == nil, copied else { throw ImportError.unavailable }
+    try operation.checkCancellation()
+  }
+
+  private func openImportInput(_ url: URL, expected: stat) throws -> Int32 {
+    let descriptor = url.withUnsafeFileSystemRepresentation { pointer -> Int32 in
+      guard let pointer = pointer else { return -1 }
+      return Darwin.open(pointer, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    }
+    guard descriptor >= 0 else { throw ImportError.unavailable }
+    do {
+      try requireImportUnchanged(descriptor, url: url, expected: expected)
+      return descriptor
+    } catch {
+      Darwin.close(descriptor)
+      throw error
+    }
+  }
+
+  private func requireImportUnchanged(_ descriptor: Int32, url: URL, expected: stat) throws {
+    var opened = stat()
+    let current = try metadata(url)
+    guard Darwin.fstat(descriptor, &opened) == 0 else { throw ImportError.unavailable }
+    try requireImportIdentity(opened, expected: expected)
+    try requireImportIdentity(current, expected: expected)
+  }
+
+  private func requireImportIdentity(_ value: stat, expected: stat) throws {
+    guard value.st_dev == expected.st_dev, value.st_ino == expected.st_ino,
+          value.st_mode == expected.st_mode, value.st_nlink == expected.st_nlink,
+          value.st_size == expected.st_size,
+          value.st_mtimespec.tv_sec == expected.st_mtimespec.tv_sec,
+          value.st_mtimespec.tv_nsec == expected.st_mtimespec.tv_nsec,
+          value.st_ctimespec.tv_sec == expected.st_ctimespec.tv_sec,
+          value.st_ctimespec.tv_nsec == expected.st_ctimespec.tv_nsec
+    else { throw ImportError.unavailable }
+  }
+
+  private func requireImportFile(_ value: stat, maximum: Int64) throws {
+    guard (value.st_mode & mode_t(S_IFMT)) == mode_t(S_IFREG), value.st_nlink == 1,
+          value.st_size >= 0, value.st_size <= maximum else { throw ImportError.unavailable }
+  }
+
+  private func createImportOutput(_ url: URL) throws -> Int32 {
+    let descriptor = url.withUnsafeFileSystemRepresentation { pointer -> Int32 in
+      guard let pointer = pointer else { return -1 }
+      return Darwin.open(pointer, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+    }
+    guard descriptor >= 0 else { throw ImportError.unavailable }
+    return descriptor
+  }
+
+  private func createImportDirectory(_ url: URL) throws {
+    let result = url.withUnsafeFileSystemRepresentation { pointer -> Int32 in
+      guard let pointer = pointer else { return -1 }
+      return Darwin.mkdir(pointer, 0o700)
+    }
+    guard result == 0 else { throw ImportError.unavailable }
+    try requireDirectory(url)
+  }
+
+  private func writeImportBytes(_ descriptor: Int32, buffer: UnsafeRawBufferPointer) throws {
+    var offset = 0
+    while offset < buffer.count {
+      let written = Darwin.write(descriptor, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
+      if written < 0 && errno == EINTR { continue }
+      guard written > 0 else { throw ImportError.unavailable }
+      offset += written
+    }
+  }
+
+  private func requireImportSpace(_ transaction: URL, bytes: Int64) throws {
+    var space = statfs()
+    let result = transaction.withUnsafeFileSystemRepresentation { pointer -> Int32 in
+      guard let pointer = pointer else { return -1 }
+      return Darwin.statfs(pointer, &space)
+    }
+    guard result == 0, space.f_bsize > 0,
+          space.f_bavail >= UInt64((bytes + Self.importHeadroom + Int64(space.f_bsize) - 1) / Int64(space.f_bsize))
+    else { throw ImportError.unavailable }
+  }
+
+  private func copyImportFile(_ operation: ImportOperation, source: URL, destination: URL,
+                              expected: stat, maximum: Int64, buffer: UnsafeMutableRawBufferPointer) throws {
+    try operation.checkCancellation()
+    try requireImportFile(expected, maximum: maximum)
+    let input = try openImportInput(source, expected: expected)
+    defer { Darwin.close(input) }
+    let output = try createImportOutput(destination)
+    defer { Darwin.close(output) }
+    var copied: Int64 = 0
+    while true {
+      try operation.checkCancellation()
+      let count = Darwin.read(input, buffer.baseAddress!, buffer.count)
+      if count < 0 && errno == EINTR { continue }
+      guard count >= 0 else { throw ImportError.unavailable }
+      if count == 0 { break }
+      copied += Int64(count)
+      operation.bytes += Int64(count)
+      guard copied <= maximum, copied <= expected.st_size, operation.bytes <= Self.maximumTreeBytes
+      else { throw ImportError.unavailable }
+      try requireImportSpace(operation.transaction, bytes: Int64(count))
+      try writeImportBytes(output, buffer: UnsafeRawBufferPointer(start: buffer.baseAddress, count: count))
+    }
+    guard copied == expected.st_size else { throw ImportError.unavailable }
+    try requireImportUnchanged(input, url: source, expected: expected)
+    try operation.checkCancellation()
+    guard Darwin.fsync(output) == 0 else { throw ImportError.unavailable }
+  }
+
+  private func copyImportDirectory(_ operation: ImportOperation, source: URL, destination: URL,
+                                   prefix: String, depth: Int, visited: inout Set<String>,
+                                   inventory: Int32, buffer: UnsafeMutableRawBufferPointer) throws {
+    try operation.checkCancellation()
+    let expected = try metadata(source)
+    guard depth <= 32, (expected.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR),
+          visited.insert("\(expected.st_dev):\(expected.st_ino)").inserted
+    else { throw ImportError.unavailable }
+    let descriptor = try openImportInput(source, expected: expected)
+    guard let directory = Darwin.fdopendir(descriptor) else {
+      Darwin.close(descriptor)
+      throw ImportError.unavailable
+    }
+    defer { Darwin.closedir(directory) }
+    while true {
+      try operation.checkCancellation()
+      errno = 0
+      guard let entry = Darwin.readdir(directory) else {
+        guard errno == 0 else { throw ImportError.unavailable }
+        break
+      }
+      let nameCapacity = MemoryLayout.size(ofValue: entry.pointee.d_name)
+      let name = withUnsafePointer(to: &entry.pointee.d_name) { pointer in
+        pointer.withMemoryRebound(to: CChar.self, capacity: nameCapacity) {
+          String(validatingUTF8: $0)
+        }
+      }
+      guard let name = name else { throw ImportError.unavailable }
+      if name == "." || name == ".." { continue }
+      guard depth < 32, operation.entries < 100000 else { throw ImportError.unavailable }
+      let relative = prefix.isEmpty ? name : "\(prefix)/\(name)"
+      try validateImportName(name, relative: relative)
+      let child = source.appendingPathComponent(name)
+      let output = destination.appendingPathComponent(name)
+      let value = try metadata(child)
+      let isDirectory = (value.st_mode & mode_t(S_IFMT)) == mode_t(S_IFDIR)
+      operation.entries += 1
+      if isDirectory {
+        try createImportDirectory(output)
+      } else {
+        try copyImportFile(operation, source: child, destination: output,
+                           expected: value, maximum: Self.maximumFileBytes, buffer: buffer)
+      }
+      var record = try JSONSerialization.data(withJSONObject: ["path": relative,
+        "type": isDirectory ? "directory" : "file"], options: [.sortedKeys, .withoutEscapingSlashes])
+      record.append(10)
+      try requireImportSpace(operation.transaction, bytes: Int64(record.count))
+      try record.withUnsafeBytes { try writeImportBytes(inventory, buffer: $0) }
+      if isDirectory {
+        try copyImportDirectory(operation, source: child, destination: output, prefix: relative,
+                                 depth: depth + 1, visited: &visited, inventory: inventory, buffer: buffer)
+      }
+    }
+    try requireImportUnchanged(descriptor, url: source, expected: expected)
+  }
+
+  private func validateImportName(_ name: String, relative: String) throws {
+    let base = String(name.prefix(while: { $0 != "." })).uppercased()
+    let numberedDevice = (base.hasPrefix("COM") || base.hasPrefix("LPT")) && base.count == 4 &&
+      "123456789¹²³".contains(base.last!)
+    guard !name.isEmpty, name != ".", name != "..", name.utf8.count <= 255,
+          relative.utf8.count <= 1024, !name.hasSuffix("."), !name.hasSuffix(" "),
+          !name.unicodeScalars.contains(where: {
+            $0.value < 32 || (127...159).contains($0.value) || "/\\:*?\"<>|".unicodeScalars.contains($0)
+          }), !["CON", "PRN", "AUX", "NUL"].contains(base), !numberedDevice
+    else { throw ImportError.unavailable }
+  }
+
   private func prepareStorage() throws -> URL {
     let manager = FileManager.default
     guard let libraryURL = manager.urls(for: .libraryDirectory, in: .userDomainMask).first,
@@ -251,7 +727,7 @@ private final class DocumentExportPlugin: NSObject, FlutterPlugin,
           supportURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
             == library.path else { throw ExportError.unavailable }
     try prepareExcludedDirectory(root)
-    for name in ["core", "notebooks", "exports"] {
+    for name in ["core", "notebooks", "exports", "imports"] {
       try prepareExcludedDirectory(root.appendingPathComponent(name, isDirectory: true))
     }
     return root

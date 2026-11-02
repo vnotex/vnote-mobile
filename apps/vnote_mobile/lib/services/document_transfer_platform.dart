@@ -13,7 +13,25 @@ class DocumentExportResult {
   final bool externalMayBeIncomplete;
 }
 
-abstract interface class DocumentExportPlatform {
+enum DocumentImportKind { zip, folder }
+
+enum DocumentImportStatus { ready, cancelled, failed, unavailable }
+
+class DocumentImportResult {
+  const DocumentImportResult({
+    required this.status,
+    required this.sourceName,
+    required this.bytes,
+    required this.entries,
+  });
+
+  final DocumentImportStatus status;
+  final String? sourceName;
+  final int bytes;
+  final int entries;
+}
+
+abstract interface class DocumentTransferPlatform {
   Future<void> prepareStorage();
   Future<DocumentExportResult> save({
     required String operationId,
@@ -21,12 +39,18 @@ abstract interface class DocumentExportPlatform {
     required String suggestedName,
   });
   Future<void> cancel(String operationId);
+  Future<DocumentImportResult> pickImport({
+    required String operationId,
+    required DocumentImportKind kind,
+  });
+  Future<void> cancelImport(String operationId);
 }
 
-/// The save future, not the cancellation acknowledgement, releases the source.
-class MethodChannelDocumentExportPlatform implements DocumentExportPlatform {
-  const MethodChannelDocumentExportPlatform({
-    this._channel = const MethodChannel('vnote.mobile/document_export'),
+/// Transfer futures, not cancellation acknowledgements, release IO leases.
+class MethodChannelDocumentTransferPlatform
+    implements DocumentTransferPlatform {
+  const MethodChannelDocumentTransferPlatform({
+    this._channel = const MethodChannel('vnote.mobile/document_transfer'),
   });
 
   final MethodChannel _channel;
@@ -118,6 +142,88 @@ class MethodChannelDocumentExportPlatform implements DocumentExportPlatform {
       if (result != null) throw const FormatException();
     } catch (_) {
       throw StateError('Document export cancellation is unavailable.');
+    }
+  }
+
+  @override
+  Future<DocumentImportResult> pickImport({
+    required String operationId,
+    required DocumentImportKind kind,
+  }) async {
+    const failed = DocumentImportResult(
+      status: DocumentImportStatus.failed,
+      sourceName: null,
+      bytes: 0,
+      entries: 0,
+    );
+    if (!_validId(operationId)) return failed;
+    try {
+      final raw = await _channel.invokeMethod<Object?>('pickImport', {
+        'operationId': operationId,
+        'kind': kind.name,
+      });
+      if (raw is! Map ||
+          raw.length != 4 ||
+          raw['bytes'] is! int ||
+          raw['entries'] is! int) {
+        throw const FormatException();
+      }
+      final status = switch (raw['status']) {
+        'ready' => DocumentImportStatus.ready,
+        'cancelled' => DocumentImportStatus.cancelled,
+        'failed' => DocumentImportStatus.failed,
+        'unavailable' => DocumentImportStatus.unavailable,
+        _ => throw const FormatException(),
+      };
+      final name = raw['sourceName'];
+      final bytes = raw['bytes'] as int;
+      final entries = raw['entries'] as int;
+      if (status == DocumentImportStatus.ready) {
+        final maximum = kind == DocumentImportKind.zip ? 1 << 30 : 2 << 30;
+        if (name is! String ||
+            name.isEmpty ||
+            name.length > 1024 ||
+            name.contains('\u0000') ||
+            bytes < 0 ||
+            bytes > maximum ||
+            entries < 0 ||
+            entries > 100000 ||
+            (kind == DocumentImportKind.zip && (bytes == 0 || entries != 1))) {
+          throw const FormatException();
+        }
+      } else if (name != null || bytes != 0 || entries != 0) {
+        throw const FormatException();
+      }
+      return DocumentImportResult(
+        status: status,
+        sourceName: name as String?,
+        bytes: bytes,
+        entries: entries,
+      );
+    } on MissingPluginException {
+      return const DocumentImportResult(
+        status: DocumentImportStatus.unavailable,
+        sourceName: null,
+        bytes: 0,
+        entries: 0,
+      );
+    } catch (_) {
+      return failed;
+    }
+  }
+
+  @override
+  Future<void> cancelImport(String operationId) async {
+    if (!_validId(operationId)) {
+      throw StateError('Document import cancellation is unavailable.');
+    }
+    try {
+      final result = await _channel.invokeMethod<Object?>('cancelImport', {
+        'operationId': operationId,
+      });
+      if (result != null) throw const FormatException();
+    } catch (_) {
+      throw StateError('Document import cancellation is unavailable.');
     }
   }
 }

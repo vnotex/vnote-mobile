@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Export a complete saved notebook ZIP from its library row through system Save As. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning from the editor requires Write/Discard/Cancel before **Notebooks** can switch the selected notebook. Library discovery, catalog and editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
+The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export a complete saved notebook ZIP from its library row through system Save As. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning from the editor requires Write/Discard/Cancel before **Notebooks** can switch the selected notebook. Library discovery, catalog and editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
 
 ## Development
 
@@ -89,12 +89,21 @@ failed saves retain one prepared ZIP for retry; interrupted/corrupt staging has 
 explicit discard action that never deletes the notebook. Snapshot capture closes
 its native owner before ZIP/provider work, so other notebooks can open afterward.
 
-Android Save As is exercised. The iOS export adapter is implemented but has not
-been built or run here. OS backup exclusion is configured and requested, not a
+Whole-notebook import prepares a private copy before **Validate and import**.
+ZIP input is limited to 1 GiB, the expanded tree to 2 GiB and each file to 256 MiB;
+100:1 expansion, 100,000-entry and portable-name guards reject unsafe input.
+For highly compressible but otherwise valid content, use **Import folder** after
+discarding the refused ZIP copy. Duplicate notebook UUIDs offer the existing copy,
+never overwrite or regenerate identities. Interrupted publication is quarantined
+and reconciled before normal discovery; explicit discard cannot delete a foreign
+or committed notebook. Import and export share one staging reservation.
+
+Android ZIP/folder pickers and Save As are exercised. The iOS transfer adapter is
+implemented but has not been built or run here. OS backup exclusion is configured and requested, not a
 verified guarantee across iOS/OEM transfers. Keep your own exported copies before
 app removal or device loss. See [export/privacy contract](docs/adr/0006-import-share-and-privacy.md).
 
-Managed import, Markdown/assets-only export and attachment editing remain planned
+Markdown/assets-only import/export, share-in and attachment editing remain planned
 offline work; preview, autosave/recovery and sync remain later gates. No iOS or
 physical-device completion follows from Android/host verification.
 

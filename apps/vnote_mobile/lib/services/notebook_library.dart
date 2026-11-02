@@ -1,11 +1,15 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import 'dart:async';
 
+import 'package:path/path.dart' as p;
+
 import 'package:flutter/foundation.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'managed_notebook_storage.dart';
 import 'notebook_export.dart';
+import 'notebook_import.dart';
+import 'document_transfer_platform.dart';
 import 'notebook_workspace.dart';
 
 typedef LibraryOpenCatalog = Future<CatalogCore> Function(
@@ -16,7 +20,15 @@ typedef LibraryOpenExportCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
   String notebookId,
 );
-typedef LibraryCreateExporter = NotebookExporter Function(String root);
+typedef LibraryCreateExporter = NotebookExporter Function(
+  String root,
+  VoidCallback checkAdmission,
+);
+typedef LibraryCreateImporter = NotebookImporter Function(
+  String root,
+  String notebooksRoot,
+  VoidCallback checkAdmission,
+);
 typedef LibraryCreateCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
   String name,
@@ -51,8 +63,12 @@ class NotebookLibraryState {
     this.closed = false,
     this.error,
     this.exportState = const NotebookExportState(),
+    this.importState = const NotebookImportState(),
+    this.transferReserved = false,
   });
   final NotebookExportState exportState;
+  final NotebookImportState importState;
+  final bool transferReserved;
   final List<ManagedNotebookEntry> entries;
   final NotebookWorkspace? workspace;
   final bool busy;
@@ -70,12 +86,14 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     LibraryWorkspaceFactory? createWorkspace,
     LibraryOpenExportCatalog? openExportCatalog,
     LibraryCreateExporter? createExporter,
+    LibraryCreateImporter? createImporter,
   }) : _obtainStorage = obtainStorage ?? ManagedNotebookStorage.obtain,
        _openCatalog = openCatalog ?? _open,
        _createCatalog = createCatalog ?? _create,
        _createWorkspace = createWorkspace ?? _workspaceFor,
        _openExportCatalog = openExportCatalog ?? _openExport,
        _createExporter = createExporter ?? _exporterFor,
+       _createImporter = createImporter ?? _importerFor,
        super(const NotebookLibraryState());
 
   final Future<ManagedNotebookStorage> Function() _obtainStorage;
@@ -84,6 +102,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   final LibraryWorkspaceFactory _createWorkspace;
   final LibraryOpenExportCatalog _openExportCatalog;
   final LibraryCreateExporter _createExporter;
+  final LibraryCreateImporter _createImporter;
+  NotebookImporter? _importer;
+  NotebookImportState _importFallback = const NotebookImportState();
+  String? _transferOwner = 'checking';
+  String? _transferCall;
   NotebookExporter? _exporter;
   NotebookExportState _exportFallback = const NotebookExportState();
   ManagedNotebookStorage? _storage;
@@ -129,6 +152,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       closed: _stopping,
       error: _error,
       exportState: _exporter?.value ?? _exportFallback,
+      importState: _importer?.value ?? _importFallback,
+      transferReserved: _transferOwner != null || _transferCall != null,
     );
   }
 
@@ -146,13 +171,424 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
   }
 
+  void _assertTransfer(String owner) {
+    if (_transferOwner != owner || _transferCall != owner || _stopping) {
+      throw StateError('Another transfer still owns private staging.');
+    }
+  }
+
+  bool _claimTransfer(String owner, {bool cleanup = false}) {
+    if (_stopping ||
+        _transferCall != null ||
+        _transferOwner == 'checking' ||
+        (_transferOwner != null &&
+            _transferOwner != owner &&
+            !(cleanup && _transferOwner == 'blocked'))) {
+      return false;
+    }
+    _transferCall = owner;
+    if (_transferOwner != 'blocked') _transferOwner = owner;
+    return true;
+  }
+
+  void _settleTransfer() {
+    if (_transferCall != null) return;
+    if (_exporter?.initialized != true || _importer?.initialized != true) {
+      _transferOwner = 'blocked';
+      return;
+    }
+    final export = _exporter!.value;
+    final hasExport =
+        export.busy || export.prepared != null || export.leftovers.isNotEmpty;
+    final hasImport = _importer!.value.busy || _importer!.value.hasStaging;
+    _transferOwner = hasExport && hasImport
+        ? 'blocked'
+        : hasExport
+        ? 'export'
+        : hasImport
+        ? 'import'
+        : null;
+  }
+
+  void _finishTransferCall() {
+    _transferCall = null;
+    _settleTransfer();
+    _publish();
+  }
+
+  void _transferChanged() {
+    _settleTransfer();
+    _publish();
+  }
+
+  Future<void> _ensureImporter() async {
+    if (_stopping) return;
+    try {
+      if (_importer == null) {
+        final root = await _storage!.obtainImportRoot();
+        if (_stopping) return;
+        final importer = _createImporter(
+          root,
+          p.normalize(_storage!.root),
+          () => _assertTransfer('import'),
+        );
+        _importer = importer;
+        importer.addListener(_transferChanged);
+      }
+      await _importer!.initialize();
+    } on Object {
+      _importFallback = const NotebookImportState(
+        error: 'Private import storage could not be reconciled.',
+      );
+    }
+  }
+
+  Future<void> prepareImport(DocumentImportKind kind) async {
+    if (_workspace != null ||
+        _active != null ||
+        _stale ||
+        _importer == null ||
+        !_claimTransfer('import')) {
+      return;
+    }
+    try {
+      await _importer!.prepare(kind);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> retryImport(ImportAttempt attempt) async {
+    if (_workspace != null ||
+        _active != null ||
+        _importer == null ||
+        !_claimTransfer('import')) {
+      return;
+    }
+    try {
+      await _importer!.retry(attempt);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> discardImport(ImportAttempt attempt) async {
+    if (_importer == null || !_claimTransfer('import', cleanup: true)) return;
+    try {
+      await _importer!.discard(attempt);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+    if (_workspace == null) await refresh();
+  }
+
+  Future<void> discardImportLeftover(ImportLeftover item) async {
+    if (_importer == null || !_claimTransfer('import', cleanup: true)) return;
+    try {
+      await _importer!.discardLeftover(item);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+    if (_workspace == null) await refresh();
+  }
+
+  void cancelImport() {
+    if (!_stopping) _importer?.cancel();
+  }
+
+  Future<void> _verifyImportCore(
+    ImportAttempt attempt,
+    String location,
+    Map<String, Object?> inspection,
+    int cancellationAddress, {
+    bool committed = false,
+  }) async {
+    if (!committed && CoreImportStore.queryCancellation(cancellationAddress)) {
+      throw StateError('Import cancelled before publication.');
+    }
+    final importer = _importer!;
+    await importer.resetInspection(attempt);
+    final base = p.join(importer.root, attempt.id, 'inspection');
+    final paths = ManagedNotebookPaths(
+      app: p.join(base, 'app'),
+      local: p.join(base, 'local'),
+      notebook: location,
+    );
+    final id = inspection['notebookId'] as String;
+    final core = await _openExportCatalog(paths, id);
+    _temporary = core;
+    try {
+      if (core.initialDirectory.notebookId != id ||
+          core.initialDirectory.notebookName != inspection['notebookName']) {
+        throw StateError('Notebook identity changed during import validation.');
+      }
+      final declared = (inspection['nodeIds'] as List).cast<String>();
+      final actual = await core.collectNodeIds();
+      if (actual.toSet().length != actual.length ||
+          declared.toSet().length != declared.length ||
+          !setEquals(actual.toSet(), declared.toSet())) {
+        throw StateError(
+          'The complete notebook identity walk could not be verified.',
+        );
+      }
+    } finally {
+      await _release(core);
+    }
+  }
+
+  Future<ImportCommitResult?> _checkImportCollisions(
+    ImportAttempt attempt,
+    Map<String, Object?> incoming,
+    int cancellationAddress, {
+    String? publishedLocation,
+  }) async {
+    final candidates = await _storage!.candidates();
+    final incomingId = incoming['notebookId'] as String;
+    final incomingNodes = (incoming['nodeIds'] as List).cast<String>().toSet();
+    String? duplicate;
+    var nodeCollision = false;
+    final seenBooks = <String>{};
+    for (final candidate in candidates) {
+      if (publishedLocation != null &&
+          p.equals(candidate.paths.notebook, publishedLocation)) {
+        continue;
+      }
+      if (candidate.error != null ||
+          _importer!.value.blockedLocations.any(
+            (path) => p.equals(path, candidate.paths.notebook),
+          )) {
+        throw StateError(
+          'Resolve unavailable notebooks before importing another copy.',
+        );
+      }
+      final known = _entries
+          .where((entry) => p.equals(entry.location, candidate.paths.notebook))
+          .toList();
+      if (known.any((entry) => !entry.canOpen)) {
+        throw StateError(
+          'Resolve unavailable notebooks before importing another copy.',
+        );
+      }
+      // Startup recovery may precede discovery. Strict native inspection returns
+      // the identity itself; an observed row, when present, additionally pins it.
+      final result = await _importer!.runStore({
+        'op': 'inspectManaged',
+        'id': attempt.id,
+        'location': candidate.paths.notebook,
+        if (known.isNotEmpty && known.single.notebookId != null)
+          'expectedNotebookId': known.single.notebookId!,
+      }, cancellationAddress: cancellationAddress);
+      await _verifyImportCore(
+        attempt,
+        candidate.paths.notebook,
+        result,
+        cancellationAddress,
+        committed: publishedLocation != null,
+      );
+      final id = result['notebookId'] as String;
+      if (!seenBooks.add(id)) {
+        throw StateError(
+          'Existing notebook identities are duplicated. Resolve them before importing.',
+        );
+      }
+      if (id == incomingId) duplicate = id;
+      final ids = (result['nodeIds'] as List).cast<String>();
+      if (id != incomingId &&
+          (ids.any(incomingNodes.contains) ||
+              incomingNodes.contains(id) ||
+              ids.contains(incomingId))) {
+        nodeCollision = true;
+      }
+    }
+    if (duplicate != null) {
+      if (publishedLocation != null) {
+        throw StateError(
+          'A published import now conflicts with another notebook. Both copies were preserved.',
+        );
+      }
+      return ImportCommitResult(
+        status: ImportCommitStatus.duplicate,
+        notebookId: duplicate,
+        message: 'This notebook is already managed. Open the existing copy or discard this import.',
+      );
+    }
+    if (nodeCollision) {
+      throw StateError(
+        'Imported node identities collide with an existing notebook. No IDs were regenerated.',
+      );
+    }
+    return null;
+  }
+
+  Future<ImportCommitResult> _completeImport(
+    ImportAttempt attempt,
+    int cancellationAddress,
+  ) async {
+    final importer = _importer!;
+    Map<String, Object?> status = await importer.runStore({
+      'op': 'recover',
+      'id': attempt.id,
+    }, cancellationAddress: 0);
+    if (status['phase'] == 'committed') {
+      return ImportCommitResult(
+        status: ImportCommitStatus.imported,
+        notebookId: status['notebookId'] as String?,
+        notebookName: status['notebookName'] as String?,
+        destination: status['destination'] as String?,
+      );
+    }
+    var published = status['phase'] == 'published';
+    final Map<String, Object?> inspection;
+    if (published) {
+      inspection = await importer.runStore({
+        'op': 'inspectManaged',
+        'id': attempt.id,
+        'location': status['destination']!,
+        'expectedNotebookId': status['notebookId']!,
+      }, cancellationAddress: 0);
+    } else {
+      if (CoreImportStore.queryCancellation(cancellationAddress)) {
+        throw StateError('Import cancelled before publication.');
+      }
+      inspection = await importer.runStore({
+        'op': 'inspect',
+        'id': attempt.id,
+        'treeRelative': attempt.treeRelative!,
+        'inventoryHash': attempt.inventoryHash!,
+      }, cancellationAddress: cancellationAddress);
+      await _verifyImportCore(
+        attempt,
+        p.join(importer.root, attempt.id, attempt.treeRelative!),
+        inspection,
+        cancellationAddress,
+      );
+    }
+    final collision = await _checkImportCollisions(
+      attempt,
+      inspection,
+      published ? 0 : cancellationAddress,
+      publishedLocation: published ? status['destination'] as String : null,
+    );
+    if (collision != null) return collision;
+    if (!published) {
+      try {
+        status = await importer.runStore({
+          'op': 'publish',
+          'id': attempt.id,
+          'treeRelative': attempt.treeRelative!,
+          'inventoryHash': attempt.inventoryHash!,
+          'notebookId': inspection['notebookId']!,
+          'notebookName': inspection['notebookName']!,
+        }, cancellationAddress: cancellationAddress);
+      } on Object {
+        // An error may follow the rename. Recover actual identity/state before
+        // deciding whether cancellation or failure left the import unpublished.
+        status = await importer.runStore({
+          'op': 'recover',
+          'id': attempt.id,
+        }, cancellationAddress: 0);
+        if (status['phase'] != 'published' && status['phase'] != 'committed') {
+          rethrow;
+        }
+      }
+      published =
+          status['phase'] == 'published' || status['phase'] == 'committed';
+      if (!published) {
+        throw StateError(
+          'Import has not been published; the prepared copy was retained.',
+        );
+      }
+    }
+    if (status['phase'] != 'committed') {
+      final destination = status['destination'] as String;
+      await _verifyImportCore(
+        attempt,
+        destination,
+        inspection,
+        0,
+        committed: true,
+      );
+      await importer.runStore({
+        'op': 'commit',
+        'id': attempt.id,
+      }, cancellationAddress: 0);
+    }
+    return ImportCommitResult(
+      status: ImportCommitStatus.imported,
+      notebookId: inspection['notebookId'] as String,
+      notebookName: inspection['notebookName'] as String,
+      destination: status['destination'] as String?,
+    );
+  }
+
+  Future<void> commitImport(ImportAttempt attempt) async {
+    if (_workspace != null ||
+        _stale ||
+        _importer == null ||
+        _active != null ||
+        !_claimTransfer('import')) {
+      return;
+    }
+    if (!_admit()) {
+      _finishTransferCall();
+      return;
+    }
+    try {
+      await _importer!.commit(attempt, _completeImport);
+      if (!_stopping) await _discover();
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _retire();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> _recoverPublishedImport() async {
+    final current = _importer?.value.current;
+    if (current == null ||
+        current.phase != NotebookImportPhase.finishing ||
+        !_claimTransfer('import')) {
+      return;
+    }
+    try {
+      await _importer!.commit(current, _completeImport);
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      _finishTransferCall();
+    }
+  }
+
+  Future<bool> openExistingImportNotebook() async {
+    final id = _importer?.value.existingNotebookId;
+    if (id == null) return false;
+    final entries = _entries
+        .where((entry) => entry.notebookId == id && entry.canOpen)
+        .toList();
+    if (entries.length != 1) {
+      _error = 'The existing notebook is unavailable. Refresh the library before opening it.';
+      _publish();
+      return false;
+    }
+    return openNotebook(entries.single);
+  }
+
   Future<void> _ensureExporter() async {
     if (_stopping) return;
     try {
       if (_exporter == null) {
         final root = await _storage!.obtainExportRoot();
         if (_stopping) return;
-        final exporter = _createExporter(root);
+        final exporter = _createExporter(root, () => _assertTransfer('export'));
         _exporter = exporter;
         exporter.addListener(_exportChanged);
       }
@@ -164,7 +600,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
   }
 
-  void _exportChanged() => _publish();
+  void _exportChanged() => _transferChanged();
 
   Future<void> exportNotebook(ManagedNotebookEntry entry) async {
     final exporter = _exporter;
@@ -175,8 +611,12 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         exporter.value.busy ||
         exporter.value.prepared != null ||
         exporter.value.leftovers.isNotEmpty ||
-        !_entries.any((current) => identical(current, entry)) ||
-        !_admit()) {
+        !_entries.any((current) => identical(current, entry))) {
+      return;
+    }
+    if (!_claimTransfer('export')) return;
+    if (!_admit()) {
+      _finishTransferCall();
       return;
     }
     final admission = _active!;
@@ -222,19 +662,35 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       _publish();
     } finally {
       releaseAdmission();
+      _finishTransferCall();
     }
   }
 
   Future<void> saveExport(PreparedNotebookExport prepared) async {
-    if (!_stopping) await _exporter?.save(prepared);
+    if (!_claimTransfer('export')) return;
+    try {
+      await _exporter?.save(prepared);
+    } finally {
+      _finishTransferCall();
+    }
   }
 
   Future<void> discardExport(PreparedNotebookExport prepared) async {
-    if (!_stopping) await _exporter?.discard(prepared);
+    if (!_claimTransfer('export', cleanup: true)) return;
+    try {
+      await _exporter?.discard(prepared);
+    } finally {
+      _finishTransferCall();
+    }
   }
 
   Future<void> discardExportLeftover(ExportLeftover leftover) async {
-    if (!_stopping) await _exporter?.discardLeftover(leftover);
+    if (!_claimTransfer('export', cleanup: true)) return;
+    try {
+      await _exporter?.discardLeftover(leftover);
+    } finally {
+      _finishTransferCall();
+    }
   }
 
   void cancelExport() {
@@ -249,6 +705,10 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _storage ??= await _obtainStorage();
     if (_stopping) return;
     await _ensureExporter();
+    await _ensureImporter();
+    _settleTransfer();
+    if (_stopping) return;
+    await _recoverPublishedImport();
     if (_stopping) return;
     final candidates = await _storage!.candidates();
     final entries = <ManagedNotebookEntry>[];
@@ -257,12 +717,33 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       String? id;
       var name = candidate.label;
       var failure = candidate.error;
+      final previouslyKnown = _entries
+          .where(
+            (entry) =>
+                p.equals(entry.location, candidate.paths.notebook) &&
+                entry.canOpen,
+          )
+          .toList();
+      final recoveryUnavailable = _importer?.initialized != true;
+      if (recoveryUnavailable && previouslyKnown.length != 1) {
+        failure = 'Import recovery storage is unavailable; this root cannot be registered safely.';
+      }
+      if (_importer?.value.blockedLocations.any(
+            (location) => p.equals(location, candidate.paths.notebook),
+          ) ==
+          true) {
+        failure =
+            'Import publication requires recovery; this copy is quarantined.';
+      }
       CatalogCore? core;
       if (failure == null) {
         try {
           final paths = await _storage!.existing(candidate.paths.notebook);
           if (_stopping) return;
-          core = await _openCatalog(paths, null);
+          core = await _openCatalog(
+            paths,
+            recoveryUnavailable ? previouslyKnown.single.notebookId : null,
+          );
           _temporary = core;
           if (!_stopping) {
             id = core.initialDirectory.notebookId;
@@ -436,6 +917,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   Future<void> _shutdown() async {
     _stopping = true;
     _exporter?.cancel();
+    _importer?.cancel();
     _publish();
     await _active?.future;
     try {
@@ -447,16 +929,28 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         final core = _temporary;
         if (core != null) await _release(core);
       } finally {
-        final exporter = _exporter;
-        if (exporter != null) {
-          try {
-            await exporter.shutdown();
-          } finally {
-            exporter.removeListener(_exportChanged);
-            exporter.dispose();
+        try {
+          final exporter = _exporter;
+          if (exporter != null) {
+            try {
+              await exporter.shutdown();
+            } finally {
+              exporter.removeListener(_exportChanged);
+              exporter.dispose();
+            }
           }
+        } finally {
+          final importer = _importer;
+          if (importer != null) {
+            try {
+              await importer.shutdown();
+            } finally {
+              importer.removeListener(_transferChanged);
+              importer.dispose();
+            }
+          }
+          _publish();
         }
-        _publish();
       }
     }
   }
@@ -469,8 +963,17 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     super.dispose();
   }
 
-  static NotebookExporter _exporterFor(String root) =>
-      NotebookExporter(root: root);
+  static NotebookExporter _exporterFor(String root, VoidCallback admission) =>
+      NotebookExporter(root: root, checkAdmission: admission);
+  static NotebookImporter _importerFor(
+    String root,
+    String notebooksRoot,
+    VoidCallback admission,
+  ) => NotebookImporter(
+    root: root,
+    notebooksRoot: notebooksRoot,
+    checkAdmission: admission,
+  );
   static Future<CatalogCore> _openExport(
     ManagedNotebookPaths paths,
     String id,

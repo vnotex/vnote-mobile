@@ -173,6 +173,32 @@ synchronous, so cancellation there waits until finalization and is checked befor
 ready publication. A committed ready copy remains retryable if cancellation wins
 after publication. See ADR 0006 for artifact ownership, quotas and provider leases.
 
+### Import filesystem worker and guarded core validation
+
+`CoreImportStore` wraps a closed, bounded synchronous filesystem API executed only
+on import worker isolates. It creates no core context and performs no notebook
+metadata mutation. Requests are at most 16 KiB and allocated responses at most
+8 MiB, released by the matching native result function. Pure Unicode path-key
+calls use pinned utf8proc. The borrowed atomic cancellation handle survives every
+worker/native lease; only the joined owner frees it. Synchronous decompression
+checks that handle at sink writes/backreferences rather than killing an isolate
+with open files.
+
+Strict incoming and managed metadata inspection precedes core validation. The
+catalog-only `collectNodeIds()` terminal retains its full 8 MiB reservation because
+only serialized size is known before collection; duplicate IDs are rejected.
+Every collected set must equal the strict metadata walk. A sequence of fresh
+transaction-local `openExportCatalog` owners validates staged, existing and finally
+published notebooks, closing/joining each before the next. No core pointer crosses
+isolate/thread boundaries and no global session restore is used for inspection.
+
+One library admission covers identity collision checking, native no-replace
+publication, guarded destination open and durable commit receipt. Separate
+synchronous transfer reservation prevents import/export staging overlap before any
+await. Shutdown drains post-publication completion; cancellation/error is not
+proof of rollback. Recovery validates the journal and directory identities before
+normal discovery or cleanup. See ADR 0006 for the exact publication boundary.
+
 ### Additional upstream concurrency gate
 
 [Context](../../third_party/vxcore/src/core/context.h) stores a plain `std::string last_error`; [sync C ABI](../../third_party/vxcore/src/api/vxcore_sync_api.cpp) writes it in `SyncResult`, while owner/search wrappers also write it. SyncManager's documented state mutex does not synchronize those C-wrapper writes. Concurrent worker/owner error paths are therefore not proven safe at this pin. Before enabling network-worker overlap with owner calls, upstream synchronize per-context error storage/access (with operation results retained separately), and audit lifetime/config reads across that seam. Do not solve this by serializing a long network call on the sole owner/control executor. Phase 1's serialized owner path remains reachable independently. Older contradictory “NOT thread-safe/pre-Wave 10” paragraphs in the sync guide do not override actual implementations or the newer locking section.

@@ -3,6 +3,8 @@ import 'package:flutter/material.dart';
 
 import '../../services/notebook_library.dart';
 import '../../services/notebook_export.dart';
+import '../../services/notebook_import.dart';
+import '../../services/document_transfer_platform.dart';
 
 class NotebookLibraryScreen extends StatefulWidget {
   const NotebookLibraryScreen({
@@ -122,6 +124,26 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                     icon: const Icon(Icons.add),
                     label: const Text('New notebook'),
                   ),
+                  PopupMenuButton<DocumentImportKind>(
+                    tooltip: 'Import notebook',
+                    icon: const Icon(Icons.file_download_outlined),
+                    enabled: available && !state.transferReserved,
+                    onSelected: (kind) async {
+                      if (_isCurrent(library, state)) {
+                        await library.prepareImport(kind);
+                      }
+                    },
+                    itemBuilder: (_) => const [
+                      PopupMenuItem(
+                        value: DocumentImportKind.zip,
+                        child: Text('Import ZIP'),
+                      ),
+                      PopupMenuItem(
+                        value: DocumentImportKind.folder,
+                        child: Text('Import folder'),
+                      ),
+                    ],
+                  ),
                 ],
               ),
               if (messages.isNotEmpty)
@@ -138,10 +160,20 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                       (state.entries.isEmpty ? 1 : state.entries.length) + 1,
                   itemBuilder: (context, index) {
                     if (index == 0) {
-                      return _ExportPanel(
-                        library: library,
-                        state: state.exportState,
-                        closed: state.closed,
+                      return Column(
+                        children: [
+                          _ImportPanel(
+                            library: library,
+                            state: state.importState,
+                            available: available,
+                            closed: state.closed,
+                          ),
+                          _ExportPanel(
+                            library: library,
+                            state: state.exportState,
+                            closed: state.closed,
+                          ),
+                        ],
                       );
                     }
                     if (state.entries.isEmpty) {
@@ -177,6 +209,7 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                         icon: const Icon(Icons.ios_share),
                         onPressed:
                             available &&
+                                !state.transferReserved &&
                                 entry.canOpen &&
                                 !state.exportState.busy &&
                                 state.exportState.prepared == null &&
@@ -201,6 +234,188 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
       );
     },
   );
+}
+
+class _ImportPanel extends StatelessWidget {
+  const _ImportPanel({
+    required this.library,
+    required this.state,
+    required this.available,
+    required this.closed,
+  });
+  final NotebookLibrary library;
+  final NotebookImportState state;
+  final bool available;
+  final bool closed;
+  Future<bool> _confirm(
+    BuildContext context,
+    String title,
+    String detail,
+    String action,
+  ) async =>
+      await showDialog<bool>(
+        context: context,
+        builder: (context) => AlertDialog(
+          title: Text(title),
+          content: Text(detail),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(context, false),
+              child: const Text('Cancel'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              child: Text(action),
+            ),
+          ],
+        ),
+      ) ==
+      true;
+  @override
+  Widget build(BuildContext context) {
+    final current = state.current;
+    if (!state.busy &&
+        !state.hasStaging &&
+        state.error == null &&
+        state.message == null) {
+      return const SizedBox.shrink();
+    }
+    final idle = !closed && !state.busy;
+    final canCommit =
+        idle &&
+        available &&
+        current != null &&
+        current.treeRelative != null &&
+        current.inventoryHash != null;
+    return Card(
+      margin: const EdgeInsets.all(12),
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: [
+            if (state.busy) ...[
+              const LinearProgressIndicator(),
+              Text(switch (state.phase) {
+                NotebookImportPhase.receiving => 'Copying the selected source…',
+                NotebookImportPhase.validating =>
+                  'Validating notebook archive and paths…',
+                NotebookImportPhase.publishing =>
+                  'Validating identities and publishing notebook…',
+                NotebookImportPhase.finishing => 'Finishing published import…',
+                NotebookImportPhase.reconciling =>
+                  'Reconciling private import storage…',
+                _ => 'Working on import…',
+              }),
+            ],
+            if (current != null) ...[
+              Text(
+                'Import: ${current.notebookName ?? current.sourceName ?? 'Notebook source'}',
+              ),
+              Text('${current.entries} entries · ${current.bytes} bytes'),
+            ],
+            if (state.error != null) SelectableText(state.error!),
+            if (state.message != null) SelectableText(state.message!),
+            if (state.busy &&
+                state.phase != NotebookImportPhase.finishing &&
+                state.phase != NotebookImportPhase.reconciling)
+              TextButton(
+                onPressed: closed ? null : library.cancelImport,
+                child: const Text('Cancel import'),
+              ),
+            if (current != null && !state.busy)
+              Wrap(
+                children: [
+                  if (canCommit)
+                    TextButton(
+                      onPressed: () async {
+                        if (await _confirm(
+                              context,
+                              'Import this notebook?',
+                              'The complete copy will be checked and registered with its original identities. Existing notebooks will not be overwritten or merged.',
+                              'Import notebook',
+                            ) &&
+                            context.mounted &&
+                            identical(
+                              library.value.importState.current,
+                              current,
+                            ) &&
+                            !library.value.closed) {
+                          await library.commitImport(current);
+                        }
+                      },
+                      child: Text(
+                        current.destination == null
+                            ? 'Validate and import'
+                            : 'Resume import',
+                      ),
+                    ),
+                  if (idle && current.treeRelative == null)
+                    TextButton(
+                      onPressed: () => library.retryImport(current),
+                      child: const Text('Retry preparation'),
+                    ),
+                  TextButton(
+                    onPressed: idle
+                        ? () async {
+                            if (await _confirm(
+                                  context,
+                                  'Discard this import?',
+                                  'Remove this private staging and, only if ownership is proven, its unregistered published copy. Existing notebooks and the original source are not deleted.',
+                                  'Discard import',
+                                ) &&
+                                context.mounted &&
+                                identical(
+                                  library.value.importState.current,
+                                  current,
+                                ) &&
+                                !library.value.importState.busy) {
+                              await library.discardImport(current);
+                            }
+                          }
+                        : null,
+                    child: const Text('Discard import'),
+                  ),
+                ],
+              ),
+            if (state.existingNotebookId != null)
+              TextButton(
+                onPressed: idle && available
+                    ? library.openExistingImportNotebook
+                    : null,
+                child: const Text('Open existing notebook'),
+              ),
+            for (final item in state.leftovers)
+              ListTile(
+                title: Text(item.label),
+                subtitle: Text(item.reason),
+                trailing: IconButton(
+                  tooltip: 'Discard import data ${item.label}',
+                  icon: const Icon(Icons.delete_outline),
+                  onPressed: idle
+                      ? () async {
+                          if (await _confirm(
+                                context,
+                                'Discard “${item.label}”?',
+                                'Only this private staging item may be removed. Ambiguous published roots remain quarantined.',
+                                'Discard staging',
+                              ) &&
+                              context.mounted &&
+                              library.value.importState.leftovers.any(
+                                (candidate) => identical(candidate, item),
+                              ) &&
+                              !library.value.importState.busy) {
+                            await library.discardImportLeftover(item);
+                          }
+                        }
+                      : null,
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
 }
 
 class _ExportPanel extends StatelessWidget {

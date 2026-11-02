@@ -604,3 +604,119 @@ provider-revocation/disk-full/device-loss scenarios are not claimed from injecte
 controller failures. The earlier rapid synthetic-input limitation remains outside
 this slice. Managed import, Markdown/assets-only export, attachment editing,
 preview/recovery, WebDAV and publication remain subsequent work.
+
+
+## Whole-notebook ZIP and folder import
+
+Implemented private ZIP/provider-folder preparation, strict archive and metadata
+validation, identity collision checks, no-replace directory publication, quarantine
+and restart reconciliation. Core remains at `64237fb`; utf8proc 2.12.0 is a pinned
+host dependency, not a core fork or a second notebook serializer.
+
+### Executed host and scale verification
+
+- MSVC Release native real-storage suite passed, including strict import identity
+  walking and the existing export/lifecycle guard regressions.
+- **97 bridge tests passed**. Bridge analysis, generated FFI/JSON-key drift,
+  enforced dependency lock, offline editor asset checks, TypeScript checking and
+  all **18 editor protocol tests** passed. Android debug packaging passed for
+  arm64 and x86_64. The all-in-one verification command first stopped at an obsolete
+  test that treated `syncEnabled: true` as unsafe; that refusal expectation was
+  removed. The preservation fixture now carries enabled Boolean preferences, while
+  actual `vx_sync` residue is tested as a refusal. The full bridge rerun passed.
+- **282 Flutter tests passed, with two Windows skips**; app analysis reported no
+  issues. Skips are the POSIX provider-file symlink case and literal-backslash
+  export filename case; these platform-specific paths are not claimed as exercised.
+  The suite covers archive boundaries, provider/worker cancellation and joins,
+  stale tokens, identity collisions, quarantined publication/restart, foreign-root
+  protection, committed edits, staging exclusion and existing export behavior.
+- Throwaway real-library imports passed with **10,000 Unicode notes** plus an opaque
+  hidden file, and with a **ZIP64 archive containing 65,536 empty directories**.
+  Both traversed preparation, guarded core/identity validation, directory
+  publication, commit and discovery. All note bodies/IDs and the opaque bytes were
+  checked after publication; the directory count and final directory survived.
+  Observed host durations were about 3 minutes and 10 minutes respectively, not a
+  mobile performance guarantee. Temporary test-harness additions were removed.
+
+### Executed Android and desktop round trip
+
+- Imported a notebook produced independently by the default Windows desktop SDK
+  C API (fixture producer revision `b0e157f`, mobile test API disabled) through the
+  real Android ZIP picker. Every initial portable file matched exactly: UUIDs,
+  nested Unicode paths, tags, custom metadata, unsupported bytes and an image asset.
+- Force-stop/cold-start with a second prepared import restored **Validate and
+  import**. Re-importing the same UUID offered **Open existing notebook**, opened
+  the existing copy, and created no additional managed root. Explicit discard
+  removed only private staging.
+- A valid but over-100:1 ZIP was refused before publication. Its equivalent folder
+  was selected through the actual system tree picker and imported successfully.
+  Independent ZIP/folder comparison established identical source file sets and
+  bytes; imported hidden sidecar and compressible body bytes were preserved.
+  The final UI exposes fixed, redacted ratio guidance and the folder alternative.
+- Cancelling the system ZIP picker retained a visible, explicitly discardable
+  attempt. Incomplete provider input was not reported as prepared or published.
+- Opened the imported Unicode Markdown note in the real WebView editor, appended
+  `MobileImportEdit`, used **Write**, reopened from disk, and re-exported through
+  system Save As. Independent ZIP CRC/content checks verified the intended edit,
+  stable identities/tags/custom metadata and unchanged asset bytes. The default
+  desktop SDK opened/read/closed that Android export with matching IDs and source.
+- Original Personal/Projects files, external source ZIP and external source folder
+  remained byte-for-byte unchanged. Settled import/export staging was empty after
+  explicit discard/completion. Both packaged Android host ABIs contain the complete
+  pinned utf8proc MIT/Unicode license bytes.
+
+### Corrections and verification limits
+
+The strict metadata walker initially rejected the ordinary `autoSyncEnabled: true`
+preference even when sync was disabled. Validation now preserves Boolean preference
+fields while retaining credential/runtime/recovery guards; the independent desktop
+fixture then imported without rewriting its config.
+
+The first device refusal hid archive safety errors behind a generic message. Only
+a dedicated exception carrying fixed application-authored diagnostics now crosses
+to the UI; arbitrary codec exceptions/source excerpts remain redacted.
+
+A same-process editor-to-export smoke exposed a real Android failure: after WebView
+initialization, an unqualified `AndroidManifest.xml` asset lookup could select the
+added WebView package instead of this app, failing storage protection checks.
+The adapter now selects the cookie obtained from the app's backup-rule resource
+([TypedValue.assetCookie](https://developer.android.com/reference/android/util/TypedValue#assetCookie),
+[AssetManager API](https://developer.android.com/reference/android/content/res/AssetManager#openXmlResourceParser(int,java.lang.String))).
+The same WebView → library → Save As sequence then succeeded without restarting;
+ZIP bytes matched the preceding successful roundtrip. Import preparation and
+same-UUID refusal also succeeded in that same process. Temporary error-category
+instrumentation was removed. This is actual AVD regression evidence, not a new
+Android instrumentation test suite. Final installed APK SHA-256 matched the build;
+the library remains running with both original and imported notebooks and no
+private transfer staging.
+
+The AVD's default graphics backend repeatedly stalled System UI and package
+installation. Cold-starting the same AVD with SwiftShader GLES and Vulkan disabled
+restored usable interaction without wiping user data. UI automation also needed to
+wait for picker presentation, navigate out of a picker subdirectory before cancel,
+and scroll an offscreen filename into view; these are not claimed app fixes.
+
+The implementation checkpoint found borrowed Android raw descriptors were not
+closed by `FileInputStream/FileOutputStream(FileDescriptor).use`. The pre-fix app
+retained four descriptors under private transfer paths. All raw `Os.open` sites now
+close in `finally`, without separately closing provider-adopted descriptors. A
+rebuilt APK completed folder preparation with **1,024 probe files** plus notebook
+content, ZIP preparation and Save As; cancellation during a partial folder copy
+also settled correctly. `/proc/<app-pid>/fd` showed **zero retained imports/exports
+file descriptors** after each completion/cancellation/discard. The exported ZIP
+still matched the earlier roundtrip bytes. Owned probe files were removed. The
+corrected installed APK matched its build, and original notebooks/edited imported
+source remained unchanged.
+
+The review also corrected iOS scope ownership: acquire security-scoped access
+synchronously in the picker callback, release it from the coordinated worker even
+on early cancellation, before result delivery. The confirmed existing `Info.plist`
+now enables `LSSupportsOpeningDocumentsInPlace` for the `asCopy: false` picker and
+passes plist parsing. This remains source/configuration review, not Xcode or iOS
+runtime verification.
+
+Windows host/injected interruption cases do not establish physical power-loss,
+actual disk-full/provider-revocation or OEM backup/transfer behavior. iOS coordinated
+picker/security-scope/backup code is implemented but has no Xcode build or device
+runtime proof here. Share-in, Markdown/assets-only cohorts, attachment editing,
+preview/recovery, WebDAV and publication remain later work.
