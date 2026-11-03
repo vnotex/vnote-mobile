@@ -92,7 +92,7 @@ string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," NATIVE_NOTICE_BYTES "${notice
 string(REGEX REPLACE "(0x..,0x..,0x..,0x..,0x..,0x..,0x..,0x..,)" "\\1\n" NATIVE_NOTICE_BYTES "${NATIVE_NOTICE_BYTES}")
 configure_file(licenses.cpp.in "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp" @ONLY)
 
-add_library(vnote_host SHARED vxcore_host.cpp notebook_import.cpp notebook_transfers.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
+add_library(vnote_host SHARED vxcore_host.cpp notebook_import.cpp notebook_transfers.cpp editor_drafts.cpp notebook_preview.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
 target_compile_definitions(vnote_host PRIVATE VXM_HOST_BUILD)
 target_include_directories(vnote_host PUBLIC "${CMAKE_CURRENT_LIST_DIR}")
 target_link_libraries(vnote_host PRIVATE vxcore nlohmann_json sodium cmark utf8proc)

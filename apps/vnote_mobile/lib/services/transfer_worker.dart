@@ -19,6 +19,7 @@ enum TransferStage {
   intent,
   committed,
   exportReady,
+  exportUnavailable,
   quarantined,
 }
 
@@ -121,6 +122,7 @@ TransferStage transferStage(Map<String, Object?> state) =>
       'pending' => TransferStage.intent,
       'committed' => TransferStage.committed,
       'exportReady' => TransferStage.exportReady,
+      'exportUnavailable' => TransferStage.exportUnavailable,
       'quarantined' => TransferStage.quarantined,
       _ => throw const FormatException('Unknown transfer phase.'),
     };
@@ -131,6 +133,19 @@ Future<Map<String, Object?>> runTransferStore(
   Map<String, Object?> request, {
   int cancellationAddress = 0,
 }) => _runWorker('store', request, cancellationAddress);
+
+/// Draft/preview replies are usable only after the worker isolate has exited.
+/// In particular a returned receipt is never raced against cleanup of its pins.
+Future<Map<String, Object?>> runDraftStore(
+  Map<String, Object?> request, {
+  Uint8List? payload,
+  int cancellationAddress = 0,
+}) => _runWorker('draft', request, cancellationAddress, payload);
+
+Future<Map<String, Object?>> runPreviewStore(
+  Map<String, Object?> request, {
+  int cancellationAddress = 0,
+}) => _runWorker('preview', request, cancellationAddress);
 
 /// Shared lease mechanics only; durable decisions belong to each native store.
 abstract class TransferController<S> extends ValueNotifier<S> {
@@ -359,8 +374,9 @@ abstract class TransferController<S> extends ValueNotifier<S> {
 Future<Map<String, Object?>> _runWorker(
   String command,
   Map<String, Object?> request,
-  int address,
-) async {
+  int address, [
+  Uint8List? payload,
+]) async {
   final messages = ReceivePort();
   final reply = Completer<Map<String, Object?>>();
   final exited = Completer<void>();
@@ -379,7 +395,7 @@ Future<Map<String, Object?>> _runWorker(
   try {
     await Isolate.spawn(
       _transferWorker,
-      (messages.sendPort, command, request, address),
+      (messages.sendPort, command, request, address, payload),
       onExit: messages.sendPort,
       onError: messages.sendPort,
       errorsAreFatal: true,
@@ -396,14 +412,25 @@ Future<Map<String, Object?>> _runWorker(
 }
 
 Future<void> _transferWorker(
-  (SendPort, String, Map<String, Object?>, int) input,
+  (SendPort, String, Map<String, Object?>, int, Uint8List?) input,
 ) async {
-  final (reply, command, request, address) = input;
+  final (reply, command, request, address, payload) = input;
   Map<String, Object?> response;
   try {
     final Map<String, Object?> result;
     if (command == 'store') {
       result = CoreImportStore.runTransfer(
+        request,
+        cancellationAddress: address,
+      );
+    } else if (command == 'draft') {
+      result = CoreDraftStore.run(
+        request,
+        payload: payload,
+        cancellationAddress: address,
+      );
+    } else if (command == 'preview') {
+      result = CoreImportStore.runPreview(
         request,
         cancellationAddress: address,
       );

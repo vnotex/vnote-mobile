@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import { EditorState, Text } from '@codemirror/state';
 import { history, historyField, isolateHistory, undo, redo, undoDepth } from '@codemirror/commands';
 import {
-  applyChanges, assertCredits, decodeHostMessage, encodeMessage, insertionTransaction, LIMITS, ProtocolError, trimHistory, prepareHistoryPrune,
+  applyChanges, assertCredits, assertDurableCredits, decodeHostMessage, encodeMessage, insertionTransaction, LIMITS, ProtocolError, trimHistory, prepareHistoryPrune,
   preferredLineEnding, RequestCache, stringSource, utf8Length, validBoundary,
   validateChanges, validateHostMessage, validateSelection, validateSession, validateSource,
 } from '../src/protocol';
@@ -13,7 +13,7 @@ const generation = '0123456789abcdef0123456789abcdef';
 const documentId = 'bookA:nodeA';
 const baseVersion = 'a'.repeat(64);
 const envelope = (type: string, extra: Record<string, unknown> = {}) => ({
-  v: 1, type, documentId, generation, revision: 0, requestId: 'host-1', ...extra,
+  v: 2, type, documentId, generation, revision: 0, requestId: 'host-1', ...extra,
 });
 const load = (text: string) => envelope('load', {
   text, language: 'markdown', baseVersion, lineEndingPolicy: 'preserve', reason: 'open', selection: { anchor: 0, head: 0 },
@@ -97,14 +97,14 @@ test('incremental byte accounting matches actual valid mutation output', () => {
   assert.equal(metrics.retainedBytes, 2 * (3 + '日本🦊'.length + 1 + 'e\u0301'.length));
 });
 
-test('strict envelopes reject malformed shapes, unsupported durability and unsafe counters', () => {
-  for (const value of [null, [], 1, 'text', { ...load('ok'), v: 2 }, { ...load('ok'), revision: -1 },
+test('strict envelopes reject malformed shapes, forged durability and unsafe counters', () => {
+  for (const value of [null, [], 1, 'text', { ...load('ok'), v: 1 }, { ...load('ok'), revision: -1 },
     { ...load('ok'), generation: 'old' }, { ...load('ok'), documentId: 'notebook/path' },
     { ...load('ok'), revision: Number.MAX_SAFE_INTEGER + 1 }, { ...load('ok'), unexpected: true },
     { ...load('ok'), selection: { anchor: 0, head: 0, ranges: [] } },
     { ...load('ok'), requestId: 'host-0' }, { ...load('ok'), requestId: 'editor-1' },
-    envelope('ack', { stage: 'saved', throughRevision: 0 }),
-    envelope('ack', { stage: 'draftDurable', throughRevision: 0 }),
+    envelope('ack', { stage: 'saved', throughRevision: 0, requestId: 'editor-1' }),
+    envelope('ack', { stage: 'draftDurable', throughRevision: 1 }),
     envelope('ack', { stage: 'rejected', throughRevision: 0 }),
     envelope('close', { mode: 'request', disposition: 'save' }),
     { ...load('ok'), documentId: '' }, { ...load('ok'), documentId: 'x'.repeat(257) },
@@ -122,7 +122,7 @@ test('strict envelopes reject malformed shapes, unsupported durability and unsaf
 
 test('encoded limits include JSON escaping and multibyte data', () => {
   const content = '\u0000'.repeat(1400);
-  assert.throws(() => encodeMessage(envelope('theme', { theme: content }), LIMITS.controlBytes), ProtocolError);
+  assert.throws(() => encodeMessage(envelope('preferences', { dark: content }), LIMITS.controlBytes), ProtocolError);
   assert.throws(() => encodeMessage('中'.repeat(3000), LIMITS.controlBytes), ProtocolError);
   const exact = 'a'.repeat(LIMITS.controlBytes - 2);
   assert.equal(utf8Length(encodeMessage(exact, LIMITS.controlBytes)), LIMITS.controlBytes);
@@ -131,7 +131,7 @@ test('encoded limits include JSON escaping and multibyte data', () => {
 });
 
 test('session checks reject unknown generation, future controls and stale exact-revision data', () => {
-  const control = validateHostMessage(envelope('theme', { theme: 'dark', revision: 2 }));
+  const control = validateHostMessage(envelope('preferences', { dark: true, highContrast: false, fontScale: 1, reducedMotion: false, revision: 2 }));
   validateSession(control, documentId, generation, 3);
   assert.throws(() => validateSession(control, documentId, 'f'.repeat(32), 3), ProtocolError);
   assert.throws(() => validateSession(control, documentId, generation, 1), ProtocolError);
@@ -139,16 +139,16 @@ test('session checks reject unknown generation, future controls and stale exact-
   validateSession(control, documentId, generation, 2, true);
 });
 
-test('stable document binding is independent of generation and snapshot revision is a lower bound', () => {
-  const snapshot = validateHostMessage(envelope('save', { mode: 'snapshotRequest', revision: 2 }));
+test('stable document binding is independent of generation and flush revision is a lower bound', () => {
+  const snapshot = validateHostMessage(envelope('flush', { mode: 'request', revision: 2 }));
   validateSession(snapshot, documentId, generation, 3);
   assert.throws(() => validateSession(snapshot, 'other:node', generation, 3), ProtocolError);
   assert.throws(() => validateSession(snapshot, documentId, generation, 1), ProtocolError);
-  const written = validateHostMessage(envelope('close', { mode: 'request', disposition: 'written', revision: 2 }));
+  const written = validateHostMessage(envelope('close', { mode: 'complete', disposition: 'retained', revision: 2 }));
   assert.throws(() => validateSession(written, documentId, generation, 3, true), ProtocolError);
 });
 
-test('receipt releases large transfer payloads while repeated snapshots retain bounded replay', () => {
+test('receipt releases large transfer payloads while repeated resyncs retain bounded replay', () => {
   const cache = new RequestCache();
   const initial = validateHostMessage(load('x'.repeat(10000)));
   cache.begin(initial, encodeMessage(initial));
@@ -157,12 +157,12 @@ test('receipt releases large transfer payloads while repeated snapshots retain b
   assert.equal(cache.begin(initial, encodeMessage(initial))?.fingerprint, null);
   assert.equal(cache.begin(initial, encodeMessage(initial))?.response, null);
   for (let i = 2; i <= 100; i++) {
-    const request = validateHostMessage(envelope('save', { mode: 'snapshotRequest', requestId: `host-${i}` }));
+    const request = validateHostMessage(envelope('resync', { mode: 'request', requestId: `host-${i}` }));
     const fingerprint = encodeMessage(request);
     assert.equal(cache.begin(request, fingerprint), undefined);
     cache.complete(request, 'large snapshot');
     assert.equal(cache.begin(request, fingerprint)?.response, 'large snapshot');
-    cache.release('save', request.requestId);
+    cache.release('resync', request.requestId);
     assert.equal(cache.begin(request, fingerprint)?.response, null);
     assert.throws(() => cache.begin(request, fingerprint + ' '), ProtocolError);
   }
@@ -170,14 +170,14 @@ test('receipt releases large transfer payloads while repeated snapshots retain b
 
 test('exact request replay is bounded; changed and evicted requests cannot be reapplied', () => {
   const cache = new RequestCache();
-  const first = validateHostMessage(envelope('theme', { theme: 'dark' }));
+  const first = validateHostMessage(envelope('preferences', { dark: true, highContrast: true, fontScale: 2, reducedMotion: true }));
   const fingerprint = encodeMessage(first);
   assert.equal(cache.begin(first, fingerprint), undefined);
   cache.complete(first, 'response');
   assert.equal(cache.begin(first, fingerprint)?.response, 'response');
   assert.throws(() => cache.begin(first, fingerprint + ' '), ProtocolError);
   for (let i = 2; i <= LIMITS.replayEntries + 1; i++) {
-    const next = validateHostMessage(envelope('theme', { theme: 'light', requestId: `host-${i}` }));
+    const next = validateHostMessage(envelope('preferences', { dark: false, highContrast: false, fontScale: 1, reducedMotion: false, requestId: `host-${i}` }));
     cache.begin(next, encodeMessage(next));
   }
   assert.throws(() => cache.begin(first, fingerprint), ProtocolError);
@@ -189,6 +189,28 @@ test('outstanding batch and encoded-byte credits fail independently before accep
   assertCredits(LIMITS.outstandingBatches, LIMITS.outstandingBytes);
   assert.throws(() => assertCredits(LIMITS.outstandingBatches + 1, 1), ProtocolError);
   assert.throws(() => assertCredits(1, LIMITS.outstandingBytes + 1), ProtocolError);
+});
+
+test('received credits do not replenish independent durable obligations', () => {
+  assertCredits(0, 0);
+  assertDurableCredits(LIMITS.undurableBatches, LIMITS.undurableBytes);
+  assert.throws(() => assertDurableCredits(LIMITS.undurableBatches + 1, 0), ProtocolError);
+  assert.throws(() => assertDurableCredits(1, LIMITS.undurableBytes + 1), ProtocolError);
+  for (const stage of ['received', 'draftDurable', 'saved']) {
+    assert.equal(validateHostMessage(envelope('ack', { stage, throughRevision: 3, revision: 3 })).type, 'ack');
+  }
+});
+
+test('close is two-phase and preferences are closed bounded data', () => {
+  for (const mode of ['quiesce', 'abort']) assert.equal(validateHostMessage(envelope('close', { mode })).type, 'close');
+  assert.equal(validateHostMessage(envelope('close', { mode: 'complete', disposition: 'retained' })).type, 'close');
+  for (const fields of [{ mode: 'request', disposition: 'written' }, { mode: 'complete' }, { mode: 'quiesce', disposition: 'discard' }]) {
+    assert.throws(() => validateHostMessage(envelope('close', fields)), ProtocolError);
+  }
+  const preferences = { dark: true, highContrast: true, fontScale: 3, reducedMotion: true };
+  assert.equal(validateHostMessage(envelope('preferences', preferences)).type, 'preferences');
+  for (const fontScale of [0, Infinity, NaN, 3.01]) assert.throws(() => validateHostMessage(envelope('preferences', { ...preferences, fontScale })), ProtocolError);
+  assert.throws(() => validateHostMessage(envelope('theme', { theme: 'dark' })), ProtocolError);
 });
 
 test('pruning old history keeps recent undo/redo and allows continued editing', () => {
@@ -335,6 +357,16 @@ test('insertion refuses source boundaries, resulting CRLF cursor and full-docume
   assert.throws(() => insertion(full, 'x'), ProtocolError);
   assert.equal(full.doc.length, LIMITS.documentUnits);
   assert.equal(undoDepth(full), 0);
+});
+
+test('identical literal insertion explicitly has no source or undo change', () => {
+  const state = EditorState.create({ doc: 'abc', selection: { anchor: 3, head: 0 }, extensions: history() });
+  const request = validateHostMessage(envelope('insert', { text: 'abc', anchor: 3, head: 0 }));
+  if (request.type !== 'insert') throw new Error('Insertion request expected.');
+  const transaction = insertionTransaction(state, 3, request);
+  assert.equal(transaction.docChanged, false);
+  assert.equal(transaction.newDoc, state.doc);
+  assert.equal(undoDepth(transaction.state), 0);
 });
 
 test('queued insertion replay is inert until receipt and never becomes a second edit', () => {

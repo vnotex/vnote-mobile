@@ -140,7 +140,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
     );
     if (_current) {
       setState(
-        () => _message = 'File and editor source are separate. If the file committed, use Insert link or Insert image below. Write is still required to save source.',
+        () => _message = 'File and editor source are separate. Insert a link or image below; source then follows draft persistence and autosave.',
       );
     }
   }
@@ -205,7 +205,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
       await widget.editor.insertText(widget.send, source);
       if (_current) {
         setState(
-          () => _message = 'Link inserted into volatile editor source. Use Write to save it to disk.',
+          () => _message = 'Link inserted. Check the editor\'s draft and saved status.',
         );
       }
     } on Object catch (error) {
@@ -307,7 +307,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
             ListTile(
               title: const Text('Attachments and images'),
               subtitle: const Text(
-                'File changes are durable separately. Inserted source stays unsaved until Write.',
+                'File changes commit separately. Inserted source uses draft recovery and autosave.',
               ),
               trailing: IconButton(
                 tooltip: 'Close resources',
@@ -389,8 +389,10 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                   Wrap(
                                     spacing: 8,
                                     children: [
-                                      if (attempt.stage !=
-                                          TransferStage.committed)
+                                      if (attempt.stage == TransferStage.exportUnavailable)
+                                        const Text('The export source is unavailable; discard only private staging.'),
+                                      if (attempt.stage != TransferStage.committed &&
+                                          attempt.stage != TransferStage.exportUnavailable)
                                         TextButton(
                                           onPressed: busy
                                               ? null

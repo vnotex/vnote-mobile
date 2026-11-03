@@ -431,11 +431,18 @@ void main() {
       target: target,
       operation: ResourceOperation.export,
       name: 'chosen.bin',
+      origin: ResourceExportOrigin.asset,
+      binding: const {'name': 'chosen.bin'},
     );
     expect(attempt?.operation, ResourceOperation.export);
     final ready = await transfer.prepareExport(attempt!, snapshot);
     expect(transfer.value.error, isNull);
     expect(await File(ready!.path).readAsBytes(), provider.bytes);
+    final desired = jsonDecode(await File(p.join(attempt.transactionRoot, 'resource.json')).readAsString()) as Map;
+    expect(desired.keys.toSet(), {'version', 'id', 'scope', 'target', 'operation', 'name', 'newName', 'origin', 'binding'});
+    expect(desired['version'], 2);
+    final marker = jsonDecode(await File(p.join(attempt.transactionRoot, 'ready.json')).readAsString()) as Map;
+    expect(marker.keys.toSet(), {'version', 'id', 'scope', 'name', 'bytes', 'sha256'});
     provider.saved = Completer<DocumentExportResult>();
     final saving = transfer.save(transfer.value.current!);
     await provider.saving.future;
@@ -569,6 +576,92 @@ void main() {
       expect(transfer.value.lastResult?.committed, isTrue);
     },
   );
+
+  test('new export API requires explicit origin before allocating staging', () async {
+    await transfer.initialize();
+    expect(() => transfer.start(target: target, operation: ResourceOperation.export,
+      name: 'chosen.bin'), throwsStateError);
+    expect(transfer.value.hasStaging, isFalse);
+  });
+
+  test('persisted exact seven-key version1 export keeps legacy asset semantics', () async {
+    await add(); await discard();
+    final attempt = (await transfer.start(target: target,
+      operation: ResourceOperation.export, name: 'chosen.bin',
+      origin: ResourceExportOrigin.asset, binding: const {'name': 'chosen.bin'}))!;
+    final marker = File(p.join(attempt.transactionRoot, 'resource.json'));
+    final legacy = Map<String, Object?>.from(jsonDecode(await marker.readAsString()) as Map)
+      ..['version'] = 1 ..remove('origin') ..remove('binding');
+    expect(legacy.length, 7);
+    await marker.writeAsString(jsonEncode(legacy), flush: true);
+    await transfer.shutdown(); transfer = controller(); await transfer.initialize();
+    final retained = transfer.value.current!;
+    expect(retained.desiredVersion, 1);
+    expect(retained.origin, ResourceExportOrigin.asset);
+    final prepared = await transfer.prepareExport(retained, snapshot);
+    expect(prepared, isNotNull); expect(transfer.value.error, isNull);
+    expect(await File(prepared!.path).readAsBytes(), provider.bytes);
+  });
+
+  test('unavailable immutable draft origin remains retained across restart without asset fallback', () async {
+    await transfer.initialize();
+    final binding = <String, Object?>{'documentKey': 'a' * 64, 'token': 'b' * 32,
+      'revision': 7, 'candidateId': 'c' * 32, 'sha256': 'd' * 64, 'format': 'text'};
+    final attempt = (await transfer.start(target: target,
+      operation: ResourceOperation.export, name: 'draft.md',
+      origin: ResourceExportOrigin.draft, binding: binding))!;
+    var captures = 0;
+    expect(await transfer.prepareExport(attempt, (current, _) async {
+      captures++; expect(current.origin, ResourceExportOrigin.draft);
+      throw StateError('The immutable draft candidate is unavailable');
+    }), isNull);
+    expect(captures, 1); expect(transfer.value.hasStaging, isTrue);
+    await transfer.shutdown(); transfer = controller(); await transfer.initialize();
+    expect(transfer.value.current!.origin, ResourceExportOrigin.draft);
+    expect(transfer.value.current!.binding, binding);
+    expect(provider.saves, 0);
+    await transfer.discard(transfer.value.current!, recover: (_, _, _) async =>
+      throw StateError('An export must never dispatch mutation recovery.'));
+    expect(transfer.value.hasStaging, isFalse);
+  });
+
+  test('native asset owner refuses a v2 preview binding even for an existing asset name', () async {
+    await add(); await discard();
+    final attempt = (await transfer.start(target: target,
+      operation: ResourceOperation.export, name: 'chosen.bin',
+      origin: ResourceExportOrigin.previewFile, binding: {
+        'previewId': '1' * 32, 'renderId': '2' * 32, 'handle': '3' * 32,
+        'sourceHash': '4' * 64, 'manifestHash': '5' * 64}))!;
+    expect(await transfer.prepareExport(attempt, snapshot), isNull);
+    expect(transfer.value.error, isNotNull);
+    expect(transfer.value.current!.origin, ResourceExportOrigin.previewFile);
+    expect(transfer.value.hasStaging, isTrue); expect(provider.saves, 0);
+  });
+
+  test('malformed version2 origin remains visible and explicitly discardable without capture', () async {
+    await transfer.initialize();
+    final attempt = (await transfer.start(target: target,
+      operation: ResourceOperation.export, name: 'chosen.bin',
+      origin: ResourceExportOrigin.asset, binding: const {'name': 'chosen.bin'}))!;
+    final marker = File(p.join(attempt.transactionRoot, 'resource.json'));
+    final malformed = Map<String, Object?>.from(jsonDecode(await marker.readAsString()) as Map)
+      ..['origin'] = 'future-unknown';
+    await marker.writeAsString(jsonEncode(malformed), flush: true);
+    await transfer.shutdown(); transfer = controller(); await transfer.initialize();
+    final retained = transfer.value.current!;
+    expect(retained.stage, TransferStage.exportUnavailable);
+    expect(retained.origin, isNull);
+    var captures = 0;
+    expect(await transfer.prepareExport(retained, (_, _) async {
+      captures++;
+      throw StateError('Unknown origin must never invoke any source exporter.');
+    }), isNull);
+    expect(captures, 0);
+    expect(transfer.value.hasStaging, isTrue);
+    await transfer.discard(transfer.value.current!, recover: (_, _, _) async =>
+      throw StateError('Unknown export must never invoke mutation recovery.'));
+    expect(transfer.value.hasStaging, isFalse);
+  });
 
   test('unknown staging blocks writers and explicit discard cannot delete foreign bytes', () async {
     final unknown = Directory(p.join(root, 'foreign'));

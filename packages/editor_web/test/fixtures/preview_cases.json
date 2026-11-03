@@ -1,0 +1,34 @@
+{
+  "desktopReference": "f8026adb4c43f78d90251148e24b6e72ca28f3d7",
+  "markdown": [
+    { "name": "CommonMark and selected GFM", "source": "# Source\r\n\r\n**bold** and *italic* and ~~strike~~ and `code`.\r\n\r\n> quote\r\n\r\n- [x] complete\r\n- [ ] pending\r\n\r\n| a | b |\r\n| - | - |\r\n| 1 | 2 |\r\n\r\n---\r\n", "tags": ["h1", "strong", "em", "s", "code", "blockquote", "table", "hr"], "headings": ["source"] },
+    { "name": "desktop duplicate reservation", "source": "# a\n# a\n# a-1\n# a\n# a-2\n", "headings": ["a", "a-1", "a-1-1", "a-2", "a-2-1"] },
+    { "name": "desktop numbering and Unicode", "source": "# 1.2) CafÉ 日本語\n# 2026 Title\n# A_B -- C!\n# Café\n", "headings": ["café-日本語", "2026-title", "a_b----c", "café"] },
+    { "name": "heading extraction from emitted inline content", "source": "# *Bold* `Code` ![Alt](missing.png) &amp; text\n", "headings": ["bold-code-alt--text"] },
+    { "name": "unsupported footnotes remain literal", "source": "[^n]: hidden\n    # a\n\n# a\n\nReference [^n].\n", "headings": ["a"], "literal": "[^n]: hidden\n    # a" },
+    { "name": "raw HTML never executable", "source": "<img src=x onerror=alert(1)>\n\n<script>window.VNoteEditor.postMessage('bad')</script>\n\n<svg><foreignObject>bad</foreignObject></svg>\n", "headings": [], "literal": "<img src=x onerror=alert(1)>" },
+    { "name": "unknown fenced language stays escaped", "source": "```remote-grammar\n<script>alert(1)</script>\n```\n", "tags": ["pre", "code"], "headings": [], "literal": "<script>alert(1)</script>" },
+    { "name": "fragments and opaque links", "source": "# Local Heading\n\n[local](#local-heading) [note](other.md) [web](https://example.org/a) [command](vx://settings) [file](file:///private/note.md)\n\n![image](assets/picture.png) ![remote](https://example.org/image.png)\n", "headings": ["local-heading"] }
+  ],
+  "emittedHeadingOrder": [
+    { "sourceOrder": [0, 1, 2], "emissionOrder": [2, 0, 1], "text": ["a", "a-1", "a"], "anchorsByEmission": ["a", "a-1", "a-1-1"] }
+  ],
+  "math": [
+    { "source": "x^2 + \\frac{1}{\\sqrt{y}}", "display": false },
+    { "source": "\\begin{pmatrix}a&b\\\\c&d\\end{pmatrix}", "display": true },
+    { "source": "\\begin{aligned}a&=b+c\\\\d&=e\\end{aligned}", "display": true },
+    { "source": "\\sum_{i=1}^{n} i", "display": true }
+  ],
+  "unsupportedMath": ["\\href{https://example.org/private}{click}", "\\includegraphics{file:///private}", "\\htmlStyle{background:url(https://example.org)}{x}", "\\gdef\\x{secret}\\x", "\\unknownCommand{x}", "\\message{private}", "\\errmessage{private}", "\\show\\private"],
+  "diagrams": [
+    { "name": "flowchart", "source": "flowchart LR\nA[Start] --> B{Ready}\nB --> C[Finish]\n", "kind": "flowchart", "vertices": 3, "edges": 2, "svgTags": ["svg", "g", "path", "text"] },
+    { "name": "sequence", "source": "sequenceDiagram\nparticipant Alice\nparticipant Bob\nAlice->>Bob: Hello\nBob-->>Alice: Ready\n", "kind": "sequence", "vertices": 2, "edges": 2, "svgTags": ["svg", "g", "line", "text"] }
+  ],
+  "unsupportedDiagrams": ["---\nconfig: {}\n---\nflowchart LR\na-->b", "%%{init: {'securityLevel':'loose'}}%%\nflowchart LR\na-->b", "flowchart LR\na-->b\nclick a \"https://example.org\"", "flowchart LR\na:::evil-->b\nclassDef evil fill:red", "flowchart LR\na[\"<img src=x>\"]-->b", "flowchart LR\na@{shape: image, img: 'https://example.org/a'}", "sequenceDiagram\nparticipant A\nlink A: Site @ https://example.org", "pie\ntitle Unsupported\n\"x\": 1"],
+  "hostileMarkup": ["<form id=preview><input name=vnoteRender></form><script>alert(1)</script>", "<svg><foreignObject><iframe src='https://example.org'></iframe></foreignObject><animate attributeName=href values=javascript:alert(1)></animate></svg>", "<math><mtext><table><mglyph><style><!--</style><img title='--><img src=x onerror=alert(1)>'></table></mtext></math>", "<a href='javascript:alert(1)' onclick='bad()'>x</a><img src='data:image/svg+xml,bad' srcset='https://example.org 1x'>", "<svg><use href='#preview'></use><image href='file:///private'></image></svg>"],
+  "hostileCss": ["background:url(https://example.org)", "color:var(--private)", "width:expression(alert(1))", "--private:red", "color:attr(data-secret)", "position:fixed", "font-family:url(file:///private)", "color:red;@import 'https://example.org';", "fill:url(#foreign-diagram)"],
+  "workloads": [
+    { "name": "one MiB long line", "repeat": "x", "count": 1048576 },
+    { "name": "Unicode CRLF source", "repeat": "Café 日本語\r\n", "count": 4096 }
+  ]
+}

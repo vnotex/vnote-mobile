@@ -38,6 +38,8 @@ enum {
   VXM_EVENT_RESOURCE_OPEN = 12,
   VXM_EVENT_COHORT = 13,
   VXM_EVENT_RESOURCE = 14,
+  VXM_EVENT_DRAFT = 15,
+  VXM_EVENT_PREVIEW = 16,
   VXM_MODE_NOTE = 1,
   VXM_MODE_CATALOG = 2,
   VXM_MODE_COHORT_BUILDER = 3,
@@ -69,8 +71,9 @@ typedef struct VxmOpenOptions {
   int32_t mode;
   int32_t create_notebook;
   // Export-only catalog admission: existing pinned UUID, no mutations. Checks
-  // source-rewriting recovery/migrations and persisted session restoration before
-  // core initialization. Ordinary owners retain core's normal recovery behavior.
+  // source-rewriting notebook recovery/migrations before core initialization.
+  // Explicit-root contexts never restore legacy core sessions; ordinary notebook
+  // owners retain core's normal selected-notebook recovery behavior.
   int32_t export_only;
   // Builder-only owned cohorts/<id>. All core/workbook paths are derived by
   // native preflight before context creation. Other modes require null/empty.
@@ -169,6 +172,20 @@ VXM_API int32_t vxm_host_cohort(VxmHost *host, uint64_t request_id,
                                uint64_t generation, const char *json);
 VXM_API int32_t vxm_host_resource(VxmHost *host, uint64_t request_id,
                                  uint64_t generation, const char *json);
+// Draft owner command <=16 KiB, immutable response <=64 KiB. Closed operations:
+// {op:"write"|"inspect"|"reconcile",draftsRoot,documentKey,token,candidateId?}.
+// token is the source capturing session, NOT the native generation guard.
+// Write requires NOTE and a durable prepared candidate; inspect/reconcile also
+// accept RESOURCES. Active commands drain; saved success requires a receipt.
+VXM_API int32_t vxm_host_draft(VxmHost *host, uint64_t request_id,
+                              uint64_t generation, const char *json);
+// NOTE-only current source capture. JSON <=16 KiB, source <=4 MiB, response
+// <=64 KiB; {op:"prepare",previewRoot,previewId,renderId,sourceRevision}.
+// No source token enters this command. No note mutation; join cancellation
+// before reclaiming the caller's known previewId/renderId staging namespace.
+VXM_API int32_t vxm_host_preview(VxmHost *host, uint64_t request_id,
+                                uint64_t generation, const char *json,
+                                const uint8_t *source, uint64_t size);
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
 // Cancel affects pending requests and the matching active read-only search/export,
 // checked between files/nodes and each 256 KiB export chunk. Active writes (including tags) are never cancelled. INVALID_STATE
@@ -228,6 +245,14 @@ VXM_API int32_t vxm_import_run(const char *request_json, VxmImportCancel *cancel
 // cancellation lifetime. Result is released with vxm_import_result_free.
 VXM_API int32_t vxm_transfer_run(const char *request_json, VxmImportCancel *cancel,
                                 char **out_json);
+// Worker-only durable journal and immutable preview commands. Borrowed cancel
+// tokens and result ownership are identical to the import transport. Draft
+// payload <=8 MiB (source/checkpoint <=4 MiB); requested source result <=32 MiB,
+// summaries <=64 KiB. Preview request <=16 KiB and result <=16 MiB.
+VXM_API int32_t vxm_draft_run(const char *request_json, const uint8_t *payload,
+                             uint64_t size, VxmImportCancel *cancel, char **out_json);
+VXM_API int32_t vxm_preview_run(const char *request_json, VxmImportCancel *cancel,
+                               char **out_json);
 VXM_API void vxm_import_result_free(char *result);
 
 #ifdef __cplusplus

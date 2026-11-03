@@ -26,7 +26,7 @@ Map<String, Object?> message(
   String requestId,
   Map<String, Object?> payload,
 ) => {
-  'v': 1,
+  'v': 2,
   'type': type,
   'documentId': documentId,
   'generation': generation,
@@ -61,12 +61,14 @@ Map<String, Object?> edit({
   String insert = 'x',
   int anchor = 0,
   int head = 0,
+  String? operationId,
 }) => message('edit', revision, requestId, {
   'baseRevision': baseRevision,
   'changes': [
     {'from': from, 'to': to, 'insert': insert},
   ],
   'selection': {'anchor': anchor, 'head': head},
+  'operationId': ?operationId,
 });
 
 Map<String, Object?> currentSelection(
@@ -86,6 +88,7 @@ Map<String, Object?> insertionReceipt(
 }) => message('ack', revision, request['requestId']! as String, {
   'stage': 'received',
   'throughRevision': revision,
+  'changed': true,
 });
 
 void expectRejectedWithoutMutation(
@@ -327,7 +330,7 @@ void main() {
 
     test('unaddressable envelopes fail without emitting invalid replies', () {
       for (final request in [
-        {...edit(), 'v': 2},
+        {...edit(), 'v': 1},
         {...edit(), 'revision': 1.0},
         {...edit(), 'requestId': 'editor-01'},
       ]) {
@@ -532,6 +535,7 @@ void main() {
             insert: link,
             anchor: link.length + 1,
             head: link.length + 1,
+            operationId: request['requestId']! as String,
           ),
         )?['stage'],
         'received',
@@ -673,7 +677,7 @@ void main() {
         {'revision': 0, 'throughRevision': 0},
         {'revision': -1},
         {'revision': 2, 'throughRevision': 2},
-        {'v': 2},
+        {'v': 1},
         {'error': 7},
         {'extra': true},
       ]) {
@@ -685,7 +689,7 @@ void main() {
           throwsStateError,
         );
         deliver(session, currentSelection(sent.first));
-        deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+        deliver(session, edit(insert: 'link', anchor: 4, head: 4, operationId: sent.last['requestId']! as String));
         expect(
           deliver(session, {...insertionReceipt(sent.last), ...corruption}),
           isNull,
@@ -725,7 +729,7 @@ void main() {
       final sent = <Map<String, Object?>>[];
       final insertion = session.insertText(sent.add, 'link');
       deliver(session, currentSelection(sent.first));
-      deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+      deliver(session, edit(insert: 'link', anchor: 4, head: 4, operationId: sent.last['requestId']! as String));
       deliver(
         session,
         edit(revision: 2, baseRevision: 1, requestId: 'editor-2'),
@@ -764,7 +768,7 @@ void main() {
         isNull,
       );
       expect(
-        deliver(session, edit(insert: 'link', anchor: 4, head: 4))?['stage'],
+        deliver(session, edit(insert: 'link', anchor: 4, head: 4, operationId: sent.last['requestId']! as String))?['stage'],
         'received',
       );
       deliver(session, insertionReceipt(sent.last));
@@ -784,7 +788,7 @@ void main() {
       final request = sent.last;
       deliver(session, currentSelection(barrier));
       expect(sent.length, 2);
-      deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+      deliver(session, edit(insert: 'link', anchor: 4, head: 4, operationId: request['requestId']! as String));
       final receipt = insertionReceipt(request);
       deliver(session, receipt);
       await insertion;
@@ -845,7 +849,7 @@ void main() {
         );
         expect(sent.length, 1);
         deliver(session, currentSelection(sent.single));
-        deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+        deliver(session, edit(insert: 'link', anchor: 4, head: 4, operationId: sent.last['requestId']! as String));
         expect(
           deliver(session, {
             ...insertionReceipt(sent.last),
@@ -919,7 +923,7 @@ void main() {
         );
         if (afterEdit) {
           deliver(session, currentSelection(sent.single));
-          deliver(session, edit(insert: 'link', anchor: 4, head: 4));
+          deliver(session, edit(insert: 'link', anchor: 4, head: 4, operationId: sent.last['requestId']! as String));
         }
         session.reportTransportError('Channel disconnected');
         await failure;
@@ -961,15 +965,15 @@ void main() {
           session.insertText(sent.add, 'link'),
           throwsStateError,
         );
-        final close = session.closeEditor(sent.add, discard: true);
+        final close = session.quiesce(sent.add);
         await failure;
         expect(deliver(session, currentSelection(sent.first)), isNull);
         expect(sent.length, 2);
         deliver(
           session,
           message('close', 0, sent.last['requestId']! as String, {
-            'mode': 'ready',
-            'disposition': 'discard',
+            'mode': 'quiesced',
+            'anchor': 0, 'head': 0,
           }),
         );
         await close;
@@ -1005,7 +1009,7 @@ void main() {
           expect(
             deliver(
               session,
-              edit(from: 1, to: 1, insert: 'link', anchor: 5, head: 5),
+              edit(from: 1, to: 1, insert: 'link', anchor: 5, head: 5, operationId: request['requestId']! as String),
             )?['stage'],
             'received',
           );
@@ -1018,261 +1022,376 @@ void main() {
     });
   });
 
-  group('controls never imply persistence', () {
-    test('snapshot is exact with one transfer pending and repeatable after receipt', () {
-      final session = sessionWith('prior\r\n🌍');
+  group('durable prefixes and source barriers', () {
+    test('validated immutable deltas precede receipt and duplicate admission is once', () {
+      final session = sessionWith('base');
       open(session);
-      final request = session.requestSnapshot()!;
-      expect(session.requestSnapshot(), isNull);
-      final ack = deliver(
-        session,
-        message('save', 0, request['requestId']! as String, {
-          'mode': 'snapshot',
-          'text': session.value.text,
-        }),
-      );
-      expect(ack?['stage'], 'received');
-      expect(session.value.snapshotRevision, 0);
-      expect(session.value.text, 'prior\r\n🌍');
-      expect(session.canRequestSnapshot, isTrue);
-      final next = session.requestSnapshot()!;
-      expect(next['requestId'], isNot(request['requestId']));
-      expect(
-        deliver(
-          session,
-          message('save', 0, next['requestId']! as String, {
-            'mode': 'snapshot',
-            'text': session.value.text,
-          }),
-        )?['stage'],
-        'received',
-      );
+      final batches = <EditorEditBatch>[];
+      session.onEdit = (batch) {
+        expect(session.value.revision, 0);
+        expect(batch.documentId, documentId);
+        expect(batch.generation, generation);
+        expect(batch.baseRevision, 0);
+        expect(batch.revision, 1);
+        expect(batch.wireBytes, greaterThan(0));
+        expect(() => batch.changes.add(const EditorChange(0, 0, 'bad')), throwsUnsupportedError);
+        batches.add(batch);
+      };
+      final request = edit(insert: '日本😀', anchor: 4, head: 4);
+      final received = deliver(session, request);
+      expect(received?['stage'], 'received');
+      expect(deliver(session, request), received);
+      expect(batches, hasLength(1));
+      expect(batches.single.toJson()['selection'], {'anchor': 4, 'head': 4});
+      expect(batches.single.toJson().containsKey('text'), isFalse);
+      expect(session.value.draftDurableRevision, 0);
+      expect(session.value.savedRevision, 0);
     });
 
-    test('snapshot mismatch cannot overwrite the mirror', () {
-      final session = sessionWith('prior');
+    test('reentrant listeners cannot retarget an earlier received acknowledgement', () {
+      final session = sessionWith('base');
       open(session);
-      final request = session.requestSnapshot()!;
-      expectRejectedWithoutMutation(
-        session,
-        message('save', 0, request['requestId']! as String, {
-          'mode': 'snapshot',
-          'text': 'other',
-        }),
-      );
+      session.addListener(() {
+        if (session.value.revision == 1) {
+          deliver(session, edit(revision: 2, baseRevision: 1, requestId: 'editor-2', insert: 'y'));
+        }
+      });
+      final first = deliver(session, edit())!;
+      expect(first['requestId'], 'editor-1');
+      expect(first['throughRevision'], 1);
+      expect(first['revision'], 1);
+      expect(session.value.revision, 2);
+      expect(session.value.text, 'yxbase');
     });
 
-    test(
-      'snapshot revision may advance past the requested lower bound',
-      () async {
-        final session = sessionWith('prior');
+    test('typing during flush notification cannot retarget its captured source', () async {
+      final session = sessionWith('base');
+      open(session);
+      deliver(session, edit());
+      final sent = <Map<String, Object?>>[];
+      final flush = session.flushSource(sent.add);
+      session.addListener(() {
+        if (session.value.snapshotRevision == 1 && session.value.revision == 1) {
+          deliver(session, edit(revision: 2, baseRevision: 1, requestId: 'editor-2', insert: 'y'));
+        }
+      });
+      deliver(session, message('flush', 1, sent.single['requestId']! as String,
+        {'mode': 'ready', 'anchor': 0, 'head': 0}));
+      final captured = await flush;
+      expect(captured.revision, 1);
+      expect(captured.text, 'xbase');
+      expect(session.value.revision, 2);
+      expect(session.value.text, 'yxbase');
+    });
+
+    test('new checkpointed epochs preserve cursor but do not inherit integer watermarks', () {
+      final session = EditorSession(initialText: 'a😀\r\nb', documentId: documentId,
+        baseVersion: baseHash, language: 'markdown', generationFactory: () => 'f' * 32,
+        initiallySaved: false, initialAnchor: 5, initialHead: 1);
+      addTearDown(session.dispose);
+      final load = session.beginLoad()!;
+      expect(load['selection'], {'anchor': 5, 'head': 1});
+      expect(load['revision'], 0);
+      expect(load['generation'], 'f' * 32);
+      expect(session.value.savedRevision, isNull);
+      expect(session.acknowledgeSaved(EditorCapture(documentId, generation, 0)), isNull);
+      expect(() => EditorSession(initialText: 'a😀\r\nb', documentId: documentId,
+        baseVersion: baseHash, language: 'markdown', initialAnchor: 2), throwsFormatException);
+    });
+
+    test('failed admission cannot acknowledge or replace the accepted mirror', () {
+      final session = sessionWith('base');
+      open(session);
+      session.onEdit = (_) => throw StateError('quota exhausted');
+      expect(deliver(session, edit())?['stage'], 'rejected');
+      expect(session.value.text, 'base');
+      expect(session.value.revision, 0);
+      expect(session.value.draftDurableRevision, 0);
+    });
+
+    test('saved R cannot clean later R+1 and durability cannot jump received', () {
+      final session = sessionWith('base');
+      open(session);
+      deliver(session, edit());
+      final first = session.capture;
+      expect(() => session.acknowledgeSaved(first), throwsFormatException);
+      expect(session.acknowledgeDraftDurable(first)?['stage'], 'draftDurable');
+      deliver(session, edit(revision: 2, baseRevision: 1, requestId: 'editor-2', insert: 'y'));
+      final saved = session.acknowledgeSaved(first)!;
+      expect(saved['revision'], 1);
+      expect(saved['throughRevision'], 1);
+      expect(session.value.savedRevision, 1);
+      expect(session.value.locallySaved, isFalse);
+      expect(session.value.text, 'yxbase');
+      expect(() => session.acknowledgeDraftDurable(EditorCapture(documentId, generation, 3)), throwsFormatException);
+      expect(session.acknowledgeSaved(EditorCapture(documentId, 'f' * 32, 2)), isNull);
+      session.acknowledgeDraftDurable(session.capture);
+      session.acknowledgeSaved(session.capture);
+      expect(session.value.locallySaved, isTrue);
+      expect(session.acknowledgeSaved(first), isNull);
+      expect(session.value.savedRevision, 2);
+    });
+
+    test('a recovered revision zero has no saved authority from its integer', () {
+      final session = EditorSession(initialText: 'recovered', documentId: documentId,
+        baseVersion: baseHash, language: 'markdown', generationFactory: () => generation, initiallySaved: false);
+      addTearDown(session.dispose);
+      open(session);
+      expect(session.value.savedRevision, isNull);
+      expect(session.value.locallySaved, isFalse);
+      expect(session.acknowledgeSaved(EditorCapture(documentId, 'e' * 32, 0)), isNull);
+      expect(session.value.savedRevision, isNull);
+    });
+
+    test('received acknowledgements do not replenish 32 undurable edit credits', () {
+      final session = sessionWith('base');
+      open(session);
+      for (var revision = 1; revision <= 32; revision++) {
+        expect(deliver(session, edit(revision: revision, baseRevision: revision - 1,
+          requestId: 'editor-$revision'))?['stage'], 'received');
+      }
+      expectRejectedWithoutMutation(session, edit(revision: 33, baseRevision: 32, requestId: 'editor-33'));
+      expect(session.value.revision, 32);
+      expect(session.value.draftDurableRevision, 0);
+      final other = sessionWith('base');
+      open(other);
+      for (var revision = 1; revision <= 40; revision++) {
+        expect(deliver(other, edit(revision: revision, baseRevision: revision - 1,
+          requestId: 'editor-$revision'))?['stage'], 'received');
+        other.acknowledgeDraftDurable(other.capture);
+      }
+      expect(other.value.revision, 40);
+      expect(other.value.savedRevision, 0);
+    });
+
+    test('encoded durable-byte ceiling is independent of batch count', () {
+      final session = sessionWith('');
+      open(session);
+      var retained = 0;
+      for (var revision = 1; revision <= 32; revision++) {
+        final request = edit(revision: revision, baseRevision: revision - 1,
+          requestId: 'editor-$revision', insert: '\u0000' * EditorSession.maxInsertedUnits);
+        final bytes = utf8.encode(jsonEncode(request)).length;
+        if (retained + bytes > 8 * 1024 * 1024) {
+          expect(revision, lessThan(32));
+          expectRejectedWithoutMutation(session, request);
+          expect(session.value.revision, revision - 1);
+          return;
+        }
+        expect(deliver(session, request)?['stage'], 'received');
+        retained += bytes;
+      }
+      fail('Encoded byte credit must be exhausted before the batch ceiling.');
+    });
+
+    test('pending and composition activity prevent a false locally-saved state', () {
+      final session = sessionWith('base');
+      open(session);
+      deliver(session, message('activity', 0, 'editor-1', {'sequence': 1, 'pending': true, 'composing': false}));
+      expect(session.value.locallySaved, isFalse);
+      deliver(session, message('activity', 0, 'editor-2', {'sequence': 2, 'pending': false, 'composing': true}));
+      deliver(session, message('activity', 0, 'editor-1', {'sequence': 1, 'pending': false, 'composing': false}));
+      expect(session.value.composing, isTrue);
+      deliver(session, message('activity', 0, 'editor-3', {'sequence': 3, 'pending': false, 'composing': false}));
+      expect(session.value.locallySaved, isTrue);
+    });
+
+    test('flush returns exact mirror capture without a whole-source transfer', () async {
+      final session = sessionWith('base\r\n😀');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final capture = session.flushSource(sent.add);
+      expect(sent.single['type'], 'flush');
+      expect(sent.single.containsKey('text'), isFalse);
+      await expectLater(session.flushSource(sent.add), throwsStateError);
+      deliver(session, edit(anchor: 1, head: 1));
+      final response = message('flush', 1, sent.single['requestId']! as String,
+        {'mode': 'ready', 'anchor': 1, 'head': 1});
+      expect(deliver(session, response), isNull);
+      final snapshot = await capture;
+      expect(snapshot.text, 'xbase\r\n😀');
+      expect(snapshot.generation, generation);
+      expect(snapshot.revision, 1);
+      expect(snapshot.anchor, 1);
+      expect(session.value.savedRevision, 0);
+      deliver(session, edit(revision: 2, baseRevision: 1, requestId: 'editor-2'));
+      expect(deliver(session, response), isNull);
+      expect(session.value.revision, 2);
+      expect(session.canFlushSource, isTrue);
+    });
+
+    test('stale or refused flush never substitutes another source prefix', () async {
+      for (final rejected in [false, true]) {
+        final session = sessionWith('base');
         open(session);
         late Map<String, Object?> request;
-        final capture = session.captureSnapshot((message) => request = message);
+        final failure = expectLater(session.flushSource((value) => request = value), throwsStateError);
         deliver(session, edit());
-        expect(
-          deliver(
-            session,
-            message('save', 1, request['requestId']! as String, {
-              'mode': 'snapshot',
-              'text': session.value.text,
-            }),
-          )?['stage'],
-          'received',
-        );
-        final snapshot = await capture;
-        expect(snapshot.revision, 1);
-        expect(snapshot.text, 'xprior');
-        expect(session.canRequestSnapshot, isTrue);
-      },
-    );
-
-    test('retired full snapshots cannot mutate or replay large source', () {
-      final session = sessionWith('prior');
-      open(session);
-      final request = session.requestSnapshot()!;
-      final response = message('save', 0, request['requestId']! as String, {
-        'mode': 'snapshot',
-        'text': 'prior',
-      });
-      deliver(session, response);
-      deliver(session, edit());
-      expect(deliver(session, response), isNull);
-      expect(deliver(session, {...response, 'text': 'changed'}), isNull);
-      expect(session.value.text, 'xprior');
-      expect(session.value.error, isNull);
+        deliver(session, rejected ? message('ack', 1, request['requestId']! as String,
+          {'stage': 'rejected', 'throughRevision': 1, 'error': 'Composition active'})
+          : message('flush', 0, request['requestId']! as String, {'mode': 'ready', 'anchor': 0, 'head': 0}));
+        await failure;
+        expect(session.value.text, 'xbase');
+        expect(session.value.ready, isTrue);
+        expect(session.canFlushSource, isTrue);
+      }
     });
 
-    test(
-      'a snapshot must equal the current mirror revision, not an old one',
-      () {
-        final session = sessionWith('prior');
-        open(session);
-        final request = session.requestSnapshot()!;
-        deliver(session, edit());
-        expectRejectedWithoutMutation(
-          session,
-          message('save', 0, request['requestId']! as String, {
-            'mode': 'snapshot',
-            'text': session.value.text,
-          }),
-        );
-      },
-    );
-
-    test('an unrequested snapshot is never a write request', () {
-      final session = sessionWith('prior');
+    test('quiesce captures final composition then durable retain commits close', () async {
+      final session = sessionWith('base');
       open(session);
-      expectRejectedWithoutMutation(
-        session,
-        message('save', 0, 'editor-1', {'mode': 'snapshot', 'text': 'prior'}),
-      );
-    });
-
-    test('close needs discard consent and an exact final revision', () async {
-      final session = sessionWith('prior');
-      open(session);
-      late Map<String, Object?> close;
-      final barrier = session.closeEditor(
-        (message) => close = message,
-        discard: true,
-      );
+      final sent = <Map<String, Object?>>[];
+      final quiesce = session.quiesce(sent.add);
       expect(session.value.closing, isTrue);
       expect(session.value.closed, isFalse);
-      // Final composition edits are still accepted before close-ready.
-      expect(deliver(session, edit())?['stage'], 'received');
-      expect(
-        deliver(
-          session,
-          message('close', 1, close['requestId']! as String, {
-            'mode': 'ready',
-            'disposition': 'discard',
-          }),
-        ),
-        isNull,
-      );
-      expect(session.value.closed, isTrue);
-      expect(session.value.text, 'xprior');
-      await barrier;
-    });
-
-    test('unsolicited close cannot retire the current session', () {
-      final session = sessionWith('prior');
-      open(session);
-      expectRejectedWithoutMutation(
-        session,
-        message('close', 0, 'editor-1', {
-          'mode': 'ready',
-          'disposition': 'discard',
-        }),
-      );
-      expect(session.value.closed, isFalse);
-    });
-
-    test(
-      'written close refusal preserves an editable session for newer input',
-      () async {
-        final session = sessionWith('prior');
-        open(session);
-        late Map<String, Object?> close;
-        final barrier = session.closeEditor(
-          (message) => close = message,
-          discard: false,
-        );
-        final failure = expectLater(barrier, throwsStateError);
-        deliver(session, edit());
-        deliver(
-          session,
-          message('ack', 1, close['requestId']! as String, {
-            'stage': 'rejected',
-            'throughRevision': 1,
-            'error': 'Newer pending input',
-          }),
-        );
-        await failure;
-        expect(session.value.closed, isFalse);
-        expect(session.value.closing, isFalse);
-        expect(session.value.ready, isTrue);
-        expect(session.canRequestSnapshot, isTrue);
-      },
-    );
-
-    test('written close cannot advance beyond the approved revision', () async {
-      final session = sessionWith('prior');
-      open(session);
-      late Map<String, Object?> close;
-      final barrier = session.closeEditor(
-        (message) => close = message,
-        discard: false,
-      );
-      final failure = expectLater(barrier, throwsStateError);
       deliver(session, edit());
-      expectRejectedWithoutMutation(
-        session,
-        message('close', 1, close['requestId']! as String, {
-          'mode': 'ready',
-          'disposition': 'written',
-        }),
-      );
-      await failure;
-      expect(session.value.closed, isFalse);
+      deliver(session, message('close', 1, sent.last['requestId']! as String,
+        {'mode': 'quiesced', 'anchor': 0, 'head': 0}));
+      final captured = await quiesce;
+      expect(session.value.quiesced, isTrue);
+      await expectLater(session.completeClose(sent.add, capture: captured, discard: false), throwsStateError);
+      session.acknowledgeDraftDurable(captured);
+      final close = session.completeClose(sent.add, capture: captured, discard: false);
+      expect(sent.last['disposition'], 'retained');
+      deliver(session, message('close', 1, sent.last['requestId']! as String, {'mode': 'closed'}));
+      await close;
+      expect(session.value.closed, isTrue);
+      expect(session.value.savedRevision, 0);
+      expect(session.value.text, 'xbase');
     });
 
-    test(
-      'composition snapshot refusal is recoverable without changing source',
-      () async {
-        final session = sessionWith('prior');
-        open(session);
-        late Map<String, Object?> request;
-        final snapshot = session.captureSnapshot(
-          (message) => request = message,
-        );
-        final failure = expectLater(snapshot, throwsStateError);
-        deliver(
-          session,
-          message('ack', 0, request['requestId']! as String, {
-            'stage': 'rejected',
-            'throughRevision': 0,
-            'error': 'Uncommitted composition',
-          }),
-        );
-        await failure;
-        expect(session.value.text, 'prior');
-        expect(session.value.ready, isTrue);
-        expect(session.canRequestSnapshot, isTrue);
-      },
-    );
-
-    test(
-      'transport failure completes a pending snapshot without dropping source',
-      () async {
-        final session = sessionWith('prior');
-        open(session);
-        final capture = session.captureSnapshot((_) {});
-        final failure = expectLater(capture, throwsStateError);
-        session.reportTransportError('Channel unavailable');
-        await failure;
-        expect(session.value.text, 'prior');
-        expect(session.value.ready, isFalse);
-      },
-    );
-
-    test('editor rejection is never acknowledged or marked saved', () {
-      final session = sessionWith('prior');
+    test('storage failure abort restores editing without claiming a save', () async {
+      final session = sessionWith('base');
       open(session);
-      final request = session.command('undo')!;
-      expect(
-        deliver(
-          session,
-          message('ack', 0, request['requestId']! as String, {
-            'stage': 'rejected',
-            'throughRevision': 0,
-            'error': 'composition active',
-          }),
-        ),
-        isNull,
-      );
-      expect(session.value.text, 'prior');
+      final sent = <Map<String, Object?>>[];
+      final barrier = session.quiesce(sent.add);
+      deliver(session, edit());
+      deliver(session, message('close', 1, sent.last['requestId']! as String,
+        {'mode': 'quiesced', 'anchor': 0, 'head': 0}));
+      final captured = await barrier;
+      await expectLater(session.completeClose(sent.add, capture: EditorCapture(documentId, generation, 0), discard: true), throwsStateError);
+      expect(captured.text, 'xbase');
+      final abort = session.abortClose(sent.add);
+      deliver(session, message('close', 1, sent.last['requestId']! as String, {'mode': 'aborted'}));
+      await abort;
+      expect(session.value.quiesced, isFalse);
+      expect(session.value.closing, isFalse);
+      expect(deliver(session, edit(revision: 2, baseRevision: 1, requestId: 'editor-2'))?['stage'], 'received');
+      expect(session.value.savedRevision, 0);
+    });
+
+    testWidgets('composition timeout cannot complete close and sends an abort', (tester) async {
+      final session = sessionWith('base');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final failure = expectLater(session.quiesce(sent.add), throwsStateError);
+      await tester.pump(const Duration(seconds: 6));
+      await failure;
+      expect(sent.last['mode'], 'abort');
+      expect(session.value.closed, isFalse);
+      deliver(session, message('close', 0, sent.last['requestId']! as String, {'mode': 'aborted'}));
+      await tester.pump();
+      expect(session.value.text, 'base');
+    });
+
+    test('divergent resync is bounded evidence, never mirror replacement', () async {
+      final session = sessionWith('base');
+      open(session);
+      session.reportTransportError('Transport gap');
+      final sent = <Map<String, Object?>>[];
+      final pending = session.requestResync(sent.add);
+      deliver(session, message('resync', 3, sent.single['requestId']! as String,
+        {'mode': 'candidate', 'text': 'other live text', 'anchor': 0, 'head': 0}));
+      final candidate = await pending;
+      expect(candidate.text, 'other live text');
+      expect(session.value.text, 'base');
+      expect(session.value.revision, 0);
+      await expectLater(session.requestResync(sent.add), throwsStateError);
+      await expectLater(session.resumeResync(sent.add), throwsStateError);
+      expect(session.value.resyncCandidate, same(candidate));
+    });
+
+    test('bounded replay closes a transport gap before exact resync resume', () async {
+      final session = sessionWith('base');
+      open(session);
+      final second = edit(revision: 2, baseRevision: 1, requestId: 'editor-2', insert: 'y');
+      expect(deliver(session, second)?['stage'], 'rejected');
+      final sent = <Map<String, Object?>>[];
+      final pending = session.requestResync(sent.add);
+      expect(deliver(session, edit())?['stage'], 'received');
+      expect(deliver(session, second)?['stage'], 'received');
+      deliver(session, message('resync', 2, sent.single['requestId']! as String,
+        {'mode': 'candidate', 'text': 'yxbase', 'anchor': 0, 'head': 0}));
+      await pending;
+      final resume = session.resumeResync(sent.add);
+      deliver(session, message('resync', 2, sent.last['requestId']! as String, {'mode': 'resumed'}));
+      await resume;
+      expect(session.value.ready, isTrue);
+      expect(session.value.error, isNull);
+      expect(session.value.text, 'yxbase');
+      expect(session.value.draftDurableRevision, 0);
+      expect(session.value.savedRevision, 0);
+    });
+
+    test('formatting shares insertion correlation and cannot imply persistence', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final operation = session.format(sent.add, const EditorFormat('bold'));
+      await expectLater(session.insertText(sent.add, 'other'), throwsStateError);
+      deliver(session, currentSelection(sent.first, anchor: 3, head: 0));
+      final request = sent.last;
+      expect(request['type'], 'format');
+      expect(request['anchor'], 3);
+      final batch = message('edit', 1, 'editor-1', {'baseRevision': 0,
+        'operationId': request['requestId'], 'changes': [
+          {'from': 0, 'to': 0, 'insert': '**'}, {'from': 3, 'to': 3, 'insert': '**'}],
+        'selection': {'anchor': 5, 'head': 2}});
+      expect(deliver(session, batch)?['stage'], 'received');
+      deliver(session, insertionReceipt(request));
+      await operation;
+      expect(session.value.text, '**abc**');
+      expect(session.value.savedRevision, 0);
+      expect(session.value.draftDurableRevision, 0);
+      final noChange = session.format(sent.add, const EditorFormat('heading', level: 2));
+      deliver(session, currentSelection(sent.last, revision: 1, anchor: 5, head: 2));
+      deliver(session, {...insertionReceipt(sent.last), 'changed': false});
+      await noChange;
+      expect(session.value.revision, 1);
+    });
+
+    test('identical insertion has explicit no-change receipt and no durable obligation', () async {
+      final session = sessionWith('abc');
+      open(session);
+      final sent = <Map<String, Object?>>[];
+      final operation = session.insertText(sent.add, 'abc');
+      deliver(session, currentSelection(sent.single, anchor: 3, head: 0));
+      deliver(session, {...insertionReceipt(sent.last, revision: 0), 'changed': false});
+      await operation;
+      expect(session.value.revision, 0);
+      expect(session.value.savedRevision, 0);
+      expect(session.value.text, 'abc');
+    });
+
+    test('preferences never reload or modify source, revision or directed selection', () {
+      final session = sessionWith('base');
+      open(session);
+      final before = session.value;
+      final preferences = session.preferences(dark: true, highContrast: true, fontScale: 2, reducedMotion: true)!;
+      expect(preferences['type'], 'preferences');
+      expect(preferences['fontScale'], 2);
+      expect(session.value, same(before));
+      expect(() => session.preferences(dark: true, fontScale: double.nan), throwsArgumentError);
+    });
+
+    test('transport failure settles a pending flush and retains source', () async {
+      final session = sessionWith('base');
+      open(session);
+      final failure = expectLater(session.flushSource((_) {}), throwsStateError);
+      session.reportTransportError('Channel unavailable');
+      await failure;
+      expect(session.value.text, 'base');
+      expect(session.value.ready, isFalse);
     });
   });
 }

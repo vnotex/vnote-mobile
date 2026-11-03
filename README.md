@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export either a complete saved notebook backup or a files-and-assets ZIP from its library row through system Save As. **Write** commits the captured editor revision; **Reopen** starts a fresh native/editor session. Returning from the editor requires Write/Discard/Cancel before **Notebooks** can switch the selected notebook. Library discovery, catalog and editor owners never overlap. Unwritten input is still volatile: autosave, draft recovery, preview and sync are not implemented. Full Phase 1 device/iOS gates remain open; see [verification and blockers](docs/verification.md).
+The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export either a complete saved notebook backup or a files-and-assets ZIP from its library row through system Save As. The editor now has durable private drafts, bounded foreground autosave, source-preserving formatting and isolated Markdown/math/diagram preview. **Save** commits a captured revision plus its receipt; newer input remains dirty. Closing offers Save and close, Keep draft, Discard or Cancel. Library discovery, catalog and editor owners never overlap. Share-in, WebDAV and full device/iOS release gates remain open; see [verification and blockers](docs/verification.md).
 
 ## Development
 
@@ -42,7 +42,7 @@ npm --prefix packages/editor_web run build
 npm --prefix packages/editor_web run check
 ```
 
-Generated editor and legal assets are ignored, never downloaded at runtime. `check` recomputes their expected bytes without overwriting them and fails for missing/stale output. Use the root packaging commands, not a bare `flutter build` against potentially stale assets. A clean checkout must regenerate assets before packaging. Commit `package-lock.json` and the root workspace `pubspec.lock`; do not commit package-local Dart locks.
+Generated editor, preview/font and legal assets are ignored, never downloaded at runtime. `check` recomputes their expected bytes without overwriting them and fails for missing/stale output. Use the root packaging commands, not a bare `flutter build` against potentially stale assets. A clean checkout must regenerate assets before packaging. Commit `package-lock.json` and the root workspace `pubspec.lock`; do not commit package-local Dart locks.
 
 ## Architecture and compatibility
 
@@ -51,7 +51,7 @@ Generated editor and legal assets are ignored, never downloaded at runtime. `che
 - `packages/vxcore_bridge` wraps the C++17 core C ABI on a dedicated native owner thread. The core selects sandbox-root initialization and checked ordinary-note publication only for Android/iOS; desktop builds retain in-place saves; there is no global core context or second note database.
 - Desktop compatibility reference: `f8026adb4c43f78d90251148e24b6e72ca28f3d7`; original core baseline: `c3319ca9a7dfd5432cad1f7c35de6be099fc87bf`. The current core gitlink and `toolchains.json` record the separately committed implementation pin.
 
-Read [architecture](docs/architecture.md), [compatibility](docs/compatibility.md) and the six ADRs linked there before extending the boundary. Mobile TLS trust integration, iOS execution and full draft durability remain gates, not ignored errors or permission to replace core operations with Dart filesystem writes.
+Read [architecture](docs/architecture.md), [compatibility](docs/compatibility.md) and the six ADRs linked there before extending the boundary. Mobile TLS trust integration, iOS execution and physical-device/power-loss durability remain gates, not ignored errors or permission to replace core operations with Dart filesystem writes.
 
 Android `com.example.vnote_mobile` and iOS `com.example.vnoteMobile` are generated development identities, not owner-approved store identifiers.
 
@@ -128,9 +128,33 @@ abandonment without deleting unexpected live files. All transfers share the glob
 
 **Insert link / Insert image** adds literal Markdown at a revision-bound cursor as
 one undo operation. The asset and source have separate outcomes: insertion failure
-does not copy the file again, and successful insertion still needs **Write**.
-Share-in, preview, durable drafts/autosave and sync remain later gates. No iOS or
-physical-device completion follows from Android/host verification.
+does not copy the file again. Inserted source follows ordinary draft persistence
+and autosave; a received operation receipt is not a saved receipt. Share-in and
+sync remain later gates. No iOS or physical-device completion follows from
+Android/host verification.
+
+## Durable editing and isolated preview
+
+Drafts flush after 250 ms or 64 KiB; foreground autosave schedules after 750 ms
+idle and at most five seconds of continuous input. These schedule work, not a
+promise that slow/full storage has finished. Status distinguishes received,
+draft-durable and saved revisions; unsent composition and newer edits stay dirty.
+Recovery never writes over different disk bytes. Inspect, restore matching-base
+source, export text/raw recovery data, or explicitly discard the private draft.
+Unresolved drafts are never age-evicted (32 documents, 32 MiB each, 256 MiB total).
+
+Formatting uses revision-bound selection and one undo group. Preview runs outside
+the editor: bundled Markdown, safe KaTeX and flowchart/sequence diagrams; raw HTML,
+remote images and unsupported commands stay inert. Relative resources are sealed
+native capabilities, and external/internal navigation requires Flutter confirmation.
+The visible viewer has no editor channel or heavy renderer. Theme, dynamic text,
+high contrast and reduced motion update existing surfaces without replacing source.
+
+The APK installs from API 28, but editing/preview additionally require WebView 152+
+and a successful per-document native offline-policy proof. Older/incapable providers
+fail closed with source/recovery/export retained. Current public WK APIs do not
+supply the required all-protocol guarantee: **iOS 15–26 editing/preview is not
+claimed enabled**. See the [security contract](docs/adr/0004-rendering-security.md).
 
 ## License
 

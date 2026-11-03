@@ -8,6 +8,7 @@ import '../../services/notebook_import.dart';
 import '../../services/document_transfer_platform.dart';
 import '../../services/cohort_import.dart';
 import '../../services/resource_transfer.dart';
+import '../recovery/draft_recovery_panel.dart';
 
 class NotebookLibraryScreen extends StatefulWidget {
   const NotebookLibraryScreen({
@@ -202,6 +203,7 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                     if (index == 0) {
                       return Column(
                         children: [
+                          DraftRecoveryPanel(library: library),
                           _ImportPanel(
                             library: library,
                             state: state.importState,
@@ -500,7 +502,8 @@ class _ResourceTransfersPanel extends StatelessWidget {
         state.message == null) {
       return const SizedBox.shrink();
     }
-    final idle = available && !state.busy && !closed;
+    final privateIdle = !state.busy && !closed && !library.value.busy && library.value.workspace == null;
+    final idle = available && privateIdle;
     return Card(
       margin: const EdgeInsets.all(12),
       child: Padding(
@@ -509,7 +512,7 @@ class _ResourceTransfersPanel extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             const Text(
-              'Retained attachment / image transfers',
+              'Retained file transfers',
               style: TextStyle(fontWeight: FontWeight.bold),
             ),
             if (state.busy) ...[
@@ -552,15 +555,17 @@ class _ResourceTransfersPanel extends StatelessWidget {
                     Wrap(
                       spacing: 8,
                       children: [
-                        TextButton(
-                          onPressed: idle
-                              ? () => library.inspectResource(attempt)
-                              : null,
-                          child: const Text('Inspect actual resources'),
-                        ),
-                        if (attempt.stage != TransferStage.committed)
+                        if (attempt.stage != TransferStage.exportUnavailable &&
+                            (attempt.operation != ResourceOperation.export || attempt.origin == ResourceExportOrigin.asset))
+                          TextButton(
+                            onPressed: idle ? () => library.inspectResource(attempt) : null,
+                            child: const Text('Inspect actual resources'),
+                          ),
+                        if (attempt.stage == TransferStage.exportUnavailable)
+                          const Text('The immutable export source is unavailable. Only explicit private discard is allowed.'),
+                        if (attempt.stage != TransferStage.committed && attempt.stage != TransferStage.exportUnavailable)
                           FilledButton(
-                            onPressed: idle
+                            onPressed: (attempt.stage == TransferStage.exportReady ? privateIdle : idle)
                                 ? () => library.retryResource(attempt)
                                 : null,
                             child: Text(
@@ -570,7 +575,7 @@ class _ResourceTransfersPanel extends StatelessWidget {
                             ),
                           ),
                         TextButton(
-                          onPressed: idle
+                          onPressed: (attempt.operation == ResourceOperation.export ? privateIdle : idle)
                               ? () async {
                                   if (await _confirmPrivateDiscard(
                                         context,

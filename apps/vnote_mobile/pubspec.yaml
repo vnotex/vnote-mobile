@@ -13,6 +13,8 @@ dependencies:
     sdk: flutter
   flutter_riverpod: 3.4.3
   webview_flutter: 4.14.1
+  webview_flutter_android: 4.14.1
+  webview_flutter_wkwebview: 3.27.2
   path_provider: 2.1.6
   archive: 4.6.0
   crypto: 3.0.8
@@ -32,3 +34,5 @@ flutter:
   assets:
     - assets/editor/
     - assets/legal/
+    - assets/preview/
+    - assets/preview/fonts/

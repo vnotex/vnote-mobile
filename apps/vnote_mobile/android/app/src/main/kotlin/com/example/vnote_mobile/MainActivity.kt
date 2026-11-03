@@ -44,6 +44,9 @@ class MainActivity : FlutterActivity() {
         if (!flutterEngine.plugins.has(DocumentTransferPlugin::class.java)) {
             flutterEngine.plugins.add(DocumentTransferPlugin())
         }
+        if (!flutterEngine.plugins.has(WebSurfacePlugin::class.java)) {
+            flutterEngine.plugins.add(WebSurfacePlugin())
+        }
     }
 }
 
@@ -786,7 +789,7 @@ private class DocumentTransferPlugin : FlutterPlugin, ActivityAware,
         val root = File(data, "files")
         if (app.filesDir.canonicalFile != root) throw IOException("Invalid support namespace")
         ensureDirectory(root)
-        for (name in arrayOf("core", "notebooks", "exports", "imports", "cohorts", "resources")) {
+        for (name in arrayOf("core", "notebooks", "exports", "imports", "cohorts", "resources", "drafts", "previews")) {
             ensureDirectory(File(root, name))
         }
         return root

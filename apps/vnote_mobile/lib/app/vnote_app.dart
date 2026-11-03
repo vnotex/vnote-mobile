@@ -9,6 +9,7 @@ import '../features/library/notebook_browser.dart';
 import '../features/library/notebook_library_screen.dart';
 import '../services/notebook_library.dart';
 import '../services/notebook_workspace.dart';
+import '../services/web_surface_platform.dart';
 
 // A dependency token, not a process-global notebook or native-core singleton.
 final _libraryProvider = Provider<NotebookLibrary>(
@@ -27,16 +28,19 @@ class VNoteApp extends StatefulWidget {
 
 class _VNoteAppState extends State<VNoteApp> {
   bool _dark = false;
+  late final WebSurfacePlatform _surfaces;
 
   @override
   void initState() {
     super.initState();
+    _surfaces = WebSurfacePlatform();
     unawaited(widget.library.initialize());
   }
 
   @override
   void dispose() {
     widget.library.dispose();
+    unawaited(widget.library.shutdown().then((_) => _surfaces.shutdown()).catchError((Object _) {}));
     super.dispose();
   }
 
@@ -50,6 +54,14 @@ class _VNoteAppState extends State<VNoteApp> {
       darkTheme: ThemeData(
         colorSchemeSeed: Colors.indigo,
         brightness: Brightness.dark,
+        useMaterial3: true,
+      ),
+      highContrastTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo, contrastLevel: 1),
+        useMaterial3: true,
+      ),
+      highContrastDarkTheme: ThemeData(
+        colorScheme: ColorScheme.fromSeed(seedColor: Colors.indigo, brightness: Brightness.dark, contrastLevel: 1),
         useMaterial3: true,
       ),
       themeMode: _dark ? ThemeMode.dark : ThemeMode.light,
@@ -87,6 +99,7 @@ class _VNoteAppState extends State<VNoteApp> {
                         key: ObjectKey(state.session),
                         workspace: workspace,
                         library: library,
+                        surfaces: _surfaces,
                         session: state.session!,
                         dark: _dark,
                         onThemeChanged: (dark) => setState(() => _dark = dark),

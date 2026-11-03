@@ -732,4 +732,80 @@ void main() {
       throwsA(_failure),
     );
   });
+
+  test('new export desired is explicit v2 while stored v1 remains asset-only', () async {
+    final root = '${fixture.root.path}/resources';
+    await Directory(root).create(); await Directory(fixture.notebooks).create();
+    final target = <String, Object?>{'version': 1, 'id': _id, 'notebookId': _book,
+      'nodeId': _note, 'notebookRelative': 'book'};
+    Future<Map<String, Object?>> run(String op, [Map<String, Object?> extra = const {}]) {
+      final request = {'op': op, 'scope': 'resource', 'root': root,
+        'notebooksRoot': fixture.notebooks, 'id': _id, ...extra};
+      return Isolate.run(() => CoreImportStore.runTransfer(request));
+    }
+    await run('allocate', {'kind': 'file', 'target': target});
+    await expectLater(run('writeResourceIntent', {'operation': 'export', 'name': 'asset.bin', 'newName': null}), throwsA(_failure));
+    final current = await run('writeResourceIntent', {'operation': 'export', 'name': 'asset.bin', 'newName': null,
+      'version': 2, 'origin': 'asset', 'binding': {'name': 'asset.bin'}});
+    expect(current['desiredVersion'], 2); expect(current['origin'], 'asset');
+    final file = File('$root/$_id/resource.json');
+    final stored = jsonDecode(await file.readAsString()) as Map<String, dynamic>;
+    expect(stored.keys, unorderedEquals(['version', 'id', 'scope', 'target', 'operation', 'name', 'newName', 'origin', 'binding']));
+    stored.remove('origin'); stored.remove('binding'); stored['version'] = 1;
+    await file.writeAsString(jsonEncode(stored), flush: true);
+    final legacy = await run('recoverAttempt');
+    expect(legacy['desiredVersion'], 1); expect(legacy['origin'], 'asset');
+    expect(legacy['binding'], {'name': 'asset.bin'});
+  });
+
+  test('unknown v2 export origin remains unavailable and explicitly discardable', () async {
+    final root = '${fixture.root.path}/resources';
+    await Directory(root).create(); await Directory(fixture.notebooks).create();
+    final target = <String, Object?>{'version': 1, 'id': _id, 'notebookId': _book,
+      'nodeId': _note, 'notebookRelative': 'book'};
+    Future<Map<String, Object?>> run(String op, [Map<String, Object?> extra = const {}]) {
+      final request = {'op': op, 'scope': 'resource', 'root': root,
+        'notebooksRoot': fixture.notebooks, 'id': _id, ...extra};
+      return Isolate.run(() => CoreImportStore.runTransfer(request));
+    }
+    await run('allocate', {'kind': 'file', 'target': target});
+    await File('$root/$_id/resource.json').writeAsString(jsonEncode({
+      'version': 2, 'id': _id, 'scope': 'resource', 'target': target, 'operation': 'export',
+      'name': 'retained.bin', 'newName': null, 'origin': 'unknown-source', 'binding': <String, Object?>{},
+    }), flush: true);
+    final state = await run('recoverAttempt');
+    expect(state['phase'], 'exportUnavailable'); expect(state['origin'], 'unknown-source');
+    expect(state['canApply'], isFalse);
+    await File('$root/$_id/dispatch.json').writeAsString('{}', flush: true);
+    await expectLater(run('discardExport'), throwsA(_failure));
+    expect(await Directory('$root/$_id').exists(), isTrue);
+    await File('$root/$_id/dispatch.json').delete();
+    expect((await run('discardExport'))['discarded'], isTrue);
+  });
+
+  test('ready export remains exactly six fields and retry needs no source binding', () async {
+    final root = '${fixture.root.path}/resources';
+    await Directory(root).create(); await Directory(fixture.notebooks).create();
+    final target = <String, Object?>{'version': 1, 'id': _id, 'notebookId': _book,
+      'nodeId': _note, 'notebookRelative': 'book'};
+    Future<Map<String, Object?>> run(String op, [Map<String, Object?> extra = const {}]) {
+      final request = {'op': op, 'scope': 'resource', 'root': root,
+        'notebooksRoot': fixture.notebooks, 'id': _id, ...extra};
+      return Isolate.run(() => CoreImportStore.runTransfer(request));
+    }
+    await run('allocate', {'kind': 'file', 'target': target});
+    await File('$root/$_id/resource.json').writeAsString(jsonEncode({
+      'version': 2, 'id': _id, 'scope': 'resource', 'target': target, 'operation': 'export',
+      'name': 'draft.txt', 'newName': null, 'origin': 'unavailable-draft', 'binding': <String, Object?>{},
+    }), flush: true);
+    await Directory('$root/$_id/output').create();
+    final bytes = utf8.encode('retained exact copy\r\n');
+    await File('$root/$_id/output/draft.txt').writeAsBytes(bytes, flush: true);
+    final ready = {'version': 1, 'id': _id, 'scope': 'resource', 'name': 'draft.txt',
+      'bytes': bytes.length, 'sha256': sha256.convert(bytes).toString()};
+    await File('$root/$_id/ready.json').writeAsString(jsonEncode(ready), flush: true);
+    expect((await run('verifyExport'))['sha256'], ready['sha256']);
+    expect((await run('recoverAttempt'))['phase'], 'exportReady');
+    expect(ready.length, 6);
+  });
 }

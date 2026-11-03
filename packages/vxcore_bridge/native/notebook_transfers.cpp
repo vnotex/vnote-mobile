@@ -754,6 +754,17 @@ Json resource_export(const ResourceView &view, const fs::path &transaction, cons
                      const std::atomic<bool> *cancel) {
   const auto state = disk::Transaction(transaction.u8string(), "resource");
   pin_resource(transaction, state, view);
+  const auto desired = disk::ReadJson(transaction / "resource.json");
+  require(desired.at("operation") == "export" && desired.at("name") == name, VXCORE_ERR_INVALID_STATE);
+  // Persisted phase-2 exports are assets. A v2 source must never fall through
+  // to assets/name, including the ready-file retry path.
+  if (desired.at("version") == 1) keys(desired, {"version", "id", "scope", "target", "operation", "name", "newName"});
+  else {
+    keys(desired, {"version", "id", "scope", "target", "operation", "name", "newName", "origin", "binding"});
+    require(desired.at("version") == 2 && desired.at("origin") == "asset", VXCORE_ERR_UNSUPPORTED);
+    keys(desired.at("binding"), {"name"});
+    require(desired.at("binding").at("name") == name, VXCORE_ERR_INVALID_STATE);
+  }
   disk::Name(name);
   require(!disk::Exists(transaction / "dispatch.json"), VXCORE_ERR_INVALID_STATE);
   if (disk::Exists(transaction / "ready.json")) {
@@ -762,8 +773,6 @@ Json resource_export(const ResourceView &view, const fs::path &transaction, cons
     return ready;
   }
   require(view.files.count(name) != 0, VXCORE_ERR_NOT_FOUND);
-  const auto desired = disk::ReadJson(transaction / "resource.json");
-  require(desired.at("operation") == "export" && desired.at("name") == name, VXCORE_ERR_INVALID_STATE);
   const auto bytes = view.files.at(name).at("bytes").get<uint64_t>();
   require(bytes <= kExport, VXCORE_ERR_UNSUPPORTED);
   reserve(transaction, "resource", bytes + 128 * 1024, cancel);
@@ -771,7 +780,8 @@ Json resource_export(const ResourceView &view, const fs::path &transaction, cons
   if (disk::Exists(output)) disk::RemovePrivate(output); // No ready receipt: only private failed derivation.
   disk::MakeDirectory(output);
   require(disk::Info(view.assets / fs::u8path(name)) == view.files.at(name), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
-  const auto snapshot = disk::Copy(view.assets / fs::u8path(name), output / fs::u8path(name), kExport, cancel);
+  const auto snapshot = disk::CopyChecked(view.assets / fs::u8path(name), output / fs::u8path(name),
+                                           kExport, view.files.at(name), cancel);
   cancelled(cancel);
   disk::Marker(transaction, "ready.json", {{"version", 1}, {"id", state.at("id")}, {"scope", "resource"},
                {"name", name}, {"bytes", snapshot.at("bytes")}, {"sha256", snapshot.at("sha256")}});
@@ -976,6 +986,45 @@ int32_t PreflightResource(VxCoreContextHandle context, const std::string &notebo
   try {
     const auto view = resource_view(context, notebook_id, node_id, disk::Absolute(notebook_root));
     metadata = {{"notebookId", notebook_id}, {"nodeId", node_id}, {"notePath", view.path}, {"editorType", view.editor}};
+    return VXCORE_OK;
+  } catch (...) { return disk::ErrorCode(); }
+}
+int32_t PreviewIndex(VxCoreContextHandle context, const std::string &notebook_id,
+                     const std::string &notebook_root, const std::atomic<bool> *cancel,
+                     std::map<std::string, PreviewNode> &out) noexcept {
+  try {
+    Graph graph(disk::Absolute(notebook_root), notebook_id, true);
+    std::map<std::string, bool> types;
+    out.clear();
+    for (const auto &entry : graph.nodes) {
+      cancelled(cancel);
+      if (!entry.second.folder) continue;
+      const auto image = graph.record(entry.second);
+      for (const auto &file : image.at("files")) {
+        const auto name = text(file.at("name"), 255);
+        auto suffix = lower(fs::u8path(name).extension().u8string());
+        if (!suffix.empty()) suffix.erase(0, 1);
+        auto type = types.find(suffix);
+        if (type == types.end()) {
+          CoreString value;
+          const auto status = vxcore_filetype_get_by_suffix(context, suffix.c_str(), &value.value);
+          bool ordinary = false;
+          if (status == VXCORE_OK) {
+            const auto description = value.json();
+            ordinary = description.at("name") == "Markdown" || description.at("name") == "Text";
+          } else require(status == VXCORE_ERR_NOT_FOUND || status == VXCORE_ERR_UNSUPPORTED, status);
+          type = types.emplace(suffix, ordinary && suffix != "vne").first;
+        }
+        bool ordinary = type->second, protected_content = suffix == "vne";
+        try { unprotected(file); }
+        catch (const vxm_import::StorageFailure &failure) {
+          if (failure.code != VXCORE_ERR_ENCRYPTION_LOCKED) throw;
+          ordinary = false; protected_content = true;
+        }
+        require(out.emplace(child(entry.second.path, name), PreviewNode{text(file.at("id"), 127), ordinary, protected_content}).second,
+                VXCORE_ERR_JSON_PARSE);
+      }
+    }
     return VXCORE_OK;
   } catch (...) { return disk::ErrorCode(); }
 }

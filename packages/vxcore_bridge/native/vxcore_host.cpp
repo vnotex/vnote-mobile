@@ -2,6 +2,8 @@
 #include "vxcore_host.h"
 #include "notebook_import.h"
 #include "notebook_transfers.h"
+#include "editor_drafts.h"
+#include "notebook_preview.h"
 
 #include <algorithm>
 #include <array>
@@ -43,6 +45,7 @@ using Json = nlohmann::json;
 constexpr size_t kSource = VXM_MAX_SOURCE_BYTES;
 constexpr size_t kString = 16384;
 constexpr size_t kJson = VXM_MAX_CATALOG_BYTES;
+constexpr size_t kOwnerSummary = 64 * 1024;
 constexpr size_t kCatalog = VXM_MAX_CATALOG_BYTES;
 // Every terminal owns bounded metadata, including terminals taken past close.
 constexpr size_t kMetadata = 2 * (kString + 1) + 3 * 128 + 65 + 64;
@@ -792,6 +795,37 @@ int32_t catalog_operation(const uint8_t *data, size_t size, int32_t kind) {
   return operation;
 }
 
+enum DraftOperation { kDraftWrite = 1, kDraftInspect, kDraftReconcile };
+bool lowercase_hex(const std::string &value, size_t size) {
+  return value.size() == size && std::all_of(value.begin(), value.end(), [](char c) {
+    return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+  });
+}
+int32_t draft_operation(const uint8_t *data, size_t size, int32_t mode) {
+  require(size && size <= kString);
+  const auto json = Json::parse(data, data + size, nullptr, false);
+  require(json.is_object() && json.contains("op"));
+  const auto op = json_string(json.at("op"), false, VXCORE_ERR_INVALID_PARAM);
+  const bool writing = op == "write";
+  require(writing || op == "inspect" || op == "reconcile");
+  require(!writing || mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
+  require(json.size() == (writing ? 5 : 4));
+  require(fs::u8path(json_string(json.at("draftsRoot"), false, VXCORE_ERR_INVALID_PARAM)).is_absolute());
+  require(lowercase_hex(json_string(json.at("documentKey"), false, VXCORE_ERR_INVALID_PARAM), 64));
+  require(lowercase_hex(json_string(json.at("token"), false, VXCORE_ERR_INVALID_PARAM), 32));
+  if (writing) require(lowercase_hex(json_string(json.at("candidateId"), false, VXCORE_ERR_INVALID_PARAM), 32));
+  return writing ? kDraftWrite : op == "inspect" ? kDraftInspect : kDraftReconcile;
+}
+void preview_command(const std::string &command) {
+  require(!command.empty() && command.size() <= kString);
+  const auto json = Json::parse(command, nullptr, false);
+  require(json.is_object() && json.size() == 5 && json.at("op") == "prepare");
+  require(fs::u8path(json_string(json.at("previewRoot"), false, VXCORE_ERR_INVALID_PARAM)).is_absolute());
+  require(lowercase_hex(json_string(json.at("previewId"), false, VXCORE_ERR_INVALID_PARAM), 32));
+  require(lowercase_hex(json_string(json.at("renderId"), false, VXCORE_ERR_INVALID_PARAM), 32));
+  require(json.at("sourceRevision").is_number_unsigned() && json.at("sourceRevision").get<uint64_t>() <= kMaxRevision);
+}
+
 enum TransferOperation { kBuild = 1, kApply, kRecover, kResourceList, kResourceExport };
 int32_t transfer_operation(const uint8_t *data, size_t size, int32_t kind, int32_t mode) {
   require(size && size <= kString);
@@ -937,7 +971,7 @@ struct Request {
   std::unique_ptr<EventStorage> result;
   std::vector<uint8_t> input;
   std::string expected_hash;
-  std::string node, name, destination;
+  std::string node, name, destination, command;
   int32_t operation = 0;
   int32_t export_format = VXM_EXPORT_NOTEBOOK;
   size_t input_cost = 0;
@@ -953,6 +987,36 @@ uint64_t new_generation() {
   }
 }
 }  // namespace
+
+std::string_view vxm_drafts::ProjectDisk(std::string_view source,
+                                       std::string_view opening_source,
+                                       int32_t ending, std::string &storage) {
+  vxm_import::storage::Check(source.size() <= kSource, VXCORE_ERR_INVALID_PARAM);
+  vxm_import::storage::Check(ending >= VXCORE_LINE_ENDING_UNSPECIFIED && ending <= VXCORE_LINE_ENDING_CR,
+                            VXCORE_ERR_UNSUPPORTED);
+  if (source == opening_source || ending == VXCORE_LINE_ENDING_UNSPECIFIED) return source;
+  size_t output_size = 0;
+  bool conversion = false;
+  for (size_t i = 0; i < source.size(); ++i) {
+    if (source[i] != '\r' && source[i] != '\n') { ++output_size; continue; }
+    const bool pair = source[i] == '\r' && i + 1 < source.size() && source[i + 1] == '\n';
+    conversion |= ending == VXCORE_LINE_ENDING_CRLF ? !pair :
+        pair || source[i] != (ending == VXCORE_LINE_ENDING_LF ? '\n' : '\r');
+    if (pair) ++i;
+    output_size += ending == VXCORE_LINE_ENDING_CRLF ? 2 : 1;
+  }
+  vxm_import::storage::Check(output_size <= kSource, VXCORE_ERR_INVALID_PARAM);
+  if (!conversion) return source;
+  storage.resize(output_size);
+  size_t next = 0;
+  for (size_t i = 0; i < source.size(); ++i) {
+    if (source[i] != '\r' && source[i] != '\n') { storage[next++] = source[i]; continue; }
+    if (source[i] == '\r' && i + 1 < source.size() && source[i + 1] == '\n') ++i;
+    if (ending != VXCORE_LINE_ENDING_LF) storage[next++] = '\r';
+    if (ending != VXCORE_LINE_ENDING_CR) storage[next++] = '\n';
+  }
+  return storage;
+}
 
 struct VxmHost {
   std::mutex mutex;
@@ -1883,33 +1947,28 @@ struct VxmHost {
     out.event.data = out.body.get();
     out.event.size = size;
   }
-  void preflight_isolated_context(const fs::path &root, const char *restore_reason) {
+  void preflight_isolated_context(const fs::path &root, const char *reason) {
     const auto canonical = fs::canonical(root);
     for (const auto *storage : {&app_path, &local_path}) {
       const auto path = fs::u8path(*storage);
-      export_require(path.is_absolute(), restore_reason);
+      export_require(path.is_absolute(), reason);
       confined(path, ".");
       const auto core_root = fs::weakly_canonical(path);
-      export_require(!export_within(canonical, core_root) && !export_within(core_root, canonical), restore_reason);
+      export_require(!export_within(canonical, core_root) && !export_within(core_root, canonical), reason);
     }
-    // InitializeContext constructs NotebookManager/BufferManager/WorkspaceManager
-    // from persisted session records BEFORE explicit notebook_open. Refuse restore
-    // work rather than letting a resource/export owner restore buffers first.
+    // Explicit-root contexts ignore legacy session contents. Keep file identity
+    // protection because later admitted operations/shutdown may write this path.
     try {
       const auto session_path = fs::u8path(local_path) / "vxsession.json";
       confined(fs::u8path(local_path), "vxsession.json");
       if (fs::exists(fs::symlink_status(session_path))) {
-        const auto session = export_json(session_path, export_identity(session_path));
-        for (const auto *key : {"notebooks", "buffers", "workspaces"}) {
-          const auto entries = session.find(key);
-          export_require(entries == session.end() || (entries->is_array() && entries->empty()), restore_reason);
-        }
+        export_require(!export_identity(session_path).directory, reason);
       }
-    } catch (const Failure &failure) { throw Failure{failure.code, restore_reason}; }
-    catch (const fs::filesystem_error &) { throw Failure{VXCORE_ERR_IO, restore_reason}; }
+    } catch (const Failure &failure) { throw Failure{failure.code, reason}; }
+    catch (const fs::filesystem_error &) { throw Failure{VXCORE_ERR_IO, reason}; }
   }
   void preflight_export_open(const fs::path &root) {
-    preflight_isolated_context(root, "Export requires normal notebook open and recovery for persisted session state");
+    preflight_isolated_context(root, "Export requires isolated native state roots and safe session-file identity");
     size_t metadata_entries = 0;
     export_require(export_identity(root / "vx_notebook").directory, "Export requires existing notebook metadata");
     for (const auto &entry : fs::recursive_directory_iterator(root / "vx_notebook")) {
@@ -1992,18 +2051,24 @@ struct VxmHost {
       notebook_name = json_string(options.at("notebookName"));
       create_notebook = true;
     }
-    const auto root = fs::u8path(notebook_path);
+    auto root = fs::u8path(notebook_path);
     require(root.is_absolute());
+    // Directory URIs legitimately end in a separator. Keep the same location
+    // while making its final component stable for draft/preview identities.
+    if (root.has_relative_path() && root.filename().empty()) {
+      root = root.parent_path();
+      notebook_path = root.u8string();
+    }
     const auto status = fs::symlink_status(root);
     const bool exists = fs::exists(status);
     require(create_notebook ? !exists : exists,
             create_notebook ? VXCORE_ERR_ALREADY_EXISTS : VXCORE_ERR_NOT_FOUND);
     confined(root, ".");
     confined(root, "vx_notebook/config.json");
-    if (export_only) preflight_export_open(root);
+    // Metadata-only recovery must not let notebook_open replay migrations or
+    // pending body transfers before it can compare the actual durable state.
+    if (export_only || mode == VXM_MODE_RESOURCES) preflight_export_open(root);
     else safe_tree(root / "vx_notebook");
-    if (mode == VXM_MODE_RESOURCES)
-      preflight_isolated_context(root, "Resource recovery requires isolated core storage without persisted session restoration");
     const auto canonical = fs::weakly_canonical(root);
     for (const auto &active : owned_notebooks) {
       std::error_code error;
@@ -2083,32 +2148,12 @@ struct VxmHost {
     if (changed) {
       VxCoreLineEnding ending;
       check(vxcore_buffer_get_line_ending_override(context, buffer_id.c_str(), &ending));
-      std::vector<uint8_t> normalized;
-      if (ending != VXCORE_LINE_ENDING_UNSPECIFIED) {
-        require(ending >= VXCORE_LINE_ENDING_LF && ending <= VXCORE_LINE_ENDING_CR, VXCORE_ERR_UNSUPPORTED);
-        size_t output_size = 0;
-        bool conversion = false;
-        for (size_t i = 0; i < size; ++i) {
-          if (source[i] != '\r' && source[i] != '\n') { ++output_size; continue; }
-          const bool pair = source[i] == '\r' && i + 1 < size && source[i + 1] == '\n';
-          conversion |= ending == VXCORE_LINE_ENDING_CRLF ? !pair : pair || source[i] != (ending == VXCORE_LINE_ENDING_LF ? '\n' : '\r');
-          if (pair) ++i;
-          output_size += ending == VXCORE_LINE_ENDING_CRLF ? 2 : 1;
-        }
-        require(output_size <= kSource, VXCORE_ERR_INVALID_PARAM);
-        if (conversion) {
-          normalized.resize(output_size);
-          size_t next = 0;
-          for (size_t i = 0; i < size; ++i) {
-            if (source[i] != '\r' && source[i] != '\n') { normalized[next++] = source[i]; continue; }
-            if (source[i] == '\r' && i + 1 < size && source[i + 1] == '\n') ++i;
-            if (ending != VXCORE_LINE_ENDING_LF) normalized[next++] = '\r';
-            if (ending != VXCORE_LINE_ENDING_CR) normalized[next++] = '\n';
-          }
-          source = normalized.data();
-          size = normalized.size();
-        }
-      }
+      std::string normalized;
+      const auto projected = vxm_drafts::ProjectDisk(
+          std::string_view(reinterpret_cast<const char *>(source), size),
+          std::string_view(reinterpret_cast<const char *>(disk), disk_size), ending, normalized);
+      source = reinterpret_cast<const uint8_t *>(projected.data());
+      size = projected.size();
       check(vxcore_buffer_set_content_raw(context, buffer_id.c_str(), source, size));
       // No cancellation boundary after mutation: finish and publish actual outcome.
       check(vxcore_buffer_save(context, buffer_id.c_str()));
@@ -2118,6 +2163,115 @@ struct VxmHost {
     }
     written_revision = out.event.revision;
     wrote_revision = true;
+  }
+  void owner_summary(EventStorage &out, const Json &value) {
+    const auto encoded = value.dump();
+    require(encoded.size() <= kOwnerSummary, VXCORE_ERR_UNSUPPORTED);
+    std::memcpy(out.body.get(), encoded.data(), encoded.size());
+    out.event.data = out.body.get();
+    out.event.size = encoded.size();
+    copy_field(out.notebook, notebook_id);
+    copy_field(out.node, node_id);
+  }
+  vxm_drafts::OwnerFacts draft_facts(std::string &disk) {
+    vxm_drafts::OwnerFacts facts;
+    facts.notebook_id = notebook_id;
+    facts.node_id = node_id;
+    facts.notebook_relative = fs::u8path(notebook_path).filename().u8string();
+    Json metadata;
+    check(static_cast<VxCoreError>(vxm_transfer::PreflightResource(context, notebook_id,
+        node_id, notebook_path, metadata)));
+    require(metadata.at("notebookId") == notebook_id && metadata.at("nodeId") == node_id,
+            VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    note_metadata();
+    buffer_metadata();
+    require(metadata.at("notePath") == note_path, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    VxCoreLineEnding ending;
+    check(vxcore_buffer_get_line_ending_override(context, buffer_id.c_str(), &ending));
+    facts.eol = ending;
+    facts.editor_type = editor_type == VXM_EDITOR_MARKDOWN ? "markdown" : "text";
+    facts.path_hint = note_path;
+    confined(fs::u8path(notebook_path), note_path);
+    disk = vxm_import::storage::Read(fs::u8path(notebook_path) / fs::u8path(note_path), kSource);
+    source_valid(reinterpret_cast<const uint8_t *>(disk.data()), disk.size());
+    facts.disk_hash = vxm_import::storage::Hash(disk);
+    facts.exists = facts.ordinary = true;
+    return facts;
+  }
+  void draft(Request &request) {
+    const auto input = Json::parse(request.input.begin(), request.input.end());
+    const auto root = input.at("draftsRoot").get<std::string>();
+    const auto key = input.at("documentKey").get<std::string>();
+    const auto token = input.at("token").get<std::string>();
+    std::string disk;
+    vxm_drafts::OwnerFacts facts;
+    try { facts = draft_facts(disk); }
+    catch (const Failure &failure) {
+      if (request.operation == kDraftWrite || failure.code == VXCORE_ERR_OUT_OF_MEMORY) throw;
+      facts.notebook_id = notebook_id;
+      facts.node_id = node_id;
+      facts.notebook_relative = fs::u8path(notebook_path).filename().u8string();
+    } catch (const vxm_import::StorageFailure &failure) {
+      if (request.operation == kDraftWrite || failure.code == VXCORE_ERR_OUT_OF_MEMORY) throw;
+      facts.notebook_id = notebook_id;
+      facts.node_id = node_id;
+      facts.notebook_relative = fs::u8path(notebook_path).filename().u8string();
+    }
+    Json output;
+    if (request.operation != kDraftWrite) {
+      // Inspection uses the same actual-state matrix as explicit recovery; an
+      // observed intended output becomes saved ONLY after the receipt commits.
+      check(static_cast<VxCoreError>(vxm_drafts::Reconcile(root, key, token, facts, output)));
+    } else {
+      require(mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
+      const auto candidate_id = input.at("candidateId").get<std::string>();
+      vxm_drafts::PreparedSave candidate;
+      check(static_cast<VxCoreError>(vxm_drafts::LoadCandidate(root, key, token, candidate_id, candidate)));
+      require(candidate.document_key == key && candidate.token == token && candidate.candidate_id == candidate_id &&
+              candidate.notebook_id == notebook_id && candidate.node_id == node_id &&
+              candidate.notebook_relative == fs::u8path(notebook_path).filename().u8string() &&
+              facts.ordinary && facts.exists && candidate.editor_type == facts.editor_type && candidate.eol == facts.eol,
+              VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      require(candidate.expected_disk_hash == facts.disk_hash, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      require(vxm_import::storage::Hash(candidate.source) == candidate.source_hash, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      if (candidate.intended_disk_hash != facts.disk_hash) {
+        std::string converted;
+        const auto intended = vxm_drafts::ProjectDisk(candidate.source, disk, facts.eol, converted);
+        require(vxm_import::storage::Hash(intended) == candidate.intended_disk_hash, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        // Core reload verifies that its current raw view agrees with the guarded
+        // file read, and clears any prior failed save's in-memory dirty buffer.
+        const uint8_t *raw = nullptr;
+        size_t size = 0;
+        reload(raw, size);
+        require(size == disk.size() && (!size || std::memcmp(raw, disk.data(), size) == 0), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        VxCoreLineEnding current_ending;
+        check(vxcore_buffer_get_line_ending_override(context, buffer_id.c_str(), &current_ending));
+        require(current_ending == candidate.eol &&
+                candidate.editor_type == (editor_type == VXM_EDITOR_MARKDOWN ? "markdown" : "text"),
+                VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        check(vxcore_buffer_set_content_raw(context, buffer_id.c_str(), intended.data(), intended.size()));
+        check(vxcore_buffer_save(context, buffer_id.c_str()));
+        reload(raw, size);
+        require(size == intended.size() && (!size || std::memcmp(raw, intended.data(), size) == 0), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        facts = draft_facts(disk);
+        require(facts.disk_hash == candidate.intended_disk_hash && facts.eol == candidate.eol &&
+                facts.editor_type == candidate.editor_type, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      }
+      // No source watermark changes until this durable publication succeeds.
+      // On failure the candidate remains the reconciliation authority.
+      check(static_cast<VxCoreError>(vxm_drafts::CommitSaved(root, key, token, candidate_id, facts, output)));
+    }
+    owner_summary(*request.result, output);
+  }
+  void preview(Request &request) {
+    note_metadata();
+    buffer_metadata();
+    require(editor_type == VXM_EDITOR_MARKDOWN, VXCORE_ERR_UNSUPPORTED);
+    Json output;
+    check(static_cast<VxCoreError>(vxm_preview::Prepare(context, notebook_id, node_id,
+        note_path, notebook_path, Json::parse(request.command), request.input.data(),
+        request.input.size(), &read_cancelled, output)));
+    owner_summary(*request.result, output);
   }
   int32_t teardown() noexcept {
     std::lock_guard<std::mutex> core_lock(core_owner_gate);
@@ -2149,7 +2303,7 @@ struct VxmHost {
         request->cancelled |= stopping;
         const auto kind = request->result->event.kind;
         if ((kind == VXM_EVENT_QUERY && request->operation == kSearch) ||
-            kind == VXM_EVENT_EXPORT ||
+            kind == VXM_EVENT_EXPORT || kind == VXM_EVENT_PREVIEW ||
             (kind == VXM_EVENT_COHORT && request->operation == kBuild) ||
             (kind == VXM_EVENT_RESOURCE && (request->operation == kResourceList || request->operation == kResourceExport))) {
           active_read_only = request->result->event.request_id;
@@ -2166,6 +2320,8 @@ struct VxmHost {
           require(init_error == VXCORE_OK, init_error);
           if (event.kind == VXM_EVENT_READ) read_note(*request);
           else if (event.kind == VXM_EVENT_WRITE) write_note(*request);
+          else if (event.kind == VXM_EVENT_DRAFT) draft(*request);
+          else if (event.kind == VXM_EVENT_PREVIEW) preview(*request);
           else if (event.kind == VXM_EVENT_LIST) list_catalog(*request);
           else if (event.kind == VXM_EVENT_MUTATE) mutate_catalog(*request);
           else if (event.kind == VXM_EVENT_QUERY) query_catalog(*request);
@@ -2175,6 +2331,7 @@ struct VxmHost {
           else throw Failure{VXCORE_ERR_INVALID_STATE};
         }
       } catch (const Failure &failure) { event.code = failure.code; failure_message = failure.message; }
+      catch (const vxm_import::StorageFailure &failure) { event.code = failure.code; }
       catch (const std::bad_alloc &) { event.code = VXCORE_ERR_OUT_OF_MEMORY; }
       catch (const Json::exception &) { event.code = VXCORE_ERR_JSON_PARSE; }
       catch (const fs::filesystem_error &) { event.code = VXCORE_ERR_IO; }
@@ -2197,8 +2354,8 @@ struct VxmHost {
       if (event.code != VXCORE_OK) {
         event.size = 0;
         event.data = nullptr;
-        if (event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT || transfer_event(event.kind)) request->result->body.reset();
-        if (event.kind == VXM_EVENT_CATALOG_OPEN || event.kind == VXM_EVENT_LIST || event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT || transfer_event(event.kind))
+        if (event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT || event.kind == VXM_EVENT_DRAFT || event.kind == VXM_EVENT_PREVIEW || transfer_event(event.kind)) request->result->body.reset();
+        if (event.kind == VXM_EVENT_CATALOG_OPEN || event.kind == VXM_EVENT_LIST || event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT || event.kind == VXM_EVENT_DRAFT || event.kind == VXM_EVENT_PREVIEW || transfer_event(event.kind))
           request->result->shrink(0);
       }
       auto result = std::move(request->result);
@@ -2223,7 +2380,8 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
               uint64_t revision, const char *hash, const uint8_t *data, uint64_t size,
               size_t metadata_cost = 0, int32_t operation = 0,
               const char *node = nullptr, const char *name = nullptr, const char *destination = nullptr,
-              uint64_t staging_budget = 0, int32_t export_format = VXM_EXPORT_NOTEBOOK) {
+              uint64_t staging_budget = 0, int32_t export_format = VXM_EXPORT_NOTEBOOK,
+              const char *command = nullptr) {
   try {
     require(revision <= kMaxRevision);
     source_valid(data, size);
@@ -2231,13 +2389,13 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     const bool exporting = kind == VXM_EVENT_EXPORT;
     require(!exporting || export_format == VXM_EXPORT_NOTEBOOK || export_format == VXM_EXPORT_FILES_AND_ASSETS);
     require(!exporting || host.export_only, VXCORE_ERR_INVALID_STATE);
-    require(!host.export_only || (kind != VXM_EVENT_MUTATE && kind != VXM_EVENT_TAG && kind != VXM_EVENT_WRITE && !transfer_event(kind)),
+    require(!host.export_only || (kind != VXM_EVENT_MUTATE && kind != VXM_EVENT_TAG && kind != VXM_EVENT_WRITE && kind != VXM_EVENT_DRAFT && kind != VXM_EVENT_PREVIEW && !transfer_event(kind)),
             VXCORE_ERR_INVALID_STATE);
     const bool query = kind == VXM_EVENT_QUERY;
     const bool catalog = kind == VXM_EVENT_CATALOG_OPEN || kind == VXM_EVENT_LIST || query;
     const bool source = kind == VXM_EVENT_OPEN || kind == VXM_EVENT_READ;
     const bool transfer = transfer_event(kind);
-    if (kind == VXM_EVENT_RESOURCE || kind == VXM_EVENT_RESOURCE_OPEN)
+    if (kind == VXM_EVENT_RESOURCE || kind == VXM_EVENT_RESOURCE_OPEN || kind == VXM_EVENT_DRAFT)
       require(host.mode == VXM_MODE_NOTE || host.mode == VXM_MODE_RESOURCES, VXCORE_ERR_INVALID_STATE);
     else if (kind == VXM_EVENT_COHORT)
       require(host.mode == VXM_MODE_CATALOG || host.mode == VXM_MODE_COHORT_BUILDER, VXCORE_ERR_INVALID_STATE);
@@ -2246,6 +2404,9 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     else require((catalog || exporting || kind == VXM_EVENT_MUTATE || kind == VXM_EVENT_TAG) ? host.mode == VXM_MODE_CATALOG : host.mode == VXM_MODE_NOTE, VXCORE_ERR_INVALID_STATE);
     if (query || kind == VXM_EVENT_TAG) operation = catalog_operation(data, static_cast<size_t>(size), kind);
     if (transfer) operation = transfer_operation(data, static_cast<size_t>(size), kind, host.mode);
+    if (kind == VXM_EVENT_DRAFT) operation = draft_operation(data, static_cast<size_t>(size), host.mode);
+    auto command_value = optional_string(command);
+    if (kind == VXM_EVENT_PREVIEW) preview_command(command_value);
     auto node_value = optional_string(node);
     auto name_value = optional_string(name);
     auto destination_value = optional_string(destination);
@@ -2260,8 +2421,9 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     std::lock_guard<std::mutex> lock(host.mutex);
     require(!host.stopping && generation == host.generation && id > host.last_request && id <= kMaxRevision, VXCORE_ERR_INVALID_STATE);
     std::lock_guard<std::mutex> capacity_lock(host.capacity->mutex);
-    const size_t input_cost = static_cast<size_t>(size) + metadata_cost + node_value.size() + name_value.size() + destination_value.size() + (hash ? 64 : 0);
-    const size_t body_cost = transfer ? (operation == kResourceList ? kCatalog : kString) :
+    const size_t input_cost = static_cast<size_t>(size) + metadata_cost + node_value.size() + name_value.size() + destination_value.size() + command_value.size() + (hash ? 64 : 0);
+    const bool owner_json = kind == VXM_EVENT_DRAFT || kind == VXM_EVENT_PREVIEW;
+    const size_t body_cost = owner_json ? kOwnerSummary : transfer ? (operation == kResourceList ? kCatalog : kString) :
         exporting ? kExportSummary : catalog ? kCatalog : source ? kSource : 0;
     const size_t output_cost = kMetadata + body_cost;
     auto &capacity = *host.capacity;
@@ -2269,12 +2431,13 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     auto request = std::make_unique<Request>();
     request->result = std::make_unique<EventStorage>();
     auto &result = *request->result;
-    if (source || query || exporting || transfer) result.body.reset(new uint8_t[body_cost]);
+    if (source || query || exporting || transfer || owner_json) result.body.reset(new uint8_t[body_cost]);
     if (size) request->input.assign(data, data + static_cast<size_t>(size));
     if (hash) request->expected_hash = hash;
     request->node = std::move(node_value);
     request->name = std::move(name_value);
     request->destination = std::move(destination_value);
+    request->command = std::move(command_value);
     request->operation = operation;
     request->input_cost = input_cost;
     request->staging_budget = staging_budget;
@@ -2389,6 +2552,14 @@ int32_t vxm_host_cohort(VxmHost *host, uint64_t id, uint64_t generation, const c
 }
 int32_t vxm_host_resource(VxmHost *host, uint64_t id, uint64_t generation, const char *json) {
   return admit_catalog_json(host, VXM_EVENT_RESOURCE, id, generation, json);
+}
+int32_t vxm_host_draft(VxmHost *host, uint64_t id, uint64_t generation, const char *json) {
+  return admit_catalog_json(host, VXM_EVENT_DRAFT, id, generation, json);
+}
+int32_t vxm_host_preview(VxmHost *host, uint64_t id, uint64_t generation,
+                         const char *json, const uint8_t *source, uint64_t size) {
+  return host ? admit(*host, VXM_EVENT_PREVIEW, id, generation, 0, nullptr, source, size,
+                       0, 0, nullptr, nullptr, nullptr, 0, VXM_EXPORT_NOTEBOOK, json) : VXCORE_ERR_NULL_POINTER;
 }
 int32_t vxm_host_catalog_export(VxmHost *host, uint64_t id, uint64_t generation, int32_t format,
                                 const char *destination, uint64_t staging_budget_bytes) {

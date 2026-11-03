@@ -12,6 +12,23 @@ library;
 
 import 'dart:ffi' as ffi;
 
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+    ffi.Pointer<VxmImportCancel>,
+    ffi.Pointer<ffi.Pointer<ffi.Char>>,
+  )
+>()
+external int vxm_draft_run(
+  ffi.Pointer<ffi.Char> request_json,
+  ffi.Pointer<ffi.Uint8> payload,
+  int size,
+  ffi.Pointer<VxmImportCancel> cancel,
+  ffi.Pointer<ffi.Pointer<ffi.Char>> out_json,
+);
+
 @ffi.Native<ffi.Void Function(ffi.Pointer<VxmEvent>)>()
 external void vxm_event_free(ffi.Pointer<VxmEvent> event);
 
@@ -140,8 +157,42 @@ external int vxm_host_create(
 @ffi.Native<ffi.Void Function(ffi.Pointer<VxmHost>)>()
 external void vxm_host_destroy(ffi.Pointer<VxmHost> host);
 
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_draft(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> json,
+);
+
 @ffi.Native<ffi.Uint64 Function(ffi.Pointer<VxmHost>)>()
 external int vxm_host_generation(ffi.Pointer<VxmHost> host);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Uint8>,
+    ffi.Uint64,
+  )
+>()
+external int vxm_host_preview(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> json,
+  ffi.Pointer<ffi.Uint8> source,
+  int size,
+);
 
 @ffi.Native<ffi.Int32 Function(ffi.Pointer<VxmHost>, ffi.Uint64, ffi.Uint64)>()
 external int vxm_host_read(
@@ -253,6 +304,19 @@ external ffi.Pointer<ffi.Char> vxm_native_notices();
     ffi.Pointer<ffi.Pointer<ffi.Char>>,
   )
 >()
+external int vxm_preview_run(
+  ffi.Pointer<ffi.Char> request_json,
+  ffi.Pointer<VxmImportCancel> cancel,
+  ffi.Pointer<ffi.Pointer<ffi.Char>> out_json,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<VxmImportCancel>,
+    ffi.Pointer<ffi.Pointer<ffi.Char>>,
+  )
+>()
 external int vxm_transfer_run(
   ffi.Pointer<ffi.Char> request_json,
   ffi.Pointer<VxmImportCancel> cancel,
@@ -277,6 +341,8 @@ const int VXM_EVENT_COHORT = 13;
 
 const int VXM_EVENT_COHORT_OPEN = 11;
 
+const int VXM_EVENT_DRAFT = 15;
+
 const int VXM_EVENT_EXPORT = 10;
 
 const int VXM_EVENT_LIST = 6;
@@ -284,6 +350,8 @@ const int VXM_EVENT_LIST = 6;
 const int VXM_EVENT_MUTATE = 7;
 
 const int VXM_EVENT_OPEN = 1;
+
+const int VXM_EVENT_PREVIEW = 16;
 
 const int VXM_EVENT_QUERY = 8;
 

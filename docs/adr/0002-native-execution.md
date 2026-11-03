@@ -150,12 +150,12 @@ filesystem repairs. Ordinary text suffixes do not receive a Markdown move parser
 
 `CoreNotebook.openExportCatalog` is the only snapshot-capable factory. It sets
 `export_only`, requires the observed notebook UUID, forbids creation and rejects
-mutations. Ordinary catalog opening/recovery is unchanged. Before context creation,
-export-only initialization checks bounded persisted session state for notebook,
-buffer and workspace auto-restore records; otherwise context construction could
-recover another notebook before the explicit selected open. It refuses restore,
-source-changing recovery residue, malformed/unsafe required metadata and tag
-migration cases. The user must complete normal open/recovery first. The public
+mutations. Explicit-root contexts start without legacy notebook/buffer/workspace
+restoration; app-owned draft recovery and explicit selected opens own admission.
+Before context creation, export-only initialization retains native-root isolation
+and no-follow regular/single-link session-file identity checks for later writeback.
+It refuses selected-notebook source-changing recovery residue, malformed/unsafe
+required metadata and tag migration cases. The user must complete normal open/recovery first. The public
 sync reconfiguration guard runs after the proven-clean core open.
 
 `vxm_host_catalog_export` takes an explicit notebook or files/assets format,
@@ -219,6 +219,33 @@ synchronous transfer reservation prevents import/export staging overlap before a
 await. Shutdown drains post-publication completion; cancellation/error is not
 proof of rollback. Recovery validates the journal and directory identities before
 normal discovery or cleanup. See ADR 0006 for the exact publication boundary.
+
+### Durable source and preview operations
+
+`vxm_draft_run` is a synchronous pure-filesystem ABI for joined worker isolates:
+16 KiB closed commands, at most 8 MiB binary append payload (4 MiB source), 64 KiB
+summaries, and at most 32 MiB for explicitly requested source reads. It shares the
+existing cancellation/result-free conventions and never borrows a core context.
+One native journal/quota mutex serializes durable authority across FS isolates and
+owner commands. Frames, manifests, checkpoints, save candidates, receipts and
+export pins use the same no-follow/atomic-flush primitives, not Dart notebook writes.
+
+`vxm_host_draft` queues bounded inspect/reconcile/write commands on the existing
+owner. NOTE writes consume a previously durable immutable candidate; recovery can
+use a metadata-only RESOURCES owner. Identity, protection, EOL policy and exact disk
+hash are checked under the core gate before mutation. Once dispatched, write/receipt
+outcomes drain; cancellation never fabricates saved proof. `VXM_EVENT_DRAFT`
+returns the matched prefix/outcome, and a failed receipt retains the candidate.
+
+`vxm_host_preview` is NOTE-only: it captures at most 4 MiB current source and
+resolves bounded confined resource/navigation capabilities without writing the note.
+`VXM_EVENT_PREVIEW` carries a small snapshot summary; `vxm_preview_run` performs
+joined FS manifest/media/export operations with a 16 MiB maximum response. A
+cancelled capture cannot install output, and staging retirement waits for all
+readers, renderer completion and immutable export references. Android renderer
+cancellation uses a separately scheduled, live-identity-checked process watchdog;
+it never terminates the main Flutter/editor process. See ADR 0004 for capability
+gates and the non-equivalent WK teardown limitation.
 
 ### Additional upstream concurrency gate
 

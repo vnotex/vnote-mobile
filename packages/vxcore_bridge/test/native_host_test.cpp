@@ -204,6 +204,245 @@ struct Host {
   }
 };
 
+Json draft_fs(Json command, const std::string &payload = std::string()) {
+  char *result = nullptr;
+  const auto json = command.dump();
+  const auto code = vxm_draft_run(json.c_str(), reinterpret_cast<const uint8_t *>(payload.data()),
+                                 payload.size(), nullptr, &result);
+  std::unique_ptr<char, decltype(&vxm_import_result_free)> owned(result, vxm_import_result_free);
+  CHECK(code == VXCORE_OK && result);
+  return Json::parse(result);
+}
+Json draft_command(const Json &capture, const char *op) {
+  auto result = capture;
+  result["op"] = op;
+  return result;
+}
+void append_draft(const Json &capture, uint64_t base, uint64_t offset, const std::string &insert) {
+  auto command = draft_command(capture, "append");
+  command["expectedRevision"] = base;
+  Json frame;
+  frame["token"] = capture.at("token");
+  frame["baseRevision"] = base;
+  frame["revision"] = base + 1;
+  frame["requestId"] = "edit-" + std::to_string(base + 1);
+  frame["changes"] = Json::array({Json{{"from", offset}, {"to", offset}, {"insert", insert}}});
+  frame["selection"] = Json{{"anchor", offset + insert.size()}, {"head", offset + insert.size()}};
+  const auto batch = Json{{"frames", Json::array({frame})}}.dump();
+  CHECK(draft_fs(command, batch).at("revision") == base + 1);
+}
+
+void durable_candidates_preserve_later_prefix_and_epoch() {
+  Fixture fixture;
+  const std::string initial = "base\r\n";
+  fixture.seed(initial);
+  const auto config_path = fs::u8path(fixture.notebook) / "vx_notebook/config.json";
+  auto config = Json::parse(disk(config_path));
+  config["metadata"]["lineEnding"] = "crlf";
+  external_write(config_path, config.dump());
+  Json capture;
+  {
+    Host host(fixture, initial);
+    auto opened = host.next();
+    CHECK(opened->code == VXCORE_OK);
+    fs::create_directory(fixture.root / "drafts");
+    const auto key = draft_fs(Json{{"op", "key"}, {"notebookId", fixture.notebook_id},
+                                  {"nodeId", fixture.node_id}}).at("documentKey");
+    capture = Json{{"draftsRoot", (fixture.root / "drafts").u8string()},
+                   {"documentKey", key}, {"token", std::string(32, 'a')}};
+    auto begin = draft_command(capture, "begin");
+    begin["descriptor"] = Json{{"notebookRelative", "book"}, {"notebookId", fixture.notebook_id},
+        {"nodeId", fixture.node_id}, {"pathHint", "Welcome.md"}, {"editorType", "markdown"},
+        {"openingDiskHash", opened->base_hash}, {"eol", opened->line_ending}};
+    CHECK(draft_fs(begin, initial).at("revision") == 0);
+    append_draft(capture, 0, initial.size(), "one\n");
+    auto prepare = draft_command(capture, "prepareSave");
+    prepare["revision"] = 1;
+    prepare["requestId"] = "save-one";
+    const auto candidate = draft_fs(prepare);
+    append_draft(capture, 1, initial.size() + 4, "two\n");
+    auto write = draft_command(capture, "write");
+    write["candidateId"] = candidate.at("candidateId");
+    const auto encoded = write.dump();
+    CHECK(vxm_host_draft(host.handle, 2, host.generation + 1, encoded.c_str()) == VXCORE_ERR_INVALID_STATE);
+    CHECK(vxm_host_draft(host.handle, 2, host.generation, encoded.c_str()) == VXCORE_OK);
+    auto saved = host.next();
+    CHECK(saved->code == VXCORE_OK && saved->kind == VXM_EVENT_DRAFT && saved->revision == 0);
+    const auto receipt = Json::parse(text(saved));
+    CHECK(receipt.at("token") == capture.at("token") && receipt.at("savedRevision") == 1);
+    CHECK(disk(fixture.note()) == initial + "one\r\n");
+    const auto later = draft_fs(draft_command(capture, "read"));
+    CHECK(later.at("revision") == 2 && later.at("source") == initial + "one\ntwo\n");
+    CHECK(later.at("savedRevision") == 1);
+    auto reconcile = draft_command(capture, "reconcile").dump();
+    CHECK(vxm_host_draft(host.handle, 3, host.generation, reconcile.c_str()) == VXCORE_OK);
+    auto inspected = host.next();
+    CHECK(inspected->code == VXCORE_OK && Json::parse(text(inspected)).at("outcome") == "saved");
+    CHECK(disk(fixture.note()) == initial + "one\r\n");
+    prepare["revision"] = 2;
+    prepare["requestId"] = "save-two";
+    write["candidateId"] = draft_fs(prepare).at("candidateId");
+    auto next_write = write.dump();
+    CHECK(vxm_host_draft(host.handle, 4, host.generation, reconcile.c_str()) == VXCORE_OK);
+    inspected = host.next();
+    CHECK(inspected->code == VXCORE_OK);
+    const auto retryable = Json::parse(text(inspected));
+    CHECK(retryable.at("outcome") == "saved" && retryable.at("canRetry") == true);
+    CHECK(retryable.at("savedRevision") == 1 && disk(fixture.note()) == initial + "one\r\n");
+    CHECK(vxm_host_draft(host.handle, 5, host.generation, next_write.c_str()) == VXCORE_OK);
+    CHECK(host.next()->code == VXCORE_OK);
+    auto rebase = draft_command(capture, "rebase");
+    rebase["newToken"] = std::string(32, 'b');
+    CHECK(draft_fs(rebase).at("token") == std::string(32, 'b'));
+    capture["token"] = std::string(32, 'b');
+    prepare = draft_command(capture, "prepareSave");
+    prepare["revision"] = 0;
+    prepare["requestId"] = "new-token-zero";
+    write = draft_command(capture, "write");
+    write["candidateId"] = draft_fs(prepare).at("candidateId");
+    next_write = write.dump();
+    CHECK(vxm_host_draft(host.handle, 6, host.generation, next_write.c_str()) == VXCORE_OK);
+    saved = host.next();
+    CHECK(saved->code == VXCORE_OK && Json::parse(text(saved)).at("savedRevision") == 0);
+    CHECK(disk(fixture.note()) == initial + "one\r\ntwo\r\n");
+    append_draft(capture, 0, initial.size() + 8, "third\n");
+    prepare["revision"] = 1;
+    prepare["requestId"] = "ambiguous-core-write";
+    const auto ambiguous = draft_fs(prepare);
+    // Model a completed core save whose process died before receipt publication.
+    // Recovery proves bytes, persists the receipt, and must not rewrite them.
+    external_write(fixture.note(), initial + "one\r\ntwo\r\nthird\r\n");
+    const auto observed_time = fs::last_write_time(fixture.note());
+    reconcile = draft_command(capture, "reconcile").dump();
+    CHECK(vxm_host_draft(host.handle, 7, host.generation, reconcile.c_str()) == VXCORE_OK);
+    inspected = host.next();
+    CHECK(inspected->code == VXCORE_OK);
+    const auto recovered = Json::parse(text(inspected));
+    CHECK(recovered.at("outcome") == "saved" && recovered.at("savedRevision") == 1);
+    CHECK(recovered.at("completedCandidateId") == ambiguous.at("candidateId"));
+    CHECK(fs::last_write_time(fixture.note()) == observed_time);
+    host.close();
+  }
+  {
+    Host host(fixture, ResourceOnly{});
+    CHECK(host.next()->code == VXCORE_OK);
+    const auto command = draft_command(capture, "inspect").dump();
+    CHECK(vxm_host_draft(host.handle, 2, host.generation, command.c_str()) == VXCORE_OK);
+    auto inspected = host.next();
+    CHECK(inspected->code == VXCORE_OK && Json::parse(text(inspected)).at("outcome") == "saved");
+    external_write(fixture.note(), "newer external source");
+    CHECK(vxm_host_draft(host.handle, 3, host.generation, command.c_str()) == VXCORE_OK);
+    inspected = host.next();
+    CHECK(inspected->code == VXCORE_OK && Json::parse(text(inspected)).at("outcome") == "conflict");
+    CHECK(disk(fixture.note()) == "newer external source");
+    CHECK(draft_fs(draft_command(capture, "read")).at("source") == initial + "one\ntwo\nthird\n");
+    auto forbidden = draft_command(capture, "write");
+    forbidden["candidateId"] = std::string(32, 'c');
+    CHECK(vxm_host_draft(host.handle, 4, host.generation, forbidden.dump().c_str()) == VXCORE_ERR_INVALID_STATE);
+    host.close();
+  }
+}
+
+void durable_undo_to_opening_rebase_preserves_original_source() {
+  Fixture fixture;
+  const std::string original = "one\r\ntwo\r\n";
+  fixture.seed(original);
+  const auto config_path = fs::u8path(fixture.notebook) / "vx_notebook/config.json";
+  auto config = Json::parse(disk(config_path));
+  config["metadata"]["lineEnding"] = "lf";
+  external_write(config_path, config.dump());
+  Host host(fixture, original);
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK && opened->line_ending == VXCORE_LINE_ENDING_LF);
+  const std::string opening_hash = opened->base_hash;
+  fs::create_directory(fixture.root / "drafts");
+  const auto key = draft_fs(Json{{"op", "key"}, {"notebookId", fixture.notebook_id},
+                                {"nodeId", fixture.node_id}}).at("documentKey");
+  Json capture{{"draftsRoot", (fixture.root / "drafts").u8string()},
+               {"documentKey", key}, {"token", std::string(32, 'd')}};
+  auto begin = draft_command(capture, "begin");
+  begin["descriptor"] = Json{{"notebookRelative", "book"}, {"notebookId", fixture.notebook_id},
+      {"nodeId", fixture.node_id}, {"pathHint", "Welcome.md"}, {"editorType", "markdown"},
+      {"openingDiskHash", opening_hash}, {"eol", opened->line_ending}};
+  draft_fs(begin, original);
+  append_draft(capture, 0, original.size(), "new\n");
+  auto prepare = draft_command(capture, "prepareSave");
+  prepare["revision"] = 1;
+  prepare["requestId"] = "before-undo";
+  auto command = draft_command(capture, "write");
+  command["candidateId"] = draft_fs(prepare).at("candidateId");
+  CHECK(vxm_host_draft(host.handle, 2, host.generation, command.dump().c_str()) == VXCORE_OK);
+  CHECK(host.next()->code == VXCORE_OK);
+  CHECK(disk(fixture.note()) == "one\ntwo\nnew\n");
+
+  // Undo the source edit, not the native EOL encoding. The source hash returns
+  // to the opening hash while the next saved disk hash intentionally does not.
+  auto append = draft_command(capture, "append");
+  append["expectedRevision"] = 1;
+  Json frame;
+  frame["token"] = capture.at("token");
+  frame["baseRevision"] = 1;
+  frame["revision"] = 2;
+  frame["requestId"] = "undo-source-edit";
+  frame["changes"] = Json::array({Json{{"from", original.size()}, {"to", original.size() + 4}, {"insert", ""}}});
+  frame["selection"] = Json{{"anchor", original.size()}, {"head", original.size()}};
+  draft_fs(append, Json{{"frames", Json::array({frame})}}.dump());
+  prepare["revision"] = 2;
+  prepare["requestId"] = "after-undo";
+  command["candidateId"] = draft_fs(prepare).at("candidateId");
+  CHECK(vxm_host_draft(host.handle, 3, host.generation, command.dump().c_str()) == VXCORE_OK);
+  auto saved = host.next();
+  CHECK(saved->code == VXCORE_OK);
+  const auto receipt = Json::parse(text(saved));
+  CHECK(receipt.at("savedSourceHash") == opening_hash && receipt.at("savedDiskHash") != opening_hash);
+  CHECK(disk(fixture.note()) == "one\ntwo\n");
+
+  auto rebase = draft_command(capture, "rebase");
+  rebase["newToken"] = std::string(32, 'e');
+  const auto rebased = draft_fs(rebase);
+  CHECK(rebased.at("revision") == 0 && rebased.at("savedRevision").is_null());
+  capture["token"] = std::string(32, 'e');
+  CHECK(draft_fs(draft_command(capture, "read")).at("source") == original);
+  command = draft_command(capture, "reconcile");
+  CHECK(vxm_host_draft(host.handle, 4, host.generation, command.dump().c_str()) == VXCORE_OK);
+  auto inspected = host.next();
+  CHECK(inspected->code == VXCORE_OK);
+  const auto established = Json::parse(text(inspected));
+  CHECK(established.at("outcome") == "saved" && established.at("savedRevision") == 0);
+  CHECK(established.at("savedSourceHash") == opening_hash);
+  CHECK(established.at("savedDiskHash") == receipt.at("savedDiskHash"));
+  CHECK(disk(fixture.note()) == "one\ntwo\n");
+  CHECK(draft_fs(draft_command(capture, "read")).at("source") == original);
+  host.close();
+}
+
+void preview_admission_and_pending_cancel_preserve_source() {
+  Fixture fixture;
+  Host host(fixture, "disk source", true);
+  host.signals.wait_entered();
+  auto opened = host.next();
+  CHECK(opened->code == VXCORE_OK);
+  fs::create_directory(fixture.root / "previews");
+  Json command{{"op", "prepare"}, {"previewRoot", (fixture.root / "previews").u8string()},
+               {"previewId", std::string(32, 'a')}, {"renderId", std::string(32, 'b')},
+               {"sourceRevision", 7}};
+  const std::string source = "# unsaved mirror";
+  const auto *bytes = reinterpret_cast<const uint8_t *>(source.data());
+  auto malformed = command;
+  malformed["token"] = std::string(32, 'c');
+  CHECK(vxm_host_preview(host.handle, 2, host.generation, malformed.dump().c_str(), bytes,
+                         source.size()) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(vxm_host_preview(host.handle, 2, host.generation, command.dump().c_str(), bytes,
+                         source.size()) == VXCORE_OK);
+  CHECK(vxm_host_cancel(host.handle, 2, host.generation) == VXCORE_OK);
+  host.signals.release();
+  auto cancelled = host.next();
+  CHECK(cancelled->kind == VXM_EVENT_PREVIEW && cancelled->code == VXCORE_ERR_CANCELLED);
+  CHECK(cancelled->data == nullptr && cancelled->size == 0);
+  CHECK(fs::is_empty(fixture.root / "previews") && disk(fixture.note()) == "disk source");
+  host.close();
+}
+
 std::map<fs::path, std::string> snapshot(const fs::path &root) {
   std::map<fs::path, std::string> result;
   const auto capture = [&](const fs::path &path) {
@@ -1758,14 +1997,14 @@ void catalog_export_entry_limit() {
 }
 
 
-void catalog_export_refuses_persisted_foreign_restore() {
+void catalog_export_ignores_legacy_session() {
   Fixture fixture, foreign;
   fixture.seed("selected notebook");
   foreign.seed("foreign notebook");
   const auto foreign_root = fs::u8path(foreign.notebook);
   const auto journal = foreign_root / "vx_notebook/vx_import/unresolved/journal.json";
   fs::create_directories(journal.parent_path());
-  external_write(journal, "not-json"); // Ordinary core restore would discard this tree.
+  external_write(journal, "not-json");
   const auto session_path = fs::u8path(fixture.local) / "vxsession.json";
   const auto clean = disk(session_path);
   const auto foreign_before = snapshot(foreign_root);
@@ -1773,42 +2012,39 @@ void catalog_export_refuses_persisted_foreign_restore() {
   Json session = Json::parse(clean);
   session["notebooks"] = Json::array({Json{{"id", foreign.notebook_id}, {"rootFolder", foreign.notebook},
                                            {"type", "bundled"}, {"readOnly", false}}});
-  const auto refused = [&] {
-    const auto session_bytes = disk(session_path);
-    {
-      Host host(fixture, ExportOnly{});
-      auto opened = host.next();
-      CHECK(opened->code != VXCORE_OK);
-      CHECK(std::string(opened->message).find("normal notebook open and recovery") != std::string::npos);
-      host.close();
-    }
-    CHECK(disk(session_path) == session_bytes);
+  const auto admitted = [&] {
+    Host host(fixture, ExportOnly{});
+    CHECK(host.next()->code == VXCORE_OK);
+    host.close();
     CHECK(snapshot(foreign_root) == foreign_before);
     CHECK(snapshot(fs::u8path(fixture.notebook)) == selected_before);
   };
   external_write(session_path, session.dump());
-  refused();
+  admitted();
   for (const auto *key : {"buffers", "workspaces"}) {
     session = Json::parse(clean);
-    session[key] = Json::array({Json::object()}); // Unsafe restore shape is refused before core parsing.
+    session[key] = Json::array({Json::object()});
     external_write(session_path, session.dump());
-    refused();
+    admitted();
   }
   external_write(session_path, "not-json");
-  refused();
+  admitted();
+  // Cold creation ignores contents, not unsafe aliases of later session writes.
   const auto linked_session = fixture.root / "linked-session.json";
   external_write(linked_session, clean);
   fs::remove(session_path);
   fs::create_hard_link(linked_session, session_path);
-  refused();
+  {
+    Host host(fixture, ExportOnly{});
+    CHECK(host.next()->code != VXCORE_OK);
+    host.close();
+  }
+  CHECK(disk(linked_session) == clean);
+  CHECK(snapshot(foreign_root) == foreign_before);
+  CHECK(snapshot(fs::u8path(fixture.notebook)) == selected_before);
   fs::remove(session_path);
   fs::remove(linked_session);
   external_write(session_path, clean);
-  {
-    Host host(fixture, ExportOnly{});
-    CHECK(host.next()->code == VXCORE_OK);
-    host.close();
-  }
 }
 
 void catalog_collects_exact_disk_identities() {
@@ -1955,7 +2191,7 @@ void resources_protected_open_is_refused() {
   }
 }
 
-void resource_owner_refuses_persisted_restore() {
+void resource_owner_ignores_legacy_session() {
   Fixture fixture, foreign;
   fixture.seed("selected body");
   foreign.seed("foreign body");
@@ -1969,10 +2205,10 @@ void resource_owner_refuses_persisted_restore() {
   const auto before = snapshot(fs::u8path(foreign.notebook));
   Host host(fixture, ResourceOnly{});
   auto opened = host.next();
-  CHECK(opened->kind == VXM_EVENT_RESOURCE_OPEN && opened->code != VXCORE_OK);
-  CHECK(opened->size == 0 && opened->data == nullptr);
-  CHECK(disk(session_path) == bytes && snapshot(fs::u8path(foreign.notebook)) == before);
+  CHECK(opened->kind == VXM_EVENT_RESOURCE_OPEN && opened->code == VXCORE_OK);
+  CHECK(snapshot(fs::u8path(foreign.notebook)) == before);
   host.close();
+  CHECK(snapshot(fs::u8path(foreign.notebook)) == before);
 }
 
 void resource_raw_attachment_names_are_not_normalized() {
@@ -2059,15 +2295,18 @@ int main() {
     catalog_export_cancellation_and_accounting();
     catalog_export_active_copy_and_source_change();
     catalog_export_entry_limit();
-    catalog_export_refuses_persisted_foreign_restore();
+    catalog_export_ignores_legacy_session();
     catalog_collects_exact_disk_identities();
     import_pure_helpers_are_bounded();
     resources_metadata_only_and_note_owner();
     resources_protected_open_is_refused();
     resource_output_credit_and_cancellation();
     cohort_admission_never_uses_export_owner();
-    resource_owner_refuses_persisted_restore();
+    resource_owner_ignores_legacy_session();
     resource_raw_attachment_names_are_not_normalized();
+    durable_candidates_preserve_later_prefix_and_epoch();
+    durable_undo_to_opening_rebase_preserves_original_source();
+    preview_admission_and_pending_cancel_preserve_source();
     std::cout << "Native host real-storage tests passed\n";
     return 0;
   } catch (const std::exception &error) {

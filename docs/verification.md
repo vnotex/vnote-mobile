@@ -2,7 +2,7 @@
 
 ## Gate status
 
-The managed-notebook native slice is implemented and exercised on Android. **Phase 0 publication and full Phase 1 gates remain open:** the new core pin is local until authorized publication, and iOS/physical-device checks are unperformed. Sections below retain the earlier editor-only evidence and add the native slice results separately. No personal notebook or production account is used.
+Managed notebooks and Phase 3 durable editing/isolated preview are implemented and exercised on Android. **Publication, iOS and physical-device gates remain open:** core pins are local until authorized publication; current public WK APIs do not meet the all-protocol editor/preview boundary. Earlier sections are historical checkpoint evidence; the final section records the current Phase 3 result and its limits. Only owned test notebooks are intentionally mutated; no production account is used.
 
 ## Source and host toolchain evidence
 
@@ -942,3 +942,162 @@ No iOS build/runtime, physical-device, actual power-loss/disk-full, provider
 revocation or OEM backup/transfer guarantee follows from these checks. The share
 inbox, durable editor drafts/autosave/preview, WebDAV, publication and release gates
 remain open. No repository was pushed.
+
+
+## Phase 3: durable editing and isolated preview
+
+Observed on the existing Windows host and Medium_Phone Android 17/API 37,
+16 KiB-page AVD with WebView 156.0.8078.47. No app-data reset or repository push.
+
+### Final automated and packaging checks
+
+| Executed check | Result |
+| --- | --- |
+| Pinned `node scripts/verify.mjs verify` | Passed dependency/assets, generated FFI drift, TypeScript and both Dart analyzers |
+| Editor/protocol/formatting/render policy tests | 103 passed |
+| Native bridge Dart tests | 159 passed; one Windows symlink-privilege skip |
+| Flutter tests | 416 passed; two platform skips |
+| Release `native_host_test` rebuild and execution | `Native host real-storage tests passed` |
+| Core cold-context prerequisite CTest selection | 6/6 passed: core, context paths, workspace, notebook-record reconciliation, session persistence and buffer |
+| Pinned `node scripts/verify.mjs android` | arm64-v8a and x86_64 packaged; all three LOAD segments in each native library aligned to 16,384 bytes |
+
+The installed APK SHA-256 matched the final build:
+`d3ef23e5cdcb3bb958e7e411d49ba01ab46bc19bc53d737db37f56b5bf8c32a9`.
+The separately reviewed core prerequisite is committed at
+`2ddf4281ccd14d79da6101cb26157e434f6ae243`; default desktop session restoration
+remains covered and unchanged. Explicit-root mobile contexts start cold rather
+than resurrecting a legacy open notebook/buffer before application ownership.
+
+Real-storage regressions cover torn unacknowledged tails, corrupt acknowledged
+frames, publication obstruction, immutable save/export candidates across
+compaction, UTF-16 boundaries, dirty revision-zero rebasing, exact source-versus-
+encoded-disk receipts, conflict reconciliation and bounded retention. Preview
+regressions cover confinement, MIME/dimensions, stale handles, immutable exports,
+joined revocation and prior-process reclamation without deleting unready exports,
+current unpublished pins, linked or unrecognized data.
+
+### Executed durable editor and recovery workflows
+
+- In the owned **Durability preview** notebook, actual CodeMirror input autosaved
+  303 UTF-8 bytes containing Japanese, accents, math and diagrams. Bold formatting
+  saved the next revision; one Undo restored all original bytes exactly.
+- Force-stop with an actual open native notebook/buffer, then cold-start/reopen,
+  preserved the saved source without implicit-session restoration failure.
+- A controlled external change to `Security.md` made autosave refuse. The UI
+  retained received/draft revision 2 and saved revision 1; force-stop/restart
+  recovered exact private `ZR` while preserving `External newer disk\n` on disk.
+  Restore refused the conflict. Actual Save As exported exact `ZR`; explicit
+  keep-disk/discard removed only the private recovery record.
+- In a second controlled conflict, restoring the known matching opening bytes
+  allowed explicit Restore. The new capture visibly began at received/draft 0
+  with **Saved none**, without modifying disk. Only its later real saved receipt
+  established revision 0 and exact `External newer disk\nX` on disk.
+- Corrupting an owned inactive manifest produced visible quarantine, not a
+  fabricated text recovery. Actual Save As emitted a 1,539-byte `VXDRAFT1` archive
+  containing the exact malformed manifest bytes. Explicit staging and draft
+  discard left the saved notebook body unchanged.
+
+### Executed renderer, navigation and native network boundary
+
+The native visible preview contained two MathML expressions, a flowchart and a
+sequence diagram, plus a decoded 16×16 local PNG. Its editor bridge was undefined.
+Raw/unsupported source remained nonactive. The final AVD screenshot shows the
+rendered math and both diagrams; the editor remains a separate retained surface.
+An opaque preview-file link passed explicit host confirmation and actual Android
+Save As; the exported 33 bytes matched the original binary. Private export staging
+was then explicitly discarded. Internal note links use the host navigation
+barrier; confirmed external navigation handed off to system browser UI rather
+than loading inside the viewer (Chrome first-run UI was not accepted).
+
+An exact one-MiB Unicode long-line source rendered without truncation. Native
+viewer text contained 1,048,574 UTF-16 units / 1,048,576 UTF-8 bytes, including an
+emoji crossing the 32,768-unit transport boundary. Its SHA-256 matched the input:
+`a358f48953a3f5e0bb4bf81649e67d3552ab0443aa9e9c1fa585f0b7126d68a5`.
+This exposed and corrected a split-surrogate chunk boundary and excessive
+per-unit native encoder construction; output now uses scalar-safe chunks and a
+reused buffered encoder. Trusted cold-start bounds remain separate from untrusted
+render work. A bounded cold-run timeout was observed; explicit Refresh later
+succeeded without changing source. This is not a universal latency guarantee.
+
+The actual renderer JavaScript was deliberately paused before a math/diagram job.
+The independent native watchdog retired only its renderer process after 2,010 ms.
+The main app PID, saved source and an editor-document identity marker survived.
+After returning to source, one real Undo still worked and restored exact prior
+bytes. The UI disclosed the timeout rather than claiming successful rendering.
+
+Owned HTTP, TLS and UDP observers had positive controls. In actual native editor
+and preview documents with CSP deliberately bypassed, HTTP(S), ws/wss,
+WebTransport and RTC attempts failed; RTC exposed no configured ICE servers.
+A running blob worker also failed its fetch/WebSocket attempts (and editor worker
+WebTransport); inherited blank frames and the preview srcdoc failed fetches.
+Counter snapshots showed only the observation query, not probe egress. The editor
+probe separately demonstrated no CSP meta and successful inline execution, so
+CSP denial is not the claimed native proof. The final source/APK restored CSP;
+no diagnostic bypass is shipped. An earlier nested RTC probe caused Chromium's
+native bad-IPC renderer termination while the main app survived; it was not
+misreported as a successful child execution.
+
+Browser preference changes exercised dark/high-contrast, 2× text and reduced
+motion without changing source; original Android system settings were restored.
+UI automation observed labeled editor/recovery controls. Full physical-device IME,
+TalkBack/VoiceOver and platform accessibility certification are not established.
+
+Both sealed legacy and v2 preview generations left by dead app processes were
+reclaimed on the next real preview admission. The current v2 owner remained live.
+The v2 export workflow still produced exact bytes after this cutover.
+
+### Implementation review corrections
+
+The new real-native rollback regression first failed with `base` instead of
+`conflict`. Recovery now requires no established receipt before accepting an
+opening-base fallback; matching pending intended bytes still take precedence.
+The targeted 15 tests passed, followed by the complete checks above. On the AVD,
+a saved revision 1 followed by an acknowledged revision 2 and a controlled disk
+revert to its exact opening bytes stayed a conflict across process restart.
+Actual Restore refused, preserved the original token and saved receipt, and did
+not publish a successor. Explicit keep-disk/discard left the original disk bytes.
+
+A native debugger then changed only the cached renderer name so the live Binder
+could not be proved safe to kill. Render and close settled as errors, not success;
+all seven snapshot files and the live peer remained. Source was accessible, and
+the final UI did not falsely show capture progress while retirement was pending.
+Restoring the cached name alone still released nothing. The retry authorized a
+kill; a breakpoint at the actual death callback showed the original PID absent
+while every file was still retained. Only after that handler and local readers
+joined did close reclaim them. The main PID and exact source survived.
+
+Android automatically started a replacement service process while the old death
+callback was paused. One-handshake-per-generation admission prevents that peer
+from replacing the original binding; the final release boundary also rechecks
+for a live endpoint after queued handshake work. Render replies and consumed
+cancel/close callbacks cannot be answered again after later death. No duplicate-
+completion exception appeared in the exercised main-process log. View disposal
+removes its UI even on failure without dropping the unjoined renderer lease.
+
+The full suite ran after the receipt/error-completion corrections. The final
+presentation condition passed workspace analysis; final binding/release guards
+were packaged for both Android ABIs and the debugger scenario repeated on that
+installed APK. A subsequent cold preview reached its visible time limit; after
+debugger detachment, explicit Refresh rendered normally. No timeout budget was
+relaxed and no diagnostic code was added. Debugger sessions and forwards were
+removed; the final APK hash, 16 KiB alignment and continuation baseline were checked
+again after these scenarios.
+
+### Preservation, cleanup and remaining gates
+
+All 58 non-fixture notebook files matched the persisted **continuation** SHA-256
+baseline using byte-safe archive transport, including space/Unicode paths. The
+original pre-phase baseline was lost when the Python harness terminated; this
+comparison does not establish that earlier interval. All intentional notebook
+mutations stayed in the owned Durability preview notebook. A quoted-path ADB
+reader initially returned error text instead of bytes; the archive comparison
+resolved that harness error without changing any notebook data.
+
+Owned probe services, 11 local fixture/TLS files, 11 remote temporary/export files,
+browser sessions and Android debug forwards were removed. Resource staging was
+empty. The final AVD and app remain running on the demonstration preview.
+
+No iOS build/runtime, physical-device, actual power-loss/disk-full or OEM backup
+promise follows from these checks. Public WK APIs still lack the required
+all-protocol guarantee; iOS editing/preview remains visibly fail-closed, not a
+claimed working port. Share-in, WebDAV, publication and release gates remain open.

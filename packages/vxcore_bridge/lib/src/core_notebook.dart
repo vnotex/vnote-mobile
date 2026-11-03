@@ -10,8 +10,10 @@ import 'package:ffi/ffi.dart';
 import 'generated/core_json_keys.dart';
 import 'generated/vxcore_host_bindings.dart' as native;
 import 'transfer_models.dart';
+import 'core_drafts.dart';
+import 'preview_models.dart';
 
-abstract interface class NotebookCore implements ResourceCore {
+abstract interface class NotebookCore implements ResourceCore, DraftCore, PreviewCore {
   Future<CoreNote> read();
   Future<CoreWriteResult> write(
     String text, {
@@ -20,6 +22,27 @@ abstract interface class NotebookCore implements ResourceCore {
   });
   Future<void> close();
   String get nativeNotices;
+}
+
+/// Durable commands run on the selected native owner. Inspection/reconciliation
+/// may establish a previously observed write only by publishing its receipt.
+abstract interface class DraftCore {
+  Future<CoreDraftInspection> inspectDraft({
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+  });
+  Future<CoreDraftInspection> reconcileDraft({
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+  });
+  Future<CoreDraftWriteResult> writeDraft({
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+    required String candidateId,
+  });
 }
 
 enum CoreEditorType { markdown, text }
@@ -404,6 +427,11 @@ Map<String, dynamic> _queryObject(native.VxmEvent event) {
   return decoded;
 }
 
+Map<String, Object?> _ownerObject(native.VxmEvent event) {
+  if (event.size > 64 * 1024) _badQuery();
+  return Map<String, Object?>.from(_queryObject(event));
+}
+
 CoreExportSnapshot _exportSnapshot(native.VxmEvent event) {
   Never malformed() => throw const CoreException(
     native.VxCoreError.VXCORE_ERR_JSON_PARSE,
@@ -707,6 +735,7 @@ final class CoreNotebook
   final _pending = <int, _Pending>{};
   int? _resourceReadRequest;
   int? _buildRequest;
+  int? _previewRequest;
   String? _resourceNotebookId;
   String? _resourceNodeId;
   final _closedEvent = Completer<int>();
@@ -971,6 +1000,131 @@ final class CoreNotebook
     _pending[id] = pending;
     return await pending.completer.future as CoreWriteResult;
   }
+
+  Future<T> _draft<T>({
+    required String operation,
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+    String? candidateId,
+    required T Function(Map<String, Object?>) decode,
+  }) async {
+    _requireResources();
+    if (operation == 'write') _requireMode(native.VXM_MODE_NOTE);
+    if (!RegExp(r'^[0-9a-f]{64}$').hasMatch(documentKey) ||
+        !RegExp(r'^[0-9a-f]{32}$').hasMatch(token) ||
+        (candidateId != null && !RegExp(r'^[0-9a-f]{32}$').hasMatch(candidateId))) {
+      throw const CoreException(_invalid, 'Invalid durable capture identity');
+    }
+    final handle = _usableHandle();
+    final id = _nextRequest++;
+    final pending = _Pending(native.VXM_EVENT_DRAFT, 0, decode: (event) {
+      final result = _ownerObject(event);
+      if (result['documentKey'] != documentKey || result['token'] != token ||
+          (candidateId != null && result['completedCandidateId'] != candidateId) ||
+          event.notebook_id.cast<Utf8>().toDartString() != _resourceNotebookId ||
+          event.node_id.cast<Utf8>().toDartString() != _resourceNodeId) {
+        throw const CoreException(_unusable, 'Durable capture correlation failed');
+      }
+      return decode(result) as Object;
+    });
+    final code = using((arena) => native.vxm_host_draft(
+      handle, id, _generation, _option(arena, jsonEncode({
+        'op': operation, 'draftsRoot': draftsRoot,
+        'documentKey': documentKey, 'token': token,
+        if (candidateId != null) 'candidateId': candidateId,
+      })),
+    ));
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native durable command admission failed');
+    }
+    _pending[id] = pending;
+    return await pending.completer.future as T;
+  }
+
+  @override
+  Future<CoreDraftInspection> inspectDraft({
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+  }) => _draft(
+    operation: 'inspect', draftsRoot: draftsRoot, documentKey: documentKey,
+    token: token, decode: CoreDraftInspection.fromJson,
+  );
+
+  @override
+  Future<CoreDraftInspection> reconcileDraft({
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+  }) => _draft(
+    operation: 'reconcile', draftsRoot: draftsRoot, documentKey: documentKey,
+    token: token, decode: CoreDraftInspection.fromJson,
+  );
+
+  @override
+  Future<CoreDraftWriteResult> writeDraft({
+    required String draftsRoot,
+    required String documentKey,
+    required String token,
+    required String candidateId,
+  }) => _draft(
+    operation: 'write', draftsRoot: draftsRoot, documentKey: documentKey,
+    token: token, candidateId: candidateId, decode: CoreDraftWriteResult.fromJson,
+  );
+
+  @override
+  Future<CorePreviewSnapshot> preparePreview({
+    required String previewsRoot,
+    required String previewId,
+    required String renderId,
+    required String token,
+    required int revision,
+    required String source,
+  }) async {
+    _requireMode(native.VXM_MODE_NOTE);
+    if (_previewRequest != null) {
+      throw const CoreException(_unusable, 'A preview capture is already running');
+    }
+    if ([previewId, renderId, token].any((id) => !RegExp(r'^[0-9a-f]{32}$').hasMatch(id)) ||
+        revision < 0 || revision > _maxInteger) {
+      throw const CoreException(_invalid, 'Invalid preview capture identity');
+    }
+    final bytes = _encode(source);
+    final handle = _usableHandle();
+    final id = _nextRequest++;
+    final pending = _Pending(native.VXM_EVENT_PREVIEW, 0, decode: (event) {
+      final result = CorePreviewSnapshot.fromJson(
+        _ownerObject(event), previewsRoot: previewsRoot, token: token,
+      );
+      if (result.previewId != previewId || result.renderId != renderId ||
+          result.sourceRevision != revision ||
+          event.notebook_id.cast<Utf8>().toDartString() != _resourceNotebookId ||
+          event.node_id.cast<Utf8>().toDartString() != _resourceNodeId) {
+        throw const CoreException(_unusable, 'Preview capture correlation failed');
+      }
+      return result;
+    });
+    final code = using((arena) => native.vxm_host_preview(
+      handle, id, _generation, _option(arena, jsonEncode({
+        'op': 'prepare', 'previewRoot': previewsRoot, 'previewId': previewId,
+        'renderId': renderId, 'sourceRevision': revision,
+      })), _copyBytes(arena, bytes), bytes.length,
+    ));
+    if (code != native.VxCoreError.VXCORE_OK) {
+      throw CoreException(code, 'Native preview admission failed');
+    }
+    _pending[id] = pending;
+    _previewRequest = id;
+    try {
+      return await pending.completer.future as CorePreviewSnapshot;
+    } finally {
+      if (_previewRequest == id) _previewRequest = null;
+    }
+  }
+
+  @override
+  void cancelPreview() => _cancelTransfer(_previewRequest);
 
   @override
   Future<CoreDirectory> list([String? folderId]) async {
@@ -1452,7 +1606,9 @@ final class CoreNotebook
           } else if (event.kind == native.VXM_EVENT_QUERY ||
               event.kind == native.VXM_EVENT_EXPORT ||
               event.kind == native.VXM_EVENT_COHORT ||
-              event.kind == native.VXM_EVENT_RESOURCE) {
+              event.kind == native.VXM_EVENT_RESOURCE ||
+              event.kind == native.VXM_EVENT_DRAFT ||
+              event.kind == native.VXM_EVENT_PREVIEW) {
             pending.completer.complete(pending.decode!(event));
           } else if (event.kind == native.VXM_EVENT_COHORT_OPEN ||
               event.kind == native.VXM_EVENT_RESOURCE_OPEN) {

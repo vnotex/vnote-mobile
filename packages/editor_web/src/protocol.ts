@@ -12,6 +12,8 @@ export const LIMITS = Object.freeze({
   insertedUnits: 65536,
   outstandingBatches: 8,
   outstandingBytes: 2 * 1024 * 1024,
+  undurableBatches: 32,
+  undurableBytes: 8 * 1024 * 1024,
   pendingControls: 32,
   replayEntries: 64,
   historyGroups: 200,
@@ -125,7 +127,7 @@ export function applyChanges(text: string, changes: readonly Change[], selection
 }
 
 export interface Envelope {
-  v: 1;
+  v: 2;
   type: string;
   documentId: string;
   generation: string;
@@ -134,15 +136,28 @@ export interface Envelope {
 }
 export type HostMessage = Envelope & (
   | { type: 'load'; text: string; language: 'markdown' | 'text'; baseVersion: string; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
-  | { type: 'ack'; stage: 'received' | 'rejected'; throughRevision: number; error?: string }
+  | { type: 'ack'; stage: 'received' | 'draftDurable' | 'saved' | 'rejected'; throughRevision: number; error?: string }
   | { type: 'selection'; mode: 'request' }
   | { type: 'selection'; anchor: number; head: number; mode?: never }
   | { type: 'insert'; text: string; anchor: number; head: number }
+  | { type: 'format'; action: FormatAction; level?: number; destination?: string; anchor: number; head: number }
   | { type: 'command'; command: 'undo' | 'redo' }
-  | { type: 'theme'; theme: 'light' | 'dark' }
-  | { type: 'save'; mode: 'snapshotRequest'; reason?: 'manual' | 'close' }
-  | { type: 'close'; mode: 'request'; disposition: 'discard' | 'written' }
+  | { type: 'preferences'; dark: boolean; highContrast: boolean; fontScale: number; reducedMotion: boolean }
+  | { type: 'flush'; mode: 'request' }
+  | { type: 'resync'; mode: 'request' | 'resume' }
+  | { type: 'close'; mode: 'quiesce' | 'abort' }
+  | { type: 'close'; mode: 'complete'; disposition: 'discard' | 'retained' }
 );
+export type FormatAction = 'bold' | 'italic' | 'code' | 'fence' | 'heading' | 'quote' | 'bullet' | 'ordered' | 'task' | 'link';
+export function validateFormat(value: { action: unknown; level?: unknown; destination?: unknown }): void {
+  requireThat(['bold', 'italic', 'code', 'fence', 'heading', 'quote', 'bullet', 'ordered', 'task', 'link'].includes(String(value.action)), 'Unknown formatting action.');
+  requireThat(value.action === 'heading' ? integer(value.level) && value.level >= 1 && value.level <= 6 : value.level === undefined,
+    'Invalid heading level.');
+  requireThat(value.action === 'link' ? typeof value.destination === 'string' && value.destination.length > 0
+    && value.destination.length <= 2048 && !/[\u0000-\u0020\u007f<>]/.test(value.destination) : value.destination === undefined,
+    'Invalid explicit link destination.');
+  if (typeof value.destination === 'string') utf8Length(value.destination);
+}
 const HEADER = ['v', 'type', 'documentId', 'generation', 'revision', 'requestId'];
 export function encodeMessage(message: unknown, maximum = LIMITS.fullMessageBytes): string {
   const encoded = JSON.stringify(message);
@@ -157,7 +172,7 @@ export function decodeHostMessage(raw: string): HostMessage {
 }
 export function validateHostMessage(value: unknown): HostMessage {
   requireThat(object(value), 'Message must be an object.');
-  requireThat(value.v === 1 && typeof value.documentId === 'string'
+  requireThat(value.v === 2 && typeof value.documentId === 'string'
     && value.documentId.length > 0 && value.documentId.length <= 256 && !/[^A-Za-z0-9._:-]/.test(value.documentId)
     && typeof value.type === 'string' && typeof value.generation === 'string'
     && value.generation.length === 32 && /^[0-9a-f]{32}$/.test(value.generation) && integer(value.revision)
@@ -177,9 +192,11 @@ export function validateHostMessage(value: unknown): HostMessage {
       break;
     case 'ack':
       keys(value, [...HEADER, 'stage', 'throughRevision', 'error']);
-      requireThat((value.stage === 'received' || value.stage === 'rejected') && integer(value.throughRevision)
+      requireThat(['received', 'draftDurable', 'saved', 'rejected'].includes(String(value.stage)) && integer(value.throughRevision)
         && (value.error === undefined || (typeof value.error === 'string' && value.error.length <= 1024))
         && (value.stage !== 'rejected' || typeof value.error === 'string'), 'Unsupported acknowledgement.');
+      requireThat(value.revision === value.throughRevision, 'Acknowledgement capture mismatch.');
+      requireThat(!['draftDurable', 'saved'].includes(String(value.stage)) || value.requestId.startsWith('host-'), 'Durability requires host authority.');
       break;
     case 'selection':
       if ('mode' in value) {
@@ -197,22 +214,34 @@ export function validateHostMessage(value: unknown): HostMessage {
       utf8Length(value.text);
       requireThat(integer(value.anchor) && integer(value.head), 'Invalid insertion selection.');
       break;
+    case 'format':
+      keys(value, [...HEADER, 'action', 'level', 'destination', 'anchor', 'head']);
+      validateFormat(value as unknown as { action: unknown; level?: unknown; destination?: unknown });
+      requireThat(integer(value.anchor) && integer(value.head), 'Invalid formatting selection.');
+      break;
     case 'command':
       keys(value, [...HEADER, 'command']);
       requireThat(value.command === 'undo' || value.command === 'redo', 'Unknown command.');
       break;
-    case 'theme':
-      keys(value, [...HEADER, 'theme']);
-      requireThat(value.theme === 'light' || value.theme === 'dark', 'Unknown theme.');
+    case 'preferences':
+      keys(value, [...HEADER, 'dark', 'highContrast', 'fontScale', 'reducedMotion']);
+      requireThat(typeof value.dark === 'boolean' && typeof value.highContrast === 'boolean'
+        && typeof value.reducedMotion === 'boolean' && typeof value.fontScale === 'number'
+        && Number.isFinite(value.fontScale) && value.fontScale >= 0.5 && value.fontScale <= 3, 'Invalid editor preferences.');
       break;
-    case 'save':
-      keys(value, [...HEADER, 'mode', 'reason']);
-      requireThat(value.reason === undefined || ['manual', 'close'].includes(String(value.reason)), 'Invalid snapshot reason.');
-      requireThat(value.mode === 'snapshotRequest', 'Unsupported snapshot mode.');
+    case 'flush':
+      keys(value, [...HEADER, 'mode']);
+      requireThat(value.mode === 'request', 'Invalid source barrier.');
+      break;
+    case 'resync':
+      keys(value, [...HEADER, 'mode']);
+      requireThat(value.mode === 'request' || value.mode === 'resume', 'Invalid resync barrier.');
       break;
     case 'close':
       keys(value, [...HEADER, 'mode', 'disposition']);
-      requireThat(value.mode === 'request' && (value.disposition === 'discard' || value.disposition === 'written'), 'Invalid close barrier.');
+      requireThat(value.mode === 'complete'
+        ? value.disposition === 'discard' || value.disposition === 'retained'
+        : (value.mode === 'quiesce' || value.mode === 'abort') && value.disposition === undefined, 'Invalid close barrier.');
       break;
     default: throw new ProtocolError('Unknown message type.');
   }
@@ -236,6 +265,10 @@ export function insertionTransaction(
   requireThat(from !== to || message.text.length !== 0, 'Insertion must change source.');
   validateChanges(state.doc, sourceBytes, [{ from, to, insert: message.text }]);
   const position = from + message.text.length;
+  if (to - from === message.text.length && state.doc.sliceString(from, to) === message.text) {
+    return state.update({ selection: { anchor: position, head: position },
+      annotations: isolateHistory.of('full'), filter: false });
+  }
   const transaction = state.update({
     changes: { from, to, insert: Text.of(message.text.split('\n')) },
     selection: { anchor: position, head: position },
@@ -248,6 +281,10 @@ export function insertionTransaction(
 export function assertCredits(count: number, bytes: number): void {
   requireThat(count <= LIMITS.outstandingBatches && bytes <= LIMITS.outstandingBytes,
     'Waiting for the host to receive edits. Text is still only in memory.');
+}
+export function assertDurableCredits(count: number, bytes: number): void {
+  requireThat(count <= LIMITS.undurableBatches && bytes <= LIMITS.undurableBytes,
+    'Waiting for durable draft storage. Text is retained; no further edit credit is available.');
 }
 
 interface ReplayEntry { fingerprint: string | null; response: string | null }
@@ -273,7 +310,7 @@ export class RequestCache {
   }
   // Receipt retires full snapshot responses and the initial load source. Retain
   // a bounded tombstone so an old transfer cannot install or capture text again.
-  release(type: 'load' | 'save', requestId: string): void {
+  release(type: 'load' | 'resync', requestId: string): void {
     const entry = this.entries.get(`${type}:${requestId}`);
     if (entry) {
       entry.response = null;

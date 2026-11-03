@@ -1,31 +1,115 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import 'dart:async';
 import 'dart:convert';
-import 'dart:io';
+import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart' as crypto;
 import 'package:flutter_test/flutter_test.dart';
+import 'package:vnote_mobile/services/editor_drafts.dart';
 import 'package:vnote_mobile/services/editor_session.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
-import 'package:vxcore_bridge/vxcore_bridge.dart';
 import 'package:vnote_mobile/features/resources/resource_panel.dart';
+import 'package:vxcore_bridge/vxcore_bridge.dart';
 
-// These fakes exercise coordinator transitions only. They are not storage proof;
-// real FFI create/write/read/identity evidence belongs to the bridge tests.
+// Presentation-only completion-order doubles. Real journal/fsync/owner proof is
+// exercised by editor_drafts_test and the bridge's real native storage suites.
 final firstHash = 'a' * 64;
 final secondHash = 'b' * 64;
 final thirdHash = 'c' * 64;
-
 CoreNote note({String text = 'base\r\n', String? hash}) => CoreNote(
-  notebookId: 'book-identity',
-  nodeId: 'node-identity',
-  path: 'Notes/base.md',
-  notebookName: 'Personal',
-  editorType: CoreEditorType.markdown,
-  text: text,
-  baseHash: hash ?? firstHash,
-  coreVersion: '1.0.0',
-  lineEnding: 0,
-);
+  notebookId: 'book-identity', nodeId: 'node-identity', path: 'Notes/base.md',
+  notebookName: 'Personal', editorType: CoreEditorType.markdown, text: text,
+  baseHash: hash ?? firstHash, coreVersion: '1.0.0', lineEnding: 0);
+String _hash(String text) => crypto.sha256.convert(utf8.encode(text)).toString();
+final _stores = <String, _PresentationStore>{};
+int _storeSequence = 0;
+
+EditorDrafts presentationDrafts() {
+  final root = 'presentation-${_storeSequence++}';
+  final store = _PresentationStore();
+  _stores[root] = store;
+  return EditorDrafts(root: root, runStore: store.run)
+    ..value = const EditorDraftsState(initialized: true);
+}
+
+class _PresentationStore {
+  final records = <String, Map<String, Object?>>{};
+  final sources = <String, String>{};
+  final bases = <String, String>{};
+  final candidates = <String, Map<String, Object?>>{};
+  final candidateSources = <String, String>{};
+  int sequence = 0;
+  Object? appendError;
+  Future<Map<String, Object?>> run(Map<String, Object?> request, {Uint8List? payload}) async {
+    final op = request['op'];
+    final token = request['token'] as String?;
+    if (op == 'scan') return {'entries': records.values.toList(), 'nextOffset': null};
+    if (op == 'prune') return {'removed': 0};
+    if (op == 'begin') {
+      final source = utf8.decode(payload!);
+      sources[token!] = source;
+      bases[token] = source;
+      records[token] = {'documentKey': request['documentKey'], 'token': token,
+        'descriptor': request['descriptor'], 'revision': 0,
+        'sourceHash': _hash(source), 'baseSourceHash': _hash(source),
+        'savedRevision': null, 'savedSourceHash': null, 'savedDiskHash': null,
+        'candidateId': null, 'status': 'draft'};
+    }
+    final record = records[token];
+    if (record == null) throw StateError('Unknown presentation capture.');
+    if (op == 'append') {
+      if (appendError != null) throw appendError!;
+      expectSync(request['expectedRevision'], record['revision']);
+      final frames = (jsonDecode(utf8.decode(payload!)) as Map)['frames'] as List;
+      var source = sources[token]!;
+      for (final raw in frames) {
+        final frame = raw as Map;
+        expectSync(frame['token'], token);
+        expectSync(frame['baseRevision'], record['revision']);
+        for (final rawChange in (frame['changes'] as List).reversed) {
+          final change = rawChange as Map;
+          source = source.replaceRange(change['from'] as int, change['to'] as int, change['insert'] as String);
+        }
+        record['revision'] = frame['revision'];
+      }
+      sources[token!] = source;
+      record['sourceHash'] = _hash(source);
+      record['status'] = record['candidateId'] == null ? 'draft' : 'pending';
+    }
+    if (op == 'prepareSave') {
+      expectSync(record['candidateId'], isNull);
+      final id = (++sequence).toRadixString(16).padLeft(32, '0');
+      final candidate = {'documentKey': record['documentKey'], 'token': token,
+        'candidateId': id, 'revision': record['revision'], 'sourceHash': record['sourceHash'],
+        'expectedDiskHash': record['savedDiskHash'] ?? (record['descriptor'] as Map)['openingDiskHash'],
+        'intendedDiskHash': record['sourceHash'], 'eol': 0};
+      candidates[id] = candidate;
+      candidateSources[id] = sources[token]!;
+      record['candidateId'] = id;
+      record['status'] = 'pending';
+      return Map.of(candidate);
+    }
+    if (op == 'rebase' || op == 'rebaseSource') {
+      final next = request['newToken'] as String;
+      final source = payload == null ? sources[token]! : utf8.decode(payload);
+      final fresh = Map<String, Object?>.of(record)..addAll({'token': next,
+        'revision': 0, 'sourceHash': _hash(source), 'savedRevision': null,
+        'savedSourceHash': null, 'savedDiskHash': null, 'candidateId': null, 'status': 'draft'});
+      record.addAll({'status': 'superseded', 'supersededBy': next});
+      records[next] = fresh;
+      sources[next] = source;
+      bases[next] = bases[token]!;
+      return fresh;
+    }
+    if (op == 'discard') {
+      records.remove(token); sources.remove(token); bases.remove(token);
+      return {'discarded': true};
+    }
+    return {...record,
+      if (op == 'read') 'source': sources[token],
+      if (op == 'readBase') 'baseSource': bases[token]};
+  }
+}
 
 class PendingWrite {
   PendingWrite(this.text, this.revision, this.baseHash);
@@ -38,633 +122,298 @@ class PendingWrite {
 class ControlledCore implements NotebookCore {
   CoreNote nextRead = note();
   Object? readError;
+  Object? reconciliationError;
   int reads = 0;
   int closes = 0;
+  int resourceCancellations = 0;
   Completer<void>? closeGate;
   Future<void>? _closing;
   final writes = <PendingWrite>[];
-  int resourceCancellations = 0;
   Future<CoreResourceListing> Function()? onListResources;
-
-  @override
-  Future<CoreResourceListing> listResources() =>
-      onListResources?.call() ??
-      Future.value(
-        CoreResourceListing(
-          notebookId: nextRead.notebookId,
-          nodeId: nextRead.nodeId,
-          notePath: nextRead.path,
-          entries: const [],
-        ),
-      );
-  @override
-  Future<CoreResourceResult> applyResource(String transactionRoot) async =>
-      throw StateError('Resource storage requires a real native fixture.');
-  @override
-  Future<CoreResourceResult> recoverResource(String transactionRoot) async =>
-      throw StateError('Resource recovery requires a real native fixture.');
-  @override
-  Future<CoreResourceExport> exportResource(
-    String name,
-    String transactionRoot,
-  ) async =>
-      throw StateError('Resource export requires a real native fixture.');
-  @override
-  void cancelResourceRead() => resourceCancellations++;
-
   @override
   String get nativeNotices => 'Native license fixture';
-
   @override
-  Future<CoreNote> read() async {
-    reads++;
-    if (readError != null) throw readError!;
-    return nextRead;
-  }
-
+  Future<CoreNote> read() async { reads++; if (readError != null) throw readError!; return nextRead; }
   @override
-  Future<CoreWriteResult> write(
-    String text, {
-    required int revision,
-    required String baseHash,
-  }) {
-    final pending = PendingWrite(text, revision, baseHash);
+  Future<CoreWriteResult> write(String text, {required int revision, required String baseHash}) =>
+    throw StateError('Application coordinator must not use low-level writes.');
+  @override
+  Future<CoreDraftWriteResult> writeDraft({required String draftsRoot,
+    required String documentKey, required String token, required String candidateId}) async {
+    final store = _stores[draftsRoot]!;
+    final candidate = store.candidates[candidateId]!;
+    final pending = PendingWrite(store.candidateSources[candidateId]!,
+      candidate['revision'] as int, candidate['expectedDiskHash'] as String);
     writes.add(pending);
-    return pending.completion.future;
+    final result = await pending.completion.future;
+    final record = store.records[token]!;
+    record.addAll({'savedRevision': result.revision, 'savedSourceHash': candidate['sourceHash'],
+      'savedDiskHash': result.baseHash, 'candidateId': null,
+      'status': record['sourceHash'] == candidate['sourceHash'] ? 'saved' : 'draft',
+      'savedCandidateId': candidateId});
+    return CoreDraftWriteResult.fromJson({...record, 'outcome': 'saved',
+      'canRetry': false, 'observedDiskHash': result.baseHash,
+      'completedCandidateId': candidateId});
   }
-
+  @override
+  Future<CoreDraftInspection> reconcileDraft({required String draftsRoot,
+    required String documentKey, required String token}) async {
+    if (reconciliationError != null) throw reconciliationError!;
+    final record = _stores[draftsRoot]!.records[token]!;
+    return CoreDraftInspection.fromJson({...record,
+      'outcome': record['savedRevision'] == null ? 'base' : 'saved',
+      'canRetry': record['candidateId'] != null,
+      'observedDiskHash': record['savedDiskHash'] ?? nextRead.baseHash});
+  }
+  @override
+  Future<CoreDraftInspection> inspectDraft({required String draftsRoot,
+    required String documentKey, required String token}) => reconcileDraft(
+      draftsRoot: draftsRoot, documentKey: documentKey, token: token);
+  @override
+  Future<CorePreviewSnapshot> preparePreview({required String previewsRoot,
+    required String previewId, required String renderId, required String token,
+    required int revision, required String source}) =>
+      throw StateError('Preview authority requires the real native fixture.');
+  @override
+  void cancelPreview() {}
+  @override
+  Future<CoreResourceListing> listResources() => onListResources?.call() ?? Future.value(
+    CoreResourceListing(notebookId: nextRead.notebookId, nodeId: nextRead.nodeId,
+      notePath: nextRead.path, entries: const []));
+  @override
+  Future<CoreResourceResult> applyResource(String transactionRoot) =>
+    throw StateError('Resource storage requires a real native fixture.');
+  @override
+  Future<CoreResourceResult> recoverResource(String transactionRoot) =>
+    throw StateError('Resource recovery requires a real native fixture.');
+  @override
+  Future<CoreResourceExport> exportResource(String name, String transactionRoot) =>
+    throw StateError('Resource export requires a real native fixture.');
+  @override
+  void cancelResourceRead() => resourceCancellations++;
   @override
   Future<void> close() => _closing ??= _close();
-
-  Future<void> _close() async {
-    closes++;
-    await closeGate?.future;
-  }
+  Future<void> _close() async { closes++; await closeGate?.future; }
 }
 
-Map<String, Object?> reply(
-  EditorSession editor,
-  String type,
-  String requestId,
-  Map<String, Object?> fields, {
-  int? revision,
-}) => {
-  'v': 1,
-  'type': type,
-  'documentId': editor.documentId,
-  'generation': editor.generation,
-  'revision': revision ?? editor.value.revision,
-  'requestId': requestId,
-  ...fields,
-};
-
+Map<String, Object?> reply(EditorSession editor, String type, String requestId,
+    Map<String, Object?> fields, {int? revision}) => {
+  'v': 2, 'type': type, 'documentId': editor.documentId,
+  'generation': editor.generation, 'revision': revision ?? editor.value.revision,
+  'requestId': requestId, ...fields};
 void ready(EditorSession editor) {
   final request = editor.beginLoad()!;
-  editor.receive(
-    jsonEncode(
-      reply(editor, 'ready', request['requestId']! as String, {
-        'textLength': editor.value.text.length,
-      }),
-    ),
-  );
+  editor.receive(jsonEncode(reply(editor, 'ready', request['requestId'] as String,
+    {'textLength': editor.value.text.length})));
 }
-
 void insert(EditorSession editor, String text) {
   final revision = editor.value.revision;
   final end = editor.value.text.length;
-  editor.receive(
-    jsonEncode(
-      reply(editor, 'edit', 'editor-${revision + 1}', {
-        'baseRevision': revision,
-        'changes': [
-          {'from': end, 'to': end, 'insert': text},
-        ],
-        'selection': {'anchor': end + text.length, 'head': end + text.length},
-      }, revision: revision + 1),
-    ),
-  );
+  editor.receive(jsonEncode(reply(editor, 'edit', 'editor-${revision + 1}', {
+    'baseRevision': revision,
+    'changes': [{'from': end, 'to': end, 'insert': text}],
+    'selection': {'anchor': end + text.length, 'head': end + text.length},
+  }, revision: revision + 1)));
 }
-
 void answer(EditorSession editor, Map<String, Object?> request) {
-  if (request['type'] == 'save') {
-    editor.receive(
-      jsonEncode(
-        reply(editor, 'save', request['requestId']! as String, {
-          'mode': 'snapshot',
-          'text': editor.value.text,
-        }),
-      ),
-    );
-  } else if (request['type'] == 'close') {
-    editor.receive(
-      jsonEncode(
-        reply(editor, 'close', request['requestId']! as String, {
-          'mode': 'ready',
-          'disposition': request['disposition'],
-        }),
-      ),
-    );
-  }
+  final type = request['type'];
+  if (type != 'flush' && type != 'close') return;
+  final mode = type == 'flush' ? 'ready' : switch (request['mode']) {
+    'quiesce' => 'quiesced', 'complete' => 'closed', 'abort' => 'aborted',
+    _ => throw StateError('Unknown barrier mode')};
+  editor.receive(jsonEncode(reply(editor, type as String, request['requestId'] as String,
+    {'mode': mode, if (mode == 'ready' || mode == 'quiesced') ...{
+      'anchor': editor.value.anchor, 'head': editor.value.head}})));
 }
-
+Future<void> turn() => Future<void>.delayed(Duration.zero);
 Future<NotebookSession> start(ControlledCore core) async {
-  final session = NotebookSession(openCore: () async => core);
-  addTearDown(() async {
-    await session.shutdown();
-    session.dispose();
-  });
-  await session.initialize();
-  ready(session.value.editor!);
+  final drafts = presentationDrafts();
+  final session = NotebookSession(openCore: () async => core,
+    drafts: drafts, notebookRelative: 'book');
+  addTearDown(() async { await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose(); });
+  await session.initialize(); ready(session.value.editor!);
   return session;
 }
 
-Future<void> turn() => Future<void>.delayed(Duration.zero);
-
 void main() {
-  test(
-    'resource barrier borrows NOTE owner and joins before explicit Write',
-    () async {
-      final core = ControlledCore();
-      final session = await start(core);
-      final editor = session.value.editor!;
-      final gate = Completer<void>();
-      final resources = session.withResources((owner) async {
-        expect(owner, same(core));
-        await gate.future;
-        return owner.listResources();
-      });
-      expect(session.value.resourcesBusy, isTrue);
-      insert(editor, 'volatile while copying');
-      var snapshots = 0;
-      final writing = session.write((message) {
-        snapshots++;
-        answer(editor, message);
-      });
-      await turn();
-      expect(snapshots, 0);
-      expect(core.writes, isEmpty);
-      expect(session.value.onDiskRevision, 0);
-      gate.complete();
-      await resources;
-      await turn();
-      expect(core.writes.single.text, 'base\r\nvolatile while copying');
-      core.writes.single.completion.complete(
-        CoreWriteResult(revision: 1, baseHash: secondHash),
-      );
-      expect(await writing, isTrue);
-      expect(session.value.resourcesBusy, isFalse);
-      expect(core.reads, 1);
-    },
-  );
-
-  test(
-    'resource barrier drains before close and rejects a second borrower',
-    () async {
-      final core = ControlledCore();
-      final session = await start(core);
-      final editor = session.value.editor!;
-      final gate = Completer<void>();
-      final resources = session.withResources((_) => gate.future);
-      await expectLater(session.withResources((_) async {}), throwsStateError);
-      final closing = session.close(
-        NotebookDisposition.discard,
-        (message) => answer(editor, message),
-      );
-      await turn();
-      expect(core.closes, 0);
-      gate.complete();
-      await resources;
-      expect(await closing, isTrue);
-      expect(core.closes, 1);
-    },
-  );
-
-  test(
-    'shutdown joins resources without making volatile source durable',
-    () async {
-      final core = ControlledCore();
-      final session = await start(core);
-      insert(session.value.editor!, 'unsaved');
-      final gate = Completer<void>();
-      final resources = session.withResources((_) => gate.future);
-      final closing = session.shutdown();
-      await turn();
-      expect(core.closes, 0);
-      gate.complete();
-      await resources;
-      await closing;
-      expect(core.closes, 1);
-      expect(core.writes, isEmpty);
-      expect(session.value.onDiskRevision, 0);
-    },
-  );
-
-  test('ambiguous resource ownership blocks Write and reopen but allows explicit discard exit', () async {
-    final core = ControlledCore();
-    final session = await start(core);
+  test('receipt and draft credits are independent before native publication', () async {
+    final core = ControlledCore(); final session = await start(core);
     final editor = session.value.editor!;
-    insert(editor, 'preserved');
-    session.setResourceBlock('Ambiguous resource dispatch');
-    expect(await session.write((_) => fail('No source snapshot')), isFalse);
-    expect(
-      await session.reopen(
-        NotebookDisposition.discard,
-        (_) => fail('No reopen barrier'),
-      ),
-      isFalse,
-    );
-    expect(editor.value.text, 'base\r\npreserved');
-    expect(core.writes, isEmpty);
-    expect(
-      await session.close(
-        NotebookDisposition.discard,
-        (message) => answer(editor, message),
-      ),
-      isTrue,
-    );
-  });
-
-  test('resource links encode raw percent and parentheses and escape Markdown labels', () {
-    expect(
-      resourceMarkdownLink(
-        name: '[x] (50%).png',
-        relativeUrl: 'assets/id/[x] (50%).png',
-        image: true,
-      ),
-      r'![\[x\] \(50\%\)\.png](assets/id/%5Bx%5D%20%2850%25%29.png)',
-    );
-    expect(
-      resourceMarkdownLink(name: '研究.png', relativeUrl: 'assets/id/研究.png'),
-      '[研究\\.png](assets/id/%E7%A0%94%E7%A9%B6.png)',
-    );
-    for (final path in [
-      '/root',
-      '../asset',
-      'a//b',
-      'a/./b',
-      'https:asset',
-      'a\\b',
-      'a\nb',
-    ]) {
-      expect(
-        () => resourceMarkdownLink(name: 'file', relativeUrl: path),
-        throwsStateError,
-      );
-    }
-  });
-  test(
-    'a reopened editor can write revision one through the real core',
-    () async {
-      final root = await Directory.systemTemp.createTemp('vnote-coordinator-');
-      final catalog = await CoreNotebook.createCatalog(
-        appDataPath: '${root.path}/app',
-        localDataPath: '${root.path}/local',
-        notebookPath: '${root.path}/book',
-        notebookName: 'Personal',
-      );
-      final notebookId = catalog.initialDirectory.notebookId;
-      final nodeId = await catalog.createNote(
-        catalog.initialDirectory.folderId,
-        'Welcome.md',
-      );
-      await catalog.close();
-      final session = NotebookSession(
-        openCore: () => CoreNotebook.openNote(
-          appDataPath: '${root.path}/app',
-          localDataPath: '${root.path}/local',
-          notebookPath: '${root.path}/book',
-          notebookId: notebookId,
-          nodeId: nodeId,
-        ),
-      );
-      addTearDown(() async {
-        await session.shutdown();
-        session.dispose();
-        await root.delete(recursive: true);
-      });
-      await session.initialize();
-      final first = session.value.editor!;
-      ready(first);
-      insert(first, 'one');
-      insert(first, 'two');
-      expect(await session.write((message) => answer(first, message)), isTrue);
-      final id = session.value.note!.nodeId;
-      expect(
-        await session.reopen(
-          NotebookDisposition.discard,
-          (message) => answer(first, message),
-        ),
-        isTrue,
-      );
-      final reopened = session.value.editor!;
-      ready(reopened);
-      insert(reopened, 'three');
-      expect(
-        await session.write((message) => answer(reopened, message)),
-        isTrue,
-      );
-      expect(session.value.onDiskRevision, 1);
-      expect(session.value.note!.nodeId, id);
-      expect(
-        await File('${root.path}/book/Welcome.md').readAsString(),
-        'onetwothree',
-      );
-    },
-  );
-
-  test(
-    'failed native startup never manufactures an editor or hides its code',
-    () async {
-      final session = NotebookSession(
-        openCore: () async {
-          throw const CoreException(8, 'Invalid existing notebook metadata');
-        },
-      );
-      await session.initialize();
-      expect(session.value.editor, isNull);
-      expect(session.value.note, isNull);
-      expect(session.value.error, contains('8'));
-      expect(session.value.loading, isFalse);
-      await session.shutdown();
-      session.dispose();
-    },
-  );
-
-  test(
-    'retry opens through the native factory rather than recreating editor data',
-    () async {
-      final core = ControlledCore();
-      var attempts = 0;
-      final session = NotebookSession(
-        openCore: () async {
-          if (++attempts == 1) throw const CoreException(6, 'Open failed');
-          return core;
-        },
-      );
-      await session.initialize();
-      await session.retryOpen();
-      expect(attempts, 2);
-      expect(session.value.note!.nodeId, core.nextRead.nodeId);
-      expect(session.value.error, isNull);
-      await session.shutdown();
-      session.dispose();
-    },
-  );
-
-  test('disposal during startup waits for native open then closes without installing a view', () async {
-    final pending = Completer<NotebookCore>();
-    final core = ControlledCore();
-    final session = NotebookSession(openCore: () => pending.future);
-    final opening = session.initialize();
-    session.dispose();
-    pending.complete(core);
-    await opening;
-    await session.shutdown();
-    expect(core.reads, 0);
-    expect(core.closes, 1);
-  });
-
-  test('only the captured revision advances on disk; next write uses returned disk hash', () async {
-    final core = ControlledCore();
-    final session = await start(core);
-    final editor = session.value.editor!;
-    insert(editor, 'first😀');
-    final writing = session.write((request) => answer(editor, request));
-    await turn();
-    expect(core.writes.single.text, 'base\r\nfirst😀');
-    expect(core.writes.single.baseHash, firstHash);
-    insert(editor, 'second');
-    expect(
-      await session.write((_) => fail('A second write must not be admitted')),
-      isFalse,
-    );
-    expect(
-      await session.reopen(
-        NotebookDisposition.discard,
-        (_) => fail('Busy reopen'),
-      ),
-      isFalse,
-    );
-    core.writes.single.completion.complete(
-      CoreWriteResult(revision: 1, baseHash: secondHash),
-    );
-    expect(await writing, isTrue);
-    expect(session.value.onDiskRevision, 1);
-    expect(session.value.editor!.value.revision, 2);
-    expect(session.value.dirty, isTrue);
-    final second = session.write((request) => answer(editor, request));
-    await turn();
-    expect(core.writes.last.baseHash, secondHash);
-    expect(core.writes.last.revision, 2);
-    core.writes.last.completion.complete(
-      CoreWriteResult(revision: 2, baseHash: thirdHash),
-    );
-    expect(await second, isTrue);
-    expect(session.value.dirty, isFalse);
-    expect(session.value.editor, same(editor));
-  });
-
-  test(
-    'wrong native receipt cannot mark current or future text on disk',
-    () async {
-      final core = ControlledCore();
-      final session = await start(core);
-      final editor = session.value.editor!;
-      insert(editor, 'pending');
-      final writing = session.write((request) => answer(editor, request));
-      await turn();
-      core.writes.single.completion.complete(
-        CoreWriteResult(revision: 2, baseHash: secondHash),
-      );
-      expect(await writing, isFalse);
-      expect(session.value.onDiskRevision, 0);
-      expect(session.value.dirty, isTrue);
-      expect(editor.value.text, 'base\r\npending');
-    },
-  );
-
-  test(
-    'write failure blocks write-and-reopen and retains copyable source',
-    () async {
-      final core = ControlledCore();
-      final session = await start(core);
-      final editor = session.value.editor!;
-      insert(editor, 'unwritten');
-      final reopening = session.reopen(
-        NotebookDisposition.write,
-        (request) => answer(editor, request),
-      );
-      await turn();
-      core.writes.single.completion.completeError(
-        const CoreException(18, 'Disk base changed'),
-      );
-      expect(await reopening, isFalse);
-      expect(core.reads, 1);
-      expect(core.closes, 0);
-      expect(session.value.editor, same(editor));
-      expect(editor.value.text, 'base\r\nunwritten');
-      expect(editor.value.closed, isFalse);
-      expect(session.value.error, contains('18'));
-      expect(session.value.dirty, isTrue);
-    },
-  );
-
-  test('unchanged Write still flushes a snapshot but does not rewrite source policy', () async {
-    final core = ControlledCore();
-    final session = await start(core);
-    var snapshots = 0;
-    expect(
-      await session.write((request) {
-        snapshots++;
-        answer(session.value.editor!, request);
-      }),
-      isTrue,
-    );
-    expect(snapshots, 1);
-    expect(core.writes, isEmpty);
+    insert(editor, 'received');
+    expect(editor.value.revision, 1);
+    expect(session.value.draftRevision, 0);
     expect(session.value.onDiskRevision, 0);
-  });
-
-  test('cancel never sends a barrier or discards dirty source', () async {
-    final core = ControlledCore();
-    final session = await start(core);
-    insert(session.value.editor!, 'unsaved');
-    expect(
-      await session.reopen(
-        NotebookDisposition.cancel,
-        (_) => fail('No barrier'),
-      ),
-      isFalse,
-    );
-    expect(
-      await session.close(
-        NotebookDisposition.cancel,
-        (_) => fail('No barrier'),
-      ),
-      isFalse,
-    );
-    expect(core.reads, 1);
-    expect(core.closes, 0);
-    expect(session.value.dirty, isTrue);
-  });
-
-  test('discard reopen installs a fresh generation only after barrier and read success', () async {
-    final core = ControlledCore();
-    final session = await start(core);
-    final previous = session.value.editor!;
-    insert(previous, 'discarded');
-    core.readError = const CoreException(6, 'Read failed');
-    expect(
-      await session.reopen(
-        NotebookDisposition.discard,
-        (request) => answer(previous, request),
-      ),
-      isFalse,
-    );
-    expect(session.value.editor, same(previous));
-    expect(previous.value.text, 'base\r\ndiscarded');
-    core.readError = null;
-    core.nextRead = note(text: 'reopened\r\n', hash: secondHash);
-    expect(
-      await session.reopen(
-        NotebookDisposition.discard,
-        (request) => answer(previous, request),
-      ),
-      isTrue,
-    );
-    final next = session.value.editor!;
-    expect(next, isNot(same(previous)));
-    expect(next.generation, isNot(previous.generation));
-    expect(next.documentId, previous.documentId);
-    expect(next.value.text, 'reopened\r\n');
+    final writing = session.write((message) => answer(editor, message));
+    await turn();
+    expect(session.value.draftRevision, 1);
     expect(session.value.onDiskRevision, 0);
-    expect(session.value.dirty, isFalse);
-    ready(next);
-    final before = next.value;
-    next.receive(
-      jsonEncode(
-        reply(previous, 'edit', 'editor-2', {
-          'baseRevision': 1,
-          'changes': [],
-          'selection': {'anchor': 0, 'head': 0},
-        }, revision: 2),
-      ),
-    );
-    expect(next.value, same(before));
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    expect(await writing, isTrue); expect(session.value.dirty, isFalse);
   });
-
-  test('newer edits during write prevent close even after a successful captured write', () async {
-    final core = ControlledCore();
-    final session = await start(core);
+  test('one pinned in-flight candidate and newest pending target only', () async {
+    final core = ControlledCore(); final session = await start(core);
     final editor = session.value.editor!;
     insert(editor, 'one');
-    final closing = session.close(
-      NotebookDisposition.write,
-      (request) => answer(editor, request),
-    );
-    await turn();
+    final first = session.write((message) => answer(editor, message)); await turn();
     insert(editor, 'two');
-    core.writes.single.completion.complete(
-      CoreWriteResult(revision: 1, baseHash: secondHash),
-    );
-    expect(await closing, isFalse);
-    expect(core.closes, 0);
-    expect(session.value.onDiskRevision, 1);
+    final superseded = session.write((message) => answer(editor, message));
+    insert(editor, 'three');
+    final newest = session.write((message) => answer(editor, message));
+    expect(await superseded, isFalse); expect(core.writes.length, 1);
+    core.writes.first.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    expect(await first, isTrue); await turn();
+    expect(session.value.onDiskRevision, 1); expect(session.value.dirty, isTrue);
+    expect(core.writes.last.revision, 3); expect(core.writes.last.baseHash, secondHash);
+    core.writes.last.completion.complete(CoreWriteResult(revision: 3, baseHash: thirdHash));
+    expect(await newest, isTrue); expect(session.value.onDiskRevision, 3);
+  });
+  test('resource barrier delays body writes but not draft persistence', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!; final gate = Completer<void>();
+    final resources = session.withResources((_) => gate.future);
+    insert(editor, 'during resource copy');
+    final writing = session.write((message) => answer(editor, message));
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+    expect(session.value.draftRevision, 1); expect(core.writes, isEmpty);
+    await expectLater(session.withResources((_) async {}), throwsStateError);
+    gate.complete(); await resources; await turn();
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    expect(await writing, isTrue);
+  });
+  test('retained close freezes then persists exact prefix without body write', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!; insert(editor, 'retained');
+    expect(await session.close(NotebookDisposition.retain,
+      (message) => answer(editor, message)), isTrue);
+    expect(core.writes, isEmpty); expect(session.value.draftRevision, 1);
+    expect(session.value.closed, isTrue);
+  });
+  test('storage failure aborts close and does not erase accepted source', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!; insert(editor, 'retained');
+    _stores[session.drafts.root]!.appendError = StateError('quota exhausted');
+    expect(await session.close(NotebookDisposition.retain,
+      (message) => answer(editor, message)), isFalse);
+    expect(editor.value.quiesced, isFalse); expect(editor.value.closed, isFalse);
+    expect(editor.value.text, 'base\r\nretained'); expect(session.value.onDiskRevision, 0);
+    _stores[session.drafts.root]!.appendError = null;
+  });
+  test('receipt error stays visible and blocks automatic blind retry', () async {
+    final core = ControlledCore()..reconciliationError = StateError('receipt fsync failed');
+    final session = await start(core); final editor = session.value.editor!;
+    insert(editor, 'uncertain'); final writing = session.write((message) => answer(editor, message));
+    await turn(); core.writes.single.completion.completeError(StateError('core outcome uncertain'));
+    expect(await writing, isFalse); expect(session.value.recoveryRequired, isTrue);
+    expect(session.value.durabilityError, contains('receipt'));
+    expect(session.value.onDiskRevision, 0); expect(editor.value.text, contains('uncertain'));
+  });
+  test('new WebView token revision zero remains dirty without saved projection proof', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final previous = session.value.editor!; insert(previous, 'recover me');
+    final replacement = await session.recoverWebView();
+    expect(replacement.generation, isNot(previous.generation));
+    expect(replacement.value.revision, 0); expect(replacement.value.text, 'base\r\nrecover me');
+    expect(session.value.onDiskRevision, isNull); expect(session.value.dirty, isTrue);
+    expect(core.writes, isEmpty);
+  });
+  test('shutdown joins resources and persists received prefix without claiming saved', () async {
+    final core = ControlledCore(); final session = await start(core);
+    insert(session.value.editor!, 'private'); final gate = Completer<void>();
+    final resource = session.withResources((_) => gate.future);
+    final closing = session.shutdown(); await turn(); expect(core.closes, 0);
+    gate.complete(); await resource; await closing;
+    expect(core.closes, 1); expect(core.writes, isEmpty);
+    expect(session.value.draftRevision, 1); expect(session.value.onDiskRevision, 0);
+  });
+  test('foreground autosave uses bound transport and pause cancels body admission', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    session.bindTransport((message) => answer(editor, message));
+    insert(editor, 'autosave');
+    await Future<void>.delayed(const Duration(milliseconds: 850));
+    expect(core.writes.length, 1);
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    await turn(); session.setForeground(false); insert(editor, 'paused');
+    await Future<void>.delayed(const Duration(milliseconds: 850));
+    expect(core.writes.length, 1); expect(session.value.draftRevision, 2);
     expect(session.value.dirty, isTrue);
-    expect(editor.value.closed, isFalse);
+  });
+  testWidgets('continuous input cannot postpone foreground autosave past five seconds', (tester) async {
+    final core = ControlledCore();
+    final drafts = presentationDrafts();
+    final session = NotebookSession(openCore: () async => core, drafts: drafts,
+      notebookRelative: 'book');
+    await session.initialize(); final editor = session.value.editor!; ready(editor);
+    session.bindTransport((message) => answer(editor, message));
+    for (var revision = 0; revision < 10; revision++) {
+      insert(editor, 'x');
+      await tester.pump(const Duration(milliseconds: 500));
+      if (revision < 9) expect(core.writes, isEmpty);
+    }
+    expect(core.writes.length, 1, reason: 'session=${session.value.error}, editor=${editor.value.error}, durability=${session.value.durabilityError}, writing=${session.value.writing}, durable=${session.value.draftRevision}');
+    expect(core.writes.single.revision, 10);
+    core.writes.single.completion.complete(CoreWriteResult(revision: 10, baseHash: secondHash));
+    await tester.pump();
+    expect(session.value.onDiskRevision, 10);
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
   });
 
-  test(
-    'pending JS input at a written-close barrier cannot be discarded as clean',
-    () async {
-      final core = ControlledCore();
-      final session = await start(core);
-      final editor = session.value.editor!;
-      final completed = await session.close(NotebookDisposition.write, (
-        request,
-      ) {
-        if (request['type'] == 'save') {
-          answer(editor, request);
-        } else {
-          insert(editor, 'last composition');
-          editor.receive(
-            jsonEncode(
-              reply(editor, 'ack', request['requestId']! as String, {
-                'stage': 'rejected',
-                'throughRevision': editor.value.revision,
-                'error': 'Newer editor revision',
-              }),
-            ),
-          );
-        }
-      });
-      expect(completed, isFalse);
-      expect(core.closes, 0);
-      expect(editor.value.ready, isTrue);
-      expect(session.value.dirty, isTrue);
-    },
-  );
+  test('failed startup has no fabricated editor and retry uses the real admission factory', () async {
+    final drafts = presentationDrafts(); final core = ControlledCore();
+    var attempts = 0;
+    final session = NotebookSession(drafts: drafts, notebookRelative: 'book', openCore: () async {
+      if (++attempts == 1) throw const CoreException(8, 'Invalid existing metadata');
+      return core;
+    });
+    await session.initialize(); expect(session.value.editor, isNull);
+    expect(session.value.error, contains('8')); expect(core.reads, 0);
+    await session.retryOpen(); expect(attempts, 2);
+    expect(session.value.note!.nodeId, core.nextRead.nodeId); expect(session.value.error, isNull);
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+  });
 
-  test('discard can exit a failed transport and native close is awaited asynchronously', () async {
+  test('disposal during startup joins the opened native owner without loading a view', () async {
+    final drafts = presentationDrafts(); final core = ControlledCore();
+    final pending = Completer<NotebookCore>();
+    final session = NotebookSession(openCore: () => pending.future,
+      drafts: drafts, notebookRelative: 'book');
+    final initializing = session.initialize(); session.dispose(); pending.complete(core);
+    await initializing; await session.shutdown();
+    expect(core.reads, 0); expect(core.closes, 1);
+    await drafts.shutdown(); drafts.dispose();
+  });
+
+  test('explicit failed-view discard joins native close without pretending a quiesce succeeded', () async {
     final core = ControlledCore()..closeGate = Completer<void>();
-    final session = await start(core);
+    final session = await start(core); final editor = session.value.editor!;
+    insert(editor, 'copyable until discard'); editor.reportTransportError('View lost');
+    final closing = session.close(NotebookDisposition.discard,
+      (_) => fail('A lost transport cannot acknowledge a flush'));
+    await turn(); expect(core.closes, 1); expect(session.value.closed, isFalse);
+    expect(editor.value.text, 'base\r\ncopyable until discard');
+    core.closeGate!.complete(); expect(await closing, isTrue);
+    expect(session.value.closed, isTrue); expect(core.writes, isEmpty);
+  });
+
+  test('no-edit write and close create no journal and do not normalize bytes', () async {
+    final core = ControlledCore(); final session = await start(core);
     final editor = session.value.editor!;
-    insert(editor, 'copyable');
-    editor.reportTransportError('Editor channel lost');
-    final closing = session.close(
-      NotebookDisposition.discard,
-      (_) => fail('Broken channel must not block explicitly confirmed discard'),
-    );
-    await turn();
-    expect(core.closes, 1);
-    expect(session.value.closed, isFalse);
-    expect(session.value.transitioning, isTrue);
-    core.closeGate!.complete();
-    expect(await closing, isTrue);
-    expect(session.value.closed, isTrue);
-    expect(editor.value.text, 'base\r\ncopyable');
-    await session.shutdown();
-    await session.shutdown();
-    expect(core.closes, 1);
+    expect(await session.write((message) => answer(editor, message)), isTrue);
+    expect(await session.close(NotebookDisposition.write,
+      (message) => answer(editor, message)), isTrue);
+    expect(_stores[session.drafts.root]!.records, isEmpty); expect(core.writes, isEmpty);
+  });
+  test('cancel has no barrier, source discard, or notebook mutation', () async {
+    final core = ControlledCore(); final session = await start(core);
+    insert(session.value.editor!, 'unsaved');
+    expect(await session.close(NotebookDisposition.cancel, (_) => fail('No barrier')), isFalse);
+    expect(core.closes, 0); expect(session.value.dirty, isTrue);
+  });
+  test('resource links remain escaped and confined', () {
+    expect(resourceMarkdownLink(name: '[x]', relativeUrl: 'files/a%20(b).bin'),
+      r'[\[x\]](files/a%2520%28b%29.bin)');
+    for (final path in ['/root', '../asset', 'a//b', 'a/./b', 'https:asset', 'a\\b', 'a\nb']) {
+      expect(() => resourceMarkdownLink(name: 'file', relativeUrl: path), throwsStateError);
+    }
   });
 }

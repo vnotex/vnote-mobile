@@ -7,6 +7,7 @@ import 'package:flutter/foundation.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'managed_notebook_storage.dart';
+import 'editor_drafts.dart';
 import 'notebook_export.dart';
 import 'notebook_import.dart';
 import 'document_transfer_platform.dart';
@@ -83,12 +84,14 @@ class NotebookLibraryState {
     this.cohortState = const CohortImportState(),
     this.resourceState = const ResourceTransferState(),
     this.transferReserved = false,
+    this.draftState = const EditorDraftsState(),
   });
   final NotebookExportState exportState;
   final NotebookImportState importState;
   final CohortImportState cohortState;
   final ResourceTransferState resourceState;
   final bool transferReserved;
+  final EditorDraftsState draftState;
   final List<ManagedNotebookEntry> entries;
   final NotebookWorkspace? workspace;
   final bool busy;
@@ -109,6 +112,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     LibraryCreateImporter? createImporter,
     LibraryCreateCohortImporter? createCohortImporter,
     LibraryCreateResourceTransfer? createResourceTransfer,
+    EditorDrafts Function(String root)? createDrafts,
   }) : _obtainStorage = obtainStorage ?? ManagedNotebookStorage.obtain,
        _openCatalog = openCatalog ?? _open,
        _createCatalog = createCatalog ?? _create,
@@ -118,6 +122,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
        _createImporter = createImporter ?? _importerFor,
        _createCohortImporter = createCohortImporter ?? _cohortImporterFor,
        _createResourceTransfer = createResourceTransfer ?? _resourceTransferFor,
+       _createDrafts = createDrafts ?? _draftsFor,
        super(const NotebookLibraryState());
 
   final Future<ManagedNotebookStorage> Function() _obtainStorage;
@@ -129,6 +134,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   final LibraryCreateImporter _createImporter;
   final LibraryCreateCohortImporter _createCohortImporter;
   final LibraryCreateResourceTransfer _createResourceTransfer;
+  final EditorDrafts Function(String root) _createDrafts;
+  EditorDrafts? _drafts;
+  EditorDrafts? get drafts => _drafts;
   CohortImporter? _cohortImporter;
   ResourceTransfer? _resourceTransfer;
   CohortImportState _cohortFallback = const CohortImportState();
@@ -189,6 +197,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       cohortState: _cohortImporter?.value ?? _cohortFallback,
       resourceState: _resourceTransfer?.value ?? _resourceFallback,
       transferReserved: _transferOwner != null || _transferCall != null,
+      draftState: _drafts?.value ?? const EditorDraftsState(),
     );
   }
 
@@ -227,6 +236,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _transferCall = owner;
     _transferLease = Completer<void>();
     if (_transferOwner != 'blocked') _transferOwner = owner;
+    _publish();
     return true;
   }
 
@@ -292,6 +302,160 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   void _releaseController(Object owner) => _transferChanged();
+
+  static EditorDrafts _draftsFor(String root) => EditorDrafts(root: root);
+
+  Future<void> _ensureDrafts() async {
+    if (_drafts == null) {
+      final root = await _storage!.obtainDraftRoot();
+      _drafts = _createDrafts(root)..addListener(_publish);
+    }
+    await _drafts!.initialize(reconcile: _reconcileDraft);
+  }
+
+  Future<CoreDraftInspection> _reconcileDraft(DraftRecoveryEntry entry) async {
+    final relative = entry.notebookRelative;
+    if (relative == null || entry.notebookId == null || entry.nodeId == null ||
+        relative != p.basename(relative) || relative == '.' || relative == '..' ||
+        relative.contains('/') || relative.contains('\\')) {
+      throw StateError('The retained draft has no safe notebook identity.');
+    }
+    final paths = await _storage!.existing(p.join(_storage!.root, relative));
+    // Inspection runtimes never live under the journal quota/authority tree and
+    // never reuse an old native buffer namespace after a crash.
+    final runtime = newTransferId();
+    final core = await CoreNotebook.openResources(
+      appDataPath: p.join(paths.app, 'draft-recovery', runtime),
+      localDataPath: p.join(paths.local, 'draft-recovery', runtime),
+      notebookPath: paths.notebook,
+      notebookId: entry.notebookId!, nodeId: entry.nodeId!);
+    _temporaryResource = core;
+    try {
+      return await core.reconcileDraft(draftsRoot: _drafts!.root,
+        documentKey: entry.documentKey, token: entry.token);
+    } finally {
+      await core.close();
+      if (identical(_temporaryResource, core)) _temporaryResource = null;
+    }
+  }
+
+  Future<DraftRecoveryInspection?> inspectDraft(DraftRecoveryEntry entry) async {
+    if (_workspace != null || _drafts == null || !_admit()) return null;
+    try { return await _drafts!.inspect(entry, _reconcileDraft); }
+    finally { _retire(); }
+  }
+
+  Future<bool> restoreDraft(DraftRecoveryEntry entry) async {
+    if (_workspace != null || _drafts == null || !_admit()) return false;
+    try {
+      final matches = _entries.where((item) => item.notebookId == entry.notebookId).toList();
+      if (_stale || matches.length != 1 || !matches.single.canOpen ||
+          p.basename(matches.single.location) != entry.notebookRelative ||
+          _blockedNotebook(matches.single.location)) {
+        throw StateError('The managed notebook identity is unavailable or quarantined. The private draft remains retained.');
+      }
+      final inspection = await _drafts!.inspect(entry, _reconcileDraft);
+      if (!inspection.canRestore) {
+        throw StateError(inspection.error ?? 'Current disk and private source conflict; neither was overwritten.');
+      }
+      final checkpoint = await _drafts!.rebase(inspection.entry, newTransferId());
+      final proof = await _reconcileDraft(DraftRecoveryEntry(checkpoint));
+      if (proof.record['outcome'] == 'conflict') {
+        throw StateError('Disk changed during restoration. Both private captures are retained.');
+      }
+      final paths = await _storage!.existing(p.join(_storage!.root, entry.notebookRelative!));
+      if (!await _select(paths, entry.notebookId!)) return false;
+      return await _workspace!.openRecovered(entry.nodeId!, proof.record);
+    } on Object catch (error) { _error = _describe(error); return false; }
+    finally { _retire(); }
+  }
+
+  Future<void> discardDraft(DraftRecoveryEntry entry) async {
+    if (_workspace != null || _drafts == null || !_admit()) return;
+    try { await _drafts!.discard(entry); }
+    on Object catch (error) { _error = _describe(error); }
+    finally { _retire(); }
+  }
+
+  Future<void> exportDraft(DraftRecoveryEntry entry, {bool raw = false}) async {
+    if (_workspace != null || _drafts == null || _resourceTransfer == null ||
+        _active != null || !_claimTransfer('resource')) {
+      return;
+    }
+    if (!_admit()) { _finishTransferCall(); return; }
+    Map<String, Object?>? pinned;
+    try {
+      final binding = await _drafts!.prepareExport(entry, raw: raw);
+      pinned = binding;
+      final detachedArchive = entry.notebookId == null || entry.nodeId == null ||
+          entry.notebookRelative == null;
+      if (detachedArchive && !raw) {
+        throw StateError('Only a raw archive can export an unidentifiable journal.');
+      }
+      final attempt = await _resourceTransfer!.start(
+        target: detachedArchive
+          ? ResourceTarget(notebookId: 'private-draft', nodeId: entry.documentKey,
+              notebookRelative: 'private-draft')
+          : ResourceTarget(notebookId: entry.notebookId!, nodeId: entry.nodeId!,
+              notebookRelative: entry.notebookRelative!),
+        operation: ResourceOperation.export,
+        name: raw ? 'draft-journal.bin' : 'recovered-draft.md',
+        origin: ResourceExportOrigin.draft, binding: binding);
+      if (attempt != null) {
+        await _resourceTransfer!.prepareExport(attempt, _exportRetainedResource);
+        final ready = _resourceTransfer!.value.current;
+        if (!_stopping && ready?.stage == TransferStage.exportReady) {
+          await _resourceTransfer!.save(ready!);
+        }
+      }
+    } on Object catch (error) { _error = _describe(error); }
+    finally {
+      if (pinned != null && !_resourceTransfer!.value.attempts.any((attempt) =>
+          attempt.origin == ResourceExportOrigin.draft &&
+          attempt.binding?['candidateId'] == pinned!['candidateId'])) {
+        try {
+          await runDraftStore({'op': 'releaseExport', 'draftsRoot': _drafts!.root,
+            'documentKey': entry.documentKey, 'token': entry.token,
+            'candidateId': pinned['candidateId']});
+        } on Object catch (error) { _error = _describe(error); }
+      }
+      _retire(); _finishTransferCall();
+    }
+  }
+
+  Future<void> exportPreview(NotebookWorkspace workspace, NotebookSession session,
+      CorePreviewSnapshot snapshot, String fileHandle) async {
+    final target = resourceTarget(workspace, session);
+    if (_resourceTransfer == null || !_claimTransfer('resource')) return;
+    final requestId = newTransferId();
+    var pinned = false;
+    try {
+      final captured = await runPreviewStore({...snapshot.command('prepareExport'),
+        'handle': fileHandle, 'leaseId': requestId});
+      pinned = true;
+      final attempt = await _resourceTransfer!.start(target: target,
+        operation: ResourceOperation.export, requestId: requestId,
+        name: captured['name'] as String,
+        origin: ResourceExportOrigin.previewFile,
+        binding: Map<String, Object?>.from(captured['binding'] as Map));
+      if (attempt != null) {
+        await _resourceTransfer!.prepareExport(attempt, _exportRetainedResource);
+        final ready = _resourceTransfer!.value.current;
+        if (!_stopping && ready?.stage == TransferStage.exportReady) {
+          await _resourceTransfer!.save(ready!);
+        }
+      }
+    } on Object catch (error) { _error = _describe(error); }
+    finally {
+      if (pinned && !_resourceTransfer!.value.attempts.any((attempt) => attempt.id == requestId)) {
+        try {
+          await runPreviewStore({...snapshot.command('releaseExport'),
+            'transactionRoot': p.join(_resourceTransfer!.root, requestId)});
+        } on Object catch (error) { _error = _describe(error); }
+      }
+      _finishTransferCall();
+    }
+  }
 
   Future<void> _ensureOfflineTransfers() async {
     try {
@@ -434,6 +598,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     TransferCancellation cancellation,
     bool recover,
   ) async {
+    if (_drafts?.value.initialized != true) {
+      throw StateError('Private draft recovery must finish before admitting notebook mutations.');
+    }
     if (_workspace != null) {
       throw StateError('Return to Notebooks before applying files.');
     }
@@ -459,6 +626,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     TransferCancellation cancellation,
     bool recover,
   ) async {
+    if (_drafts?.value.initialized != true) {
+      throw StateError('Private draft recovery must finish before admitting resource mutations.');
+    }
     if (_workspace != null) {
       throw StateError('Return to Notebooks before recovering resources.');
     }
@@ -519,6 +689,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     ResourceAttempt attempt,
     TransferCancellation cancellation,
   ) async {
+    if (attempt.origin != ResourceExportOrigin.asset) {
+      return _exportRetainedResource(attempt, cancellation);
+    }
     cancellation.onCancel = core.cancelResourceRead;
     try {
       cancellation.check();
@@ -533,6 +706,29 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     TransferCancellation cancellation,
   ) async {
     cancellation.check();
+    switch (attempt.origin) {
+      case ResourceExportOrigin.draft:
+        final binding = attempt.binding!;
+        if (_drafts == null) throw StateError('Private draft storage is unavailable; the export remains retained.');
+        final snapshot = await _drafts!.export(DraftRecoveryEntry(binding), binding, attempt.transactionRoot);
+        await _releaseExportSource(attempt);
+        return snapshot;
+      case ResourceExportOrigin.previewFile:
+        final binding = attempt.binding!;
+        final result = await runPreviewStore({
+          'op': 'export', 'previewRoot': await _storage!.obtainPreviewRoot(),
+          'previewId': binding['previewId'], 'renderId': binding['renderId'],
+          'transactionRoot': attempt.transactionRoot,
+        });
+        await _releaseExportSource(attempt);
+        return CoreResourceExport(name: result['name'] as String,
+          path: result['path'] as String, bytes: result['bytes'] as int,
+          sha256: result['sha256'] as String);
+      case null:
+        throw StateError('The original export source is unavailable. The request remains retained.');
+      case ResourceExportOrigin.asset:
+        break;
+    }
     final paths = await _transferPaths(
       attempt.target.notebookRelative,
       attempt.transactionRoot,
@@ -550,6 +746,26 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     } finally {
       await core.close();
       if (identical(_temporaryResource, core)) _temporaryResource = null;
+    }
+  }
+
+  Future<void> _releaseExportSource(ResourceAttempt attempt) async {
+    final binding = attempt.binding;
+    if (binding == null) return;
+    switch (attempt.origin) {
+      case ResourceExportOrigin.draft:
+        if (_drafts == null) throw StateError('The draft export pin remains retained.');
+        await runDraftStore({'op': 'releaseExport', 'draftsRoot': _drafts!.root,
+          'documentKey': binding['documentKey'], 'token': binding['token'],
+          'candidateId': binding['candidateId']});
+      case ResourceExportOrigin.previewFile:
+        await runPreviewStore({'op': 'releaseExport',
+          'previewRoot': await _storage!.obtainPreviewRoot(),
+          'previewId': binding['previewId'], 'renderId': binding['renderId'],
+          'transactionRoot': attempt.transactionRoot});
+      case ResourceExportOrigin.asset:
+      case null:
+        return;
     }
   }
 
@@ -771,6 +987,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
           operation: operation,
           name: name,
           newName: newName,
+          origin: operation == ResourceOperation.export ? ResourceExportOrigin.asset : null,
+          binding: operation == ResourceOperation.export ? {'name': name} : null,
         );
         if (attempt == null ||
             attempt.target.notebookId != target.notebookId ||
@@ -854,6 +1072,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
             recover: apply,
             abandon: abandon,
           );
+          if (!_resourceTransfer!.value.attempts.any((item) => item.id == attempt.id)) {
+            await _releaseExportSource(attempt);
+          }
         } else if (attempt.operation == ResourceOperation.export) {
           if (attempt.stage != TransferStage.exportReady) {
             await _resourceTransfer!.prepareExport(
@@ -952,6 +1173,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         recover: _applyRetainedResource,
         abandon: abandon,
       );
+      if (!_resourceTransfer!.value.attempts.any((item) => item.id == attempt.id)) {
+        await _releaseExportSource(attempt);
+      }
       if (!_stopping) await _discover();
     } on Object catch (error) {
       _error = _describe(error);
@@ -1488,6 +1712,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _stale = true;
     _storage ??= await _obtainStorage();
     if (_stopping) return;
+    // Reconcile all acknowledged source prefixes before admitting ordinary
+    // catalog/body writers or transfer recovery mutations.
+    Object? draftFailure;
+    try { await _ensureDrafts(); } on Object catch (error) { draftFailure = error; }
+    if (_stopping) return;
     _scanningTransfers = true;
     try {
       await _ensureExporter();
@@ -1497,6 +1726,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       _scanningTransfers = false;
     }
     _settleTransfer();
+    // A verified ready export owns its own bytes. Keep its scan/Save As visible
+    // even if the original draft namespace is unavailable; no writer is admitted.
+    if (draftFailure != null) throw draftFailure;
     if (_stopping) return;
     await _recoverOfflineTransfers();
     if (_stopping) return;
@@ -1618,6 +1850,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   Future<bool> _select(ManagedNotebookPaths paths, String id) async {
     if (_stopping) return false;
     final workspace = _createWorkspace(paths, id);
+    workspace.attachDrafts(_drafts!);
     _workspace = workspace;
     await workspace.initialize();
     if (_stopping) return false;
@@ -1743,6 +1976,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         if (core != null) await _release(core);
         await _temporaryResource?.close();
         _temporaryResource = null;
+        await _drafts?.shutdown();
+        _drafts?.removeListener(_publish);
+        _drafts?.dispose();
       } finally {
         try {
           final exporter = _exporter;

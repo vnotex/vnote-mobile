@@ -236,6 +236,31 @@ never for a legacy notebook backup. The internal artifact remains `notebook.zip`
 Android may suggest a `vnote-files-assets-<id>.zip` destination name, while iOS keeps
 its existing source-filename behavior. The format is not inferred from a filename.
 
+### Immutable preview and draft exports
+
+New resource exports use an exact nine-key v2 desired record:
+`{version,id,scope,target,operation,name,newName,origin,binding}`. Operation is
+export, newName is null, and origin is explicitly asset, preview-file or draft.
+Each origin has a closed native-validated immutable binding; no caller-supplied
+filesystem path or mutable draft-head reference is accepted. Existing exact
+seven-key v1 desired records retain only their historical asset meaning.
+
+Native asset owners refuse non-asset origins. Preview/draft exporters pin their
+source before publishing the desired record and create the same verified ready
+copy before provider IO. The provider-ready record remains the exact existing six
+keys `{version,id,scope,name,bytes,sha256}`; it does not acquire an origin field.
+After ready publication, retry needs only that immutable copy, not a core/editor.
+An unavailable unready origin remains visible and explicitly discardable, never
+recaptured through a different source API. Malformed mutation/ownership evidence
+still quarantines rather than authorizing deletion.
+
+Draft exports preserve the selected committed revision, independent of later edits
+or compaction. Invalid journals export bounded owned raw archives, not guessed text;
+unidentifiable records use private raw-export targets rather than fabricated notebook
+identity. Durable export references prevent reclamation until the ready copy or
+explicit owned abandonment settles. Provider Save As uses the existing leases,
+backup exclusion, quota and joined-worker cleanup boundary.
+
 ## Archive/provider preflight and quotas
 
 Selected archive interchange is ZIP (store/deflate, including valid ZIP64 within limits). Other archive types, encrypted archives, split volumes and unsupported compression methods are rejected with an explanation; opaque archive attachments are preserved, not recursively extracted. Import can also accept provider-selected files/trees under the same path/size rules.
@@ -311,12 +336,17 @@ Implemented controls: Android explicitly disables backup and provides old/new XM
 exclusions for all documented credential/device-protected storage domains, including
 both cloud backup and device transfer. No `device_external` domain is invented.
 iOS storage preparation sets/verifies exclusion on stable Application Support,
-`core/`, `notebooks/`, `exports/` and `imports/` directories before child writes, repeats at
+`core/`, `notebooks/`, `exports/`, `imports/`, `drafts/` and `previews/` directories before child writes, repeats at
 startup/before export, and never replaces those group directories. This follows
 [Apple's directory-group guidance](https://developer.apple.com/documentation/foundation/optimizing-your-app-s-data-for-icloud-backup),
 which explicitly says exclusion is guidance, not a guarantee. Failure is visible;
 there is no unprotected fallback. Android manifest flags are exercised, but actual
 OEM transfer/iOS backup artifacts remain an open verification gate.
+
+Drafts and preview staging additionally select and read back iOS
+`completeUntilFirstUserAuthentication` protection before admission. Protected-data
+or exclusion failures have no unprotected/cache fallback. This source-level policy
+still requires real locked/unlocked-device and inherited-child verification.
 
 Credentials remain in iOS Keychain/Android Keystore-backed encrypted storage via the reviewed credential service. Select device-bound, nonsynchronizing credential storage and require reauthentication after migration. No plaintext fallback, notebook metadata credential, share-in secret, WebView credential, signing key or recovery secret enters the inbox/portable export. Known core sync runtime/session state and application vault data are not portable notebook payload. Preserve unknown user files rather than deleting anything that looks private; if a legacy notebook actually embeds known credential fields, stop export/import and explain the remediation instead of silently leaking or rewriting them.
 

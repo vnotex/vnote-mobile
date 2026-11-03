@@ -210,6 +210,11 @@ final class _Fixture {
       'operation': operation,
       'name': name,
       'newName': newName,
+      if (operation == 'export') ...{
+        'version': 2,
+        'origin': 'asset',
+        'binding': {'name': name},
+      },
     });
     return id;
   }
@@ -381,6 +386,74 @@ void main() {
       throwsA(_failure),
     );
     expect(await File('${fixture.assetPath}/opaque.bin').readAsBytes(), bytes);
+  });
+
+  test('stored phase-2 asset exports remain readable without origin inference for new records', () async {
+    await Directory(fixture.assetPath).create(recursive: true);
+    await File('${fixture.assetPath}/legacy.bin').writeAsBytes([1, 0, 255]);
+    final id = await fixture.intent('export', 'legacy.bin');
+    final transaction = fixture.transaction('resource', id);
+    final desiredFile = File('$transaction/resource.json');
+    final desired = jsonDecode(await desiredFile.readAsString()) as Map<String, dynamic>;
+    desired['version'] = 1;
+    desired.remove('origin');
+    desired.remove('binding');
+    await desiredFile.writeAsString(jsonEncode(desired), flush: true);
+    expect(desired.keys, hasLength(7));
+    final core = await fixture.resources();
+    final ready = await core.exportResource('legacy.bin', transaction);
+    expect(await File(ready.path).readAsBytes(), [1, 0, 255]);
+    expect((await fixture.run('resource', id, 'verifyExport'))['sha256'], ready.sha256);
+  });
+
+  test('asset exporter refuses draft and preview origins even when an asset name and ready copy match', () async {
+    await Directory(fixture.assetPath).create(recursive: true);
+    const bytes = [17, 0, 33, 255];
+    await File('${fixture.assetPath}/same.bin').writeAsBytes(bytes);
+    final core = await fixture.resources();
+    final hash = sha256.convert(bytes).toString();
+    final zeroId = '0'.padLeft(32, '0');
+    final origins = <String, Map<String, Object?>>{
+      'preview-file': {
+        'previewId': zeroId, 'renderId': zeroId, 'handle': zeroId,
+        'sourceHash': hash, 'manifestHash': hash,
+      },
+      'draft': {
+        'documentKey': hash, 'token': zeroId, 'revision': 7,
+        'candidateId': zeroId, 'sha256': hash, 'format': 'text',
+      },
+    };
+    for (final origin in origins.entries) {
+      for (final readyFirst in [false, true]) {
+        final id = await fixture.intent('export', 'same.bin');
+        final transaction = fixture.transaction('resource', id);
+        if (readyFirst) await core.exportResource('same.bin', transaction);
+        final desiredFile = File('$transaction/resource.json');
+        final desired = jsonDecode(await desiredFile.readAsString()) as Map<String, dynamic>;
+        desired['origin'] = origin.key;
+        desired['binding'] = origin.value;
+        await desiredFile.writeAsString(jsonEncode(desired), flush: true);
+        await expectLater(core.exportResource('same.bin', transaction), throwsA(_failure));
+        if (readyFirst) {
+          // Source-independent provider retry is still valid, but the asset
+          // owner must not claim authority over this desired record.
+          expect((await fixture.run('resource', id, 'verifyExport'))['sha256'], hash);
+        } else {
+          expect(await Directory('$transaction/output').exists(), isFalse);
+        }
+        expect(await File('${fixture.assetPath}/same.bin').readAsBytes(), bytes);
+      }
+    }
+  });
+
+  test('new export intents require explicit v2 asset binding and reject mismatched names', () async {
+    final id = await fixture.allocate('resource');
+    final command = {'operation': 'export', 'name': 'safe.bin', 'newName': null};
+    await expectLater(fixture.run('resource', id, 'writeResourceIntent', command), throwsA(_failure));
+    await expectLater(fixture.run('resource', id, 'writeResourceIntent', {
+      ...command, 'version': 2, 'origin': 'asset', 'binding': {'name': 'different.bin'},
+    }), throwsA(_failure));
+    expect(await File('${fixture.transaction('resource', id)}/resource.json').exists(), isFalse);
   });
 
   test('cohort private build preserves raw wrapper layout and sealed IDs across apply/recovery', () async {

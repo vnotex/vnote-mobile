@@ -4,15 +4,15 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; connect-src 'none'; base-uri 'none'; form-action 'none'">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'nonce-__VNOTE_NONCE__'; style-src 'nonce-__VNOTE_NONCE__'; img-src 'none'; font-src 'none'; connect-src 'none'; base-uri 'none'; object-src 'none'; frame-src 'none'; media-src 'none'; worker-src 'none'; form-action 'none'">
   <title>VNote source editor</title>
-  <link rel="stylesheet" href="editor.css">
-  <script src="editor.js" defer></script>
+  <meta name="vnote-csp-nonce" content="__VNOTE_NONCE__">
+  <style nonce="__VNOTE_NONCE__">__VNOTE_STYLE__</style>
 </head>
 <body>
   <header>
     <h1 id="source-title">Source</h1>
-    <p>Use Write to update the notebook. Unsaved input has no crash-recovery guarantee.</p>
+    <p>Received input is held in memory. Draft saved confirms private recovery storage; Saved locally confirms the notebook write.</p>
   </header>
   <p id="status" role="status" aria-live="polite" aria-atomic="true">Waiting for the host. Editing is disabled.</p>
   <p id="history-notice" role="status" hidden>Older undo history reached its limit and was removed. Current text and recent undo steps are retained.</p>
@@ -24,5 +24,6 @@
     <textarea id="candidate" readonly aria-label="Uncommitted composition candidate" spellcheck="false"></textarea>
     <button id="dismiss" type="button">Dismiss candidate</button>
   </section>
+  <script nonce="__VNOTE_NONCE__">__VNOTE_SCRIPT__</script>
 </body>
 </html>

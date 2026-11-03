@@ -7,8 +7,10 @@
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <string>
+#include <string_view>
 #include <vector>
 
+struct VxmImportCancel;
 namespace vxm_import {
 struct Inspection {
   std::string notebook_id;
@@ -35,17 +37,29 @@ bool Exists(const std::filesystem::path &path);
 Json Info(const std::filesystem::path &path, bool hash = false,
           const std::atomic<bool> *cancel = nullptr, uint64_t limit = 1024ULL * 1024 * 1024);
 Json ReadJson(const std::filesystem::path &path, size_t limit = 8 * 1024 * 1024);
+Json Parse(std::string_view input, size_t limit);
+std::string Hash(std::string_view input);
+const std::atomic<bool> *Cancellation(const VxmImportCancel *cancel);
+void Bytes(const std::filesystem::path &path, std::string_view bytes);
+void Append(const std::filesystem::path &path, uint64_t committed_offset,
+            std::string_view bytes, const Json *expected = nullptr);
+void Truncate(const std::filesystem::path &path, uint64_t committed_offset,
+              const Json *expected = nullptr);
 std::string Read(const std::filesystem::path &path, size_t limit);
 std::string Header(const std::filesystem::path &path, size_t count);
 void Marker(const std::filesystem::path &directory, const std::string &name,
             const Json &value, size_t limit = 16384);
 void ReplaceMarker(const std::filesystem::path &directory, const std::string &name,
-                   const Json &expected, const Json &value);
+                   const Json &expected, const Json &value, size_t limit = 16384);
 void MakeDirectory(const std::filesystem::path &path);
 void Move(const std::filesystem::path &source, const std::filesystem::path &target);
 void RemovePrivate(const std::filesystem::path &path);
+void FlushDirectory(const std::filesystem::path &path);
 Json Copy(const std::filesystem::path &source, const std::filesystem::path &target,
           uint64_t limit, const std::atomic<bool> *cancel = nullptr);
+Json CopyChecked(const std::filesystem::path &source, const std::filesystem::path &target,
+                 uint64_t limit, const Json &expected,
+                 const std::atomic<bool> *cancel = nullptr);
 Json Tree(const std::filesystem::path &root, const std::atomic<bool> *cancel = nullptr);
 Json CopyTree(const std::filesystem::path &source, const std::filesystem::path &target,
               const std::atomic<bool> *cancel = nullptr);

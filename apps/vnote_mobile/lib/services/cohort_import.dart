@@ -565,7 +565,7 @@ class CohortImporter extends TransferController<CohortImportState> {
               TransferStage.quarantined ||
               TransferStage.committed:
             await _apply(current, apply, recover: true);
-          case TransferStage.exportReady:
+          case TransferStage.exportReady || TransferStage.exportUnavailable:
             throw const TransferFailure('Invalid cohort export state.');
         }
       } catch (error) {

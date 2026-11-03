@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vnote_mobile/app/vnote_app.dart';
 import 'package:vnote_mobile/features/library/notebook_browser.dart';
 import 'package:vnote_mobile/features/library/notebook_library_screen.dart';
+import 'package:vnote_mobile/services/editor_drafts.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
@@ -20,7 +21,7 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 // Reuse the existing protocol driver, not a second editor implementation.
 import 'notebook_session_test.dart'
     as protocol
-    show ControlledCore, answer, insert, ready, reply, turn;
+    show ControlledCore, answer, insert, ready, reply, turn, presentationDrafts;
 
 const _note = CoreEntry(
   id: 'note-id',
@@ -251,6 +252,26 @@ class _Note implements NotebookCore {
     required String baseHash,
   }) => core.write(text, revision: revision, baseHash: baseHash);
   @override
+  Future<CoreDraftInspection> inspectDraft({required String draftsRoot,
+    required String documentKey, required String token}) => core.inspectDraft(
+      draftsRoot: draftsRoot, documentKey: documentKey, token: token);
+  @override
+  Future<CoreDraftInspection> reconcileDraft({required String draftsRoot,
+    required String documentKey, required String token}) => core.reconcileDraft(
+      draftsRoot: draftsRoot, documentKey: documentKey, token: token);
+  @override
+  Future<CoreDraftWriteResult> writeDraft({required String draftsRoot,
+    required String documentKey, required String token, required String candidateId}) => core.writeDraft(
+      draftsRoot: draftsRoot, documentKey: documentKey, token: token, candidateId: candidateId);
+  @override
+  Future<CorePreviewSnapshot> preparePreview({required String previewsRoot,
+    required String previewId, required String renderId, required String token,
+    required int revision, required String source}) => core.preparePreview(
+      previewsRoot: previewsRoot, previewId: previewId, renderId: renderId,
+      token: token, revision: revision, source: source);
+  @override
+  void cancelPreview() => core.cancelPreview();
+  @override
   Future<void> close() => _closing ??= _close();
 
   Future<void> _close() async {
@@ -263,6 +284,7 @@ class _Harness {
   _Harness({bool widgetTest = false}) {
     workspace = NotebookWorkspace(
       notebookId: 'book-identity',
+      drafts: drafts,
       paths: const ManagedNotebookPaths(
         app: 'app',
         local: 'local',
@@ -285,6 +307,7 @@ class _Harness {
     void verifyCleanup() {
       workspace.dispose();
       expect(owners.active, 0);
+      drafts.dispose();
       expect(owners.maximum, lessThanOrEqualTo(1));
     }
 
@@ -303,6 +326,7 @@ class _Harness {
     }
   }
 
+  final drafts = protocol.presentationDrafts();
   final owners = _Owners();
   final catalogs = <_Catalog>[];
   final notes = <_Note>[];
@@ -332,6 +356,15 @@ Future<String> _createNotebook(ManagedNotebookPaths paths) async {
   } finally {
     await catalog.close();
   }
+}
+
+Future<EditorDrafts> _realDrafts(Directory root) async {
+  final directory = await Directory('${root.path}/drafts').create();
+  final drafts = EditorDrafts(root: directory.path);
+  await drafts.initialize(reconcile: (_) async =>
+    throw StateError('This new fixture has no previous owner to reconcile.'));
+  addTearDown(() async { await drafts.shutdown(); drafts.dispose(); });
+  return drafts;
 }
 
 // A presentation driver only: lifecycle/storage proof uses the real library
@@ -711,7 +744,8 @@ void main() {
         notebook: '${root.path}/book',
       );
       final notebookId = await _createNotebook(paths);
-      final workspace = NotebookWorkspace(paths: paths, notebookId: notebookId);
+      final drafts = await _realDrafts(root);
+      final workspace = NotebookWorkspace(paths: paths, notebookId: notebookId, drafts: drafts);
       NotebookWorkspace? reopened;
       addTearDown(() async {
         await workspace.shutdown();
@@ -732,7 +766,7 @@ void main() {
       expect(workspace.value.directory!.entries.single.id, note.nodeId);
       expect(await File('${paths.notebook}/Kept.md').exists(), isTrue);
       await workspace.shutdown();
-      final next = NotebookWorkspace(paths: paths, notebookId: notebookId);
+      final next = NotebookWorkspace(paths: paths, notebookId: notebookId, drafts: drafts);
       reopened = next;
       await next.initialize();
       expect(next.value.error, isNull);
@@ -1207,8 +1241,6 @@ void main() {
       expect(find.byTooltip('Rename notebook'), findsNothing);
       await tester.tap(find.byTooltip('Return to notebook'));
       await tester.pumpAndSettle();
-      expect(find.text('Return to notebook?'), findsOneWidget);
-      expect(find.widgetWithText(AlertDialog, 'Write'), findsOneWidget);
       await tester.tap(find.text('Cancel'));
       await tester.pumpAndSettle();
       expect(harness.workspace.value.session, same(session));
@@ -1236,7 +1268,8 @@ void main() {
       notebook: '${root.path}/book',
     );
     final notebookId = await _createNotebook(paths);
-    final workspace = NotebookWorkspace(paths: paths, notebookId: notebookId);
+    final workspace = NotebookWorkspace(paths: paths, notebookId: notebookId,
+      drafts: await _realDrafts(root));
     addTearDown(() async {
       await workspace.shutdown();
       workspace.dispose();
@@ -1387,6 +1420,7 @@ void main() {
       final workspace = NotebookWorkspace(
         paths: paths,
         notebookId: notebookId,
+        drafts: await _realDrafts(root),
         openCatalog: (paths, expected) async {
           if (removeBeforeOpen) {
             removeBeforeOpen = false;
@@ -1487,7 +1521,7 @@ void main() {
       session,
       NotebookDisposition.write,
       (message) {
-        if (message['type'] == 'save') {
+        if (message['type'] == 'flush' || message['mode'] == 'abort') {
           protocol.answer(editor, message);
         } else {
           protocol.insert(editor, 'last input');

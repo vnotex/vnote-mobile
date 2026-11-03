@@ -186,6 +186,26 @@ void main() {
   });
   tearDown(() => fixture.dispose());
 
+  test('catalog owners cannot acquire draft writes or source preview authority', () async {
+    final catalog = await fixture.catalog();
+    final node = await catalog.createNote(catalog.initialDirectory.folderId, 'kept.md');
+    await expectLater(catalog.writeDraft(
+      draftsRoot: fixture.path('drafts'), documentKey: 'a' * 64,
+      token: 'b' * 32, candidateId: 'c' * 32,
+    ), throwsA(_code(10)));
+    await expectLater(catalog.inspectDraft(
+      draftsRoot: fixture.path('drafts'), documentKey: 'a' * 64, token: 'b' * 32,
+    ), throwsA(_code(10)));
+    await expectLater(catalog.preparePreview(
+      previewsRoot: fixture.path('previews'), previewId: 'a' * 32,
+      renderId: 'b' * 32, token: 'c' * 32, revision: 0, source: '# not a note owner',
+    ), throwsA(_code(10)));
+    expect(await Directory(fixture.path('drafts')).exists(), isFalse);
+    expect(await Directory(fixture.path('previews')).exists(), isFalse);
+    expect((await catalog.list()).entries.single.id, node);
+    expect(await fixture.file('kept.md').readAsBytes(), isEmpty);
+  });
+
   test('files/assets snapshot retains source paths and bytes without becoming a notebook backup', () async {
     final desktop = await fixture.desktop();
     final config = await fixture.json('vx_notebook/config.json');
@@ -573,7 +593,7 @@ void main() {
   );
 
   test(
-    'export owner refuses persisted restore before touching a foreign notebook',
+    'export owner ignores legacy sessions without touching a foreign notebook',
     () async {
       final selected = await fixture.catalog();
       await selected.close();
@@ -603,17 +623,9 @@ void main() {
         await session.writeAsString(restored);
         final before = await _snapshot(fixture.path('book'));
         final foreignBefore = await _snapshot(foreign.path('book'));
-        await expectLater(
-          fixture.exportCatalog(),
-          throwsA(
-            isA<CoreException>().having(
-              (error) => error.message,
-              'redacted recovery reason',
-              contains('normal notebook open and recovery'),
-            ),
-          ),
-        );
-        expect(await session.readAsString(), restored);
+        final export = await fixture.exportCatalog();
+        expect(export.initialDirectory.notebookId, fixture.notebookId);
+        await export.close();
         expect(await _snapshot(fixture.path('book')), before);
         expect(await _snapshot(foreign.path('book')), foreignBefore);
         await session.writeAsString(clean);

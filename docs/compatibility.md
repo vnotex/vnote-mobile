@@ -17,7 +17,7 @@ Bundled notebook JSON/files remain authoritative. Core SQLite metadata is a deri
 
 Encrypted-note editing, raw notebook sync, desktop plugins and unsupported editor formats remain outside the first release. That never permits plaintext fallback, identity regeneration, silent mutation or dropping opaque data. Import/export uses managed copies and preflight; core owns notebook schema and migrations.
 
-Exact-source editor offsets are UTF-16; native bodies are UTF-8. Opening without editing must not normalize line endings, Unicode or Markdown. CommonMark/GFM, KaTeX and Mermaid rendering are later fixture-gated subsets, not implied by CodeMirror syntax highlighting. The privileged editor has no preview renderer.
+Exact-source editor offsets are UTF-16; native bodies are UTF-8. Opening without editing must not normalize line endings, Unicode or Markdown. The committed preview fixtures cover a selected CommonMark/GFM subset, KaTeX and Mermaid flowchart/sequence diagrams, independently of CodeMirror highlighting. Desktop heading slug/duplicate behavior is preserved, but unsupported footnotes and custom application schemes remain literal/inert. The privileged editor has no preview renderer.
 
 Whole-notebook backup remains the identity-preserving interchange format. The
 separate Files and assets ZIP preserves raw content paths/bytes but omits the entire
@@ -29,13 +29,27 @@ may not work; the content export does not normalize or rewrite source text.
 
 Standalone file/ZIP/folder import creates one new child cohort with core-generated IDs, sealed once for retry. Original hierarchy, Unicode spelling and opaque bytes remain unchanged; local Markdown dependencies must be present and confined. A files/assets ZIP can use this path but does not restore its former notebook IDs or metadata. Publication limits include the wrapper ID and bounded parent/journal images, in addition to the source entry/byte caps.
 
-Ordinary-note resource operations preserve the body and unrelated assets. Metadata-only recovery never decrypts a protected body; tracking changes membership, not bytes. Exact-name collision/ambiguous outcomes retain files rather than accepting a suffix. Image/link insertion modifies only volatile source until Write. The current core prerequisite adds fail-closed cohort recovery and checked resource outcomes; malformed legacy journals are not disposable trash.
+Ordinary-note resource operations preserve the body and unrelated assets. Metadata-only recovery never decrypts a protected body; tracking changes membership, not bytes. Exact-name collision/ambiguous outcomes retain files rather than accepting a suffix. Image/link insertion first modifies received source, then follows the independent private-draft and autosave boundaries; its operation receipt is not a saved receipt. The current core prerequisite adds fail-closed cohort recovery and checked resource outcomes; malformed legacy journals are not disposable trash.
 
 ## Tool/platform selection
 
 [toolchains.json](../toolchains.json) records exact initialization pins. Flutter 3.47.9 / Dart 3.13.7 and Node 24.22.2 / npm 11.19.1 were executed locally. Android native builds select API 36, minimum API 28 (Bionic Iconv availability), NDK 28.2.13676358, Gradle 9.3.1, AGP 9.1.0 and Kotlin 2.4.0 from the pinned Flutter template. iOS selects deployment 15.0 and Xcode 26.6 (17F113), SDK 26.5; the [macOS CI image inventory](https://github.com/actions/runner-images/blob/main/images/macos/macos-26-Readme.md) lists that Xcode. This selection is not iOS build evidence or the completed full-native dependency intersection.
 
 Android arm64/x86_64 now source-build pinned OpenSSL 3.5.9 and link the complete core into a native asset. The iOS branch selects bundled curl/OpenSSL rather than assuming iPhoneOS supplies libcurl, but has not been executed. TLS trust-store integration remains unverified; no network-ready claim follows from linking. Test arm64 devices and selected emulator/simulator ABIs separately, including Android 16 KB native-library packaging and release dead stripping. Both Android native ELF LOAD segments were checked for 16 KB alignment, and x86_64 ran on a 16 KB emulator. Arm64 physical-device and iOS execution remain required.
+
+Editor wire version two is a clean bundled cutover; no version-one message shim
+exists. Persisted phase-two resource exports remain supported data: exact v1
+records mean asset exports, while new v2 records explicitly bind asset, immutable
+preview-file or immutable draft origin. Missing/unknown origins never fall back
+to the selected note's asset API. A verified ready copy can be re-saved without
+reopening its original source.
+
+The API-28 installation floor does not imply editor availability on every old
+provider. Android source/preview requires WebView 152+ and actual per-document
+Connection-Allowlist enforcement. Current public WK APIs cannot establish the
+same all-protocol egress boundary independently of CSP; iOS 15–26 source delivery
+remains visibly gated, not silently weakened. Physical-device and iOS evidence
+must be recorded separately from desktop browser/native-host results.
 
 ## Structural-operation boundaries
 

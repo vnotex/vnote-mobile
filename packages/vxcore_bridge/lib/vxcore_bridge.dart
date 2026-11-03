@@ -18,5 +18,8 @@ export 'src/core_notebook.dart'
         CoreSearchResult,
         CoreTag,
         CoreTags,
+        DraftCore,
         NotebookCore;
 export 'src/transfer_models.dart';
+export 'src/core_drafts.dart';
+export 'src/preview_models.dart';

@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
+import 'package:vnote_mobile/services/editor_drafts.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
 import 'package:vnote_mobile/services/notebook_import.dart';
@@ -310,8 +311,10 @@ void main() {
     DocumentTransferPlatform? importPlatform,
     DocumentTransferPlatform? cohortPlatform,
     DocumentTransferPlatform? resourcePlatform,
+    EditorDrafts Function(String root)? createDrafts,
   }) => NotebookLibrary(
     obtainStorage: () async => storage,
+    createDrafts: createDrafts,
     openCatalog: owners.open,
     openExportCatalog: owners.openExport,
     createExporter: (root, admission) => NotebookExporter(
@@ -1165,6 +1168,100 @@ void main() {
       );
     },
   );
+
+  test('draft scan failure blocks ordinary writers before catalog discovery', () async {
+    await library.shutdown(); library.dispose();
+    library = makeLibrary(createDrafts: (root) => EditorDrafts(root: root,
+      runStore: (request, {payload}) async => throw StateError('protected drafts unavailable')));
+    await library.initialize();
+    expect(library.value.stale, isTrue);
+    expect(library.value.draftState.initialized, isFalse);
+    expect(library.value.draftState.error, isNotNull);
+    expect(owners.maximum, 0);
+    expect(await library.createNotebook('Must not create'), isFalse);
+  });
+
+  test('library matrix restores later acknowledged prefix as dirty new token zero', () async {
+    await library.initialize(); expect(await library.createNotebook('Recovery'), isTrue);
+    final workspace = library.value.workspace!;
+    await workspace.createNote('Recover.md');
+    final entry = workspace.value.directory!.entries.single;
+    expect(await workspace.openNote(entry), isTrue);
+    final session = workspace.value.session!;
+    final editor = session.value.editor!; protocol.ready(editor);
+    protocol.insert(editor, 'saved\r\n');
+    expect(await session.write((message) => protocol.answer(editor, message)), isTrue,
+      reason: '${session.value.error}; ${session.value.durabilityError}');
+    protocol.insert(editor, 'later😀\r\n');
+    expect(await workspace.returnToBrowser(session, NotebookDisposition.retain,
+      (message) => protocol.answer(editor, message)), isTrue);
+    expect(await library.returnToLibrary(workspace), isTrue);
+    final retained = library.value.draftState.entries.where((item) => !item.resolved).single;
+    final inspected = await library.inspectDraft(retained);
+    expect(inspected!.outcome, 'saved'); expect(inspected.savedRevision, 1);
+    expect(inspected.source, 'saved\r\nlater😀\r\n');
+    expect(await library.restoreDraft(retained), isTrue);
+    final recovered = library.value.workspace!.value.session!;
+    expect(recovered.value.editor!.generation, isNot(editor.generation));
+    expect(recovered.value.editor!.value.revision, 0);
+    expect(recovered.value.onDiskRevision, isNull); expect(recovered.value.dirty, isTrue);
+    expect(recovered.value.editor!.value.text, inspected.source);
+  });
+
+  test('fully saved older captures cannot block a later saved epoch after restart', () async {
+    await library.initialize();
+    expect(await library.createNotebook('Saved epochs'), isTrue);
+    await library.value.workspace!.createNote('Across.md');
+    expect(await library.returnToLibrary(library.value.workspace!), isTrue);
+    for (final part in ['first', 'second']) {
+      expect(await library.openNotebook(library.value.entries.single), isTrue);
+      final workspace = library.value.workspace!;
+      expect(await workspace.openNote(workspace.value.directory!.entries.single), isTrue);
+      final session = workspace.value.session!;
+      final editor = session.value.editor!;
+      protocol.ready(editor); protocol.insert(editor, part);
+      expect(await session.write((message) => protocol.answer(editor, message)), isTrue);
+      expect(await workspace.returnToBrowser(session, NotebookDisposition.retain,
+        (message) => protocol.answer(editor, message)), isTrue);
+      expect(await library.returnToLibrary(workspace), isTrue);
+    }
+    await library.shutdown(); library.dispose();
+    library = makeLibrary(); await library.initialize();
+    expect(library.value.draftState.entries.where((entry) => !entry.resolved), isEmpty);
+    expect(await library.openNotebook(library.value.entries.single), isTrue);
+    final workspace = library.value.workspace!;
+    expect(await workspace.openNote(workspace.value.directory!.entries.single), isTrue);
+    expect(workspace.value.session!.value.editor!.value.text, 'firstsecond');
+  });
+
+  test('recovery export reserves global transfer before awaiting immutable source capture', () async {
+    await library.shutdown(); library.dispose();
+    final provider = _ExportProvider();
+    library = makeLibrary(resourcePlatform: provider);
+    await library.initialize(); expect(await library.createNotebook('Draft export'), isTrue);
+    final workspace = library.value.workspace!;
+    await workspace.createNote('Private.md');
+    expect(await workspace.openNote(workspace.value.directory!.entries.single), isTrue);
+    final session = workspace.value.session!; final editor = session.value.editor!;
+    protocol.ready(editor); protocol.insert(editor, 'export this exact prefix');
+    expect(await workspace.returnToBrowser(session, NotebookDisposition.retain,
+      (message) => protocol.answer(editor, message)), isTrue);
+    expect(await library.returnToLibrary(workspace), isTrue);
+    final retained = library.value.draftState.entries.where((item) => !item.resolved).single;
+    final exporting = library.exportDraft(retained);
+    expect(library.value.transferReserved, isTrue);
+    await library.exportNotebook(library.value.entries.single, format: CoreExportFormat.notebook);
+    expect(library.value.exportState.prepared, isNull);
+    final output = await provider.entered.future;
+    expect(await File(output).readAsString(), 'export this exact prefix');
+    provider.result.complete(const DocumentExportResult(status: DocumentExportStatus.cancelled,
+      externalMayBeIncomplete: true));
+    await exporting;
+    expect(library.value.resourceState.current!.origin, ResourceExportOrigin.draft);
+    expect(library.value.resourceState.current!.binding!['token'], retained.token);
+    expect(library.value.resourceState.hasStaging, isTrue);
+    expect(library.value.transferReserved, isTrue);
+  });
 
   test('shutdown during discovery drains the pending owner without publishing selection', () async {
     final paths = await storage.allocate();

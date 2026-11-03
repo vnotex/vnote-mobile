@@ -11,6 +11,33 @@ export 'transfer_worker.dart'
 
 enum ResourceOperation { add, image, track, untrack, rename, remove, export }
 
+enum ResourceExportOrigin {
+  asset('asset'), previewFile('preview-file'), draft('draft');
+  const ResourceExportOrigin(this.wireName);
+  final String wireName;
+}
+
+/// Closed immutable source binding; a missing/unknown v2 origin is never asset.
+Map<String, Object?> validateExportBinding(ResourceExportOrigin origin,
+    Map<String, Object?> binding, String name) {
+  bool hex(Object? value, int length) => value is String &&
+      RegExp('^[0-9a-f]{$length}\$').hasMatch(value);
+  final valid = switch (origin) {
+    ResourceExportOrigin.asset => binding.length == 1 && binding['name'] == name,
+    ResourceExportOrigin.previewFile => binding.length == 5 &&
+      hex(binding['previewId'], 32) && hex(binding['renderId'], 32) &&
+      hex(binding['handle'], 32) && hex(binding['sourceHash'], 64) &&
+      hex(binding['manifestHash'], 64),
+    ResourceExportOrigin.draft => binding.length == 6 &&
+      hex(binding['documentKey'], 64) && hex(binding['token'], 32) &&
+      hex(binding['candidateId'], 32) && hex(binding['sha256'], 64) &&
+      binding['revision'] is int && (binding['revision'] as int) >= 0 &&
+      const ['text', 'raw-archive'].contains(binding['format']),
+  };
+  if (!valid) throw const FormatException('Invalid immutable export binding.');
+  return Map.unmodifiable(binding);
+}
+
 enum ResourceTransferPhase {
   idle,
   receiving,
@@ -54,6 +81,9 @@ class ResourceAttempt {
     this.sourceName,
     this.bytes = 0,
     this.entries = 0,
+    this.origin,
+    this.binding,
+    this.desiredVersion = 1,
   });
   final String id;
   final ResourceTarget target;
@@ -65,6 +95,9 @@ class ResourceAttempt {
   final String? sourceName;
   final int bytes;
   final int entries;
+  final ResourceExportOrigin? origin;
+  final Map<String, Object?>? binding;
+  final int desiredVersion;
   DocumentImportKind get kind => operation == ResourceOperation.image
       ? DocumentImportKind.image
       : DocumentImportKind.file;
@@ -384,6 +417,35 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
     if (bytes < 0 || bytes > (1 << 30) || entries < 0 || entries > 1) {
       throw const FormatException();
     }
+    ResourceExportOrigin? origin;
+    Map<String, Object?>? binding;
+    final version = record['desiredVersion'] as int? ?? 1;
+    if (operation == ResourceOperation.export) {
+      if (version == 1) {
+        // Persisted phase2 records are exactly asset semantics.
+        origin = ResourceExportOrigin.asset;
+        binding = Map.unmodifiable({'name': name});
+      } else if (version == 2) {
+        origin = ResourceExportOrigin.values.where((value) =>
+          value.wireName == record['origin']).firstOrNull;
+        if (origin != null && record['binding'] is Map && record['originAvailable'] != false) {
+          try {
+            binding = validateExportBinding(origin,
+              Map<String, Object?>.from(record['binding'] as Map), name);
+          } on FormatException {
+            origin = null;
+          }
+        } else {
+          origin = null;
+        }
+        // Unknown v2 origin remains visible, retained and explicitly discardable.
+        // It must not be transformed into an asset request by a default branch.
+      } else {
+        throw const FormatException('Unsupported desired record version.');
+      }
+    } else if (version != 1) {
+      throw const FormatException('Mutation desired records must use version1.');
+    }
     return ResourceAttempt(
       id: id,
       target: ResourceTarget(
@@ -393,6 +455,9 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
       ),
       operation: operation,
       name: name,
+      origin: origin,
+      binding: binding,
+      desiredVersion: version,
       newName: newName,
       stage: transferStage(record),
       transactionRoot: p.join(root, id),
@@ -450,6 +515,9 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
     required ResourceOperation operation,
     required String name,
     String? newName,
+    ResourceExportOrigin? origin,
+    Map<String, Object?>? binding,
+    String? requestId,
   }) {
     admit();
     if (hasStaging) {
@@ -458,8 +526,19 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
     if ((operation == ResourceOperation.rename) != (newName != null)) {
       throw StateError('Rename requires exactly one new name.');
     }
+    if (operation == ResourceOperation.export) {
+      if (origin == null || binding == null) {
+        throw StateError('An export requires an explicit immutable source origin.');
+      }
+      binding = validateExportBinding(origin, binding, name);
+    } else if (origin != null || binding != null) {
+      throw StateError('Mutation records cannot carry an export origin.');
+    }
+    if (requestId != null && !validTransferId(requestId)) {
+      throw StateError('The export request identity is invalid.');
+    }
     return this.operation(() async {
-      final id = newTransferId();
+      final id = requestId ?? newTransferId();
       _state(phase: ResourceTransferPhase.preparing);
       try {
         cancellation.check();
@@ -480,6 +559,9 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
             'operation': operation.name,
             'name': name,
             'newName': newName,
+            if (operation == ResourceOperation.export) ...{
+              'version': 2, 'origin': origin!.wireName, 'binding': binding,
+            },
           },
         );
         await _scan(preferredId: id);
@@ -583,7 +665,7 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
       preferredId: attempt.id,
       result: result,
       message: result.committed
-          ? 'Resource operation committed. Source links are unchanged until you explicitly insert a link and Write.'
+          ? 'Resource operation committed. Source links change only when you explicitly insert one.'
           : 'No completed mutation was proved. Private input remains retained.',
     );
     return result;
@@ -677,7 +759,7 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
               TransferStage.quarantined ||
               TransferStage.committed:
             await _apply(current, callback, recover: true);
-          case TransferStage.exportReady:
+          case TransferStage.exportReady || TransferStage.exportUnavailable:
             throw const TransferFailure('Invalid mutation export state.');
         }
       } catch (error) {
@@ -722,6 +804,7 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
         !const [
           TransferStage.receiving,
           TransferStage.exportReady,
+          TransferStage.exportUnavailable,
         ].contains(attempt.stage)) {
       throw StateError('This is not an export snapshot request.');
     }
@@ -729,6 +812,9 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
       _state(phase: ResourceTransferPhase.preparing);
       try {
         if (attempt.stage != TransferStage.exportReady) {
+          if (attempt.origin == null || attempt.binding == null) {
+            throw const TransferFailure('The original export source is unavailable. The private request is retained; discard it explicitly or recover its original owner.');
+          }
           cancellation.check();
           // Callback closes/releases its native snapshot owner before returning.
           await callback(attempt, cancellation);

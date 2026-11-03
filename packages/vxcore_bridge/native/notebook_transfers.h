@@ -4,6 +4,7 @@
 
 #include <atomic>
 #include <cstdint>
+#include <map>
 #include <string>
 #include <nlohmann/json.hpp>
 #include <vxcore/vxcore.h>
@@ -18,6 +19,16 @@ int32_t PreflightResource(VxCoreContextHandle context,
                           const std::string &node_id,
                           const std::string &notebook_root,
                           nlohmann::json &metadata) noexcept;
+struct PreviewNode {
+  std::string id;
+  bool ordinary = false;
+  bool protected_content = false;
+};
+// One validated graph/policy pass per snapshot, not one full scan per link.
+int32_t PreviewIndex(VxCoreContextHandle context, const std::string &notebook_id,
+                     const std::string &notebook_root,
+                     const std::atomic<bool> *cancel,
+                     std::map<std::string, PreviewNode> &out) noexcept;
 int32_t Cohort(VxCoreContextHandle context, const std::string &notebook_id,
                const std::string &notebook_root, const nlohmann::json &request,
                const std::atomic<bool> *cancel, nlohmann::json &out) noexcept;

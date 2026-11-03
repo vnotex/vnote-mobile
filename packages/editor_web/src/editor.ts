@@ -5,11 +5,12 @@ import { defaultKeymap, history, historyField, historyKeymap, redo, redoDepth, u
 import { markdown } from '@codemirror/lang-markdown';
 import { defaultHighlightStyle, syntaxHighlighting } from '@codemirror/language';
 import {
-  assertCredits, encodeMessage, insertionTransaction, LIMITS, preferredLineEnding, prepareHistoryPrune, ProtocolError,
+  assertCredits, assertDurableCredits, encodeMessage, insertionTransaction, LIMITS, preferredLineEnding, prepareHistoryPrune, ProtocolError,
   RequestCache, requireThat, utf8Length, validBoundary, validateChanges, validateHostMessage,
   validateSelection, validateSession, validateSource,
   type Change, type Envelope, type HostMessage, type Selection,
 } from './protocol';
+import { formattingTransaction } from './formatting';
 
 declare global {
   interface Window {
@@ -22,6 +23,9 @@ const retry = document.getElementById('retry') as HTMLButtonElement;
 const refusal = document.getElementById('refusal')!;
 const candidate = document.getElementById('candidate') as HTMLTextAreaElement;
 const theme = new Compartment();
+const nonce = new Compartment();
+const scriptNonce = document.querySelector<HTMLMetaElement>('meta[name="vnote-csp-nonce"]')?.content
+  ?? (document.currentScript as HTMLScriptElement | null)?.nonce ?? '';
 const writable = new Compartment();
 const cache = new RequestCache();
 const undoHistory = new Compartment();
@@ -29,9 +33,13 @@ let retainedHistoryBytes = 0;
 let lineEnding = '\n';
 let generation: string | null = null;
 let documentId: string | null = null;
-let revision = 0, receivedRevision = 0, documentBytes = 0, nextRequest = 1;
-let readyRequest = '', ready = false, closed = false, frozen = false;
+let revision = 0, receivedRevision = 0, durableRevision = 0, savedRevision: number | null = null, documentBytes = 0, nextRequest = 1;
+let readyRequest = '', ready = false, closed = false, frozen = false, quiesced = false;
 let snapshot: { requestId: string; revision: number } | null = null;
+let resyncSource: Text | null = null;
+let sourceOperationId: string | undefined;
+let activitySequence = 0, lastActivity = '';
+let editorLanguage: 'markdown' | 'text' = 'text';
 let batchTimer: ReturnType<typeof setTimeout> | undefined;
 let selectionTimer: ReturnType<typeof setTimeout> | undefined;
 let transportTimer: ReturnType<typeof setTimeout> | undefined;
@@ -43,6 +51,7 @@ interface Pending {
   changes: ChangeSet;
   requestId: string;
   reservedBytes: number;
+  operationId?: string;
 }
 interface InFlight { revision: number; bytes: number; encoded: string }
 interface Composition {
@@ -55,6 +64,7 @@ interface Composition {
 let pending: Pending | null = null;
 let composing: Composition | null = null;
 const inFlight = new Map<string, InFlight>();
+const undurable = new Map<string, { revision: number; bytes: number }>();
 const controls: HostMessage[] = [];
 
 function show(message: string, error = false): void {
@@ -67,13 +77,16 @@ function errorText(error: unknown): string {
 function memoryStatus(): void {
   if (closed) show('Editor closed after the requested barrier.');
   else if (frozen) show('Transport rejected an edit. Text is retained here; copy it before discarding.', true);
+  else if (quiesced) show('Editing paused while the host retains the final source.');
   else if (composing) show('Composition is provisional. Finish composing before Write.');
-  else if (pending || inFlight.size) show('Waiting for the host to receive edits. Use Write to put them on disk.');
-  else show(`Received revision ${revision}. On-disk write status is shown above.`);
+  else if (pending || inFlight.size) show('Input pending receipt. Text remains in this editor.');
+  else if (undurable.size) show(`Received revision ${receivedRevision}; waiting for durable draft storage.`);
+  else if (savedRevision === revision) show(`Saved locally at revision ${revision}.`);
+  else show(`Draft durable through revision ${durableRevision}. Notebook write status is shown above.`);
 }
 function header(type: string, requestId: string, at = revision): Envelope {
   requireThat(generation !== null && documentId !== null, 'Waiting for a host session.');
-  return { v: 1, type, documentId, generation, revision: at, requestId };
+  return { v: 2, type, documentId, generation, revision: at, requestId };
 }
 function requestId(): string {
   requireThat(Number.isSafeInteger(nextRequest + 1), 'Request counter exhausted; preserve this session.');
@@ -97,6 +110,22 @@ function reject(message: HostMessage, error: unknown): void {
     catch (failure) { show(errorText(failure), true); }
   }
 }
+function sendActivity(): void {
+  if (!ready || closed) return;
+  const state = `${revision}:${pending !== null}:${composing !== null}`;
+  if (state === lastActivity) return;
+  try {
+    post(encodeMessage({ ...header('activity', requestId()), sequence: ++activitySequence,
+      pending: pending !== null, composing: composing !== null }, LIMITS.controlBytes));
+    lastActivity = state;
+  } catch (error) { show(errorText(error), true); }
+}
+function reserveCredits(bytes: number): void {
+  assertCredits(inFlight.size + 1, outstandingBytes() + bytes);
+  let retained = 0;
+  for (const entry of undurable.values()) retained += entry.bytes;
+  assertDurableCredits(undurable.size + 1, retained + bytes);
+}
 function outstandingBytes(): number {
   let total = 0;
   for (const entry of inFlight.values()) total += entry.bytes;
@@ -115,10 +144,10 @@ function selectionOf(state: EditorState): Selection {
 }
 function editEnvelope(batch: Pending, selection: Selection): Record<string, unknown> {
   return { ...header('edit', batch.requestId, revision + 1), baseRevision: revision,
-    changes: changesOf(batch.changes), selection };
+    changes: changesOf(batch.changes), selection, ...(batch.operationId ? { operationId: batch.operationId } : {}) };
 }
 function preflight(transaction: Transaction): { batch: Pending | null; bytes: number; retained: number } {
-  requireThat(ready && !closed && !frozen, 'Editing is unavailable; existing text is retained.');
+  requireThat(ready && !closed && !frozen && !quiesced, 'Editing is unavailable; existing text is retained.');
   requireThat(Number.isSafeInteger(revision + 1), 'Revision exhausted; preserve this session.');
   const metrics = validateChanges(transaction.startState.doc, documentBytes, changesOf(transaction.changes));
   validateSelection(transaction.newDoc, selectionOf(transaction.state));
@@ -130,14 +159,15 @@ function preflight(transaction: Transaction): { batch: Pending | null; bytes: nu
       base: pending?.base ?? transaction.startState.doc,
       baseBytes: pending?.baseBytes ?? documentBytes,
       changes,
-      requestId: pending?.requestId ?? requestId(),
+      requestId: pending?.requestId ?? 'editor-9007199254740991',
       reservedBytes: 0,
+      ...(sourceOperationId ? { operationId: sourceOperationId } : {}),
     };
     validateChanges(batch.base, batch.baseBytes, changesOf(changes));
     // Reserve maximum selection offsets so a later cursor move cannot overflow a batch.
     batch.reservedBytes = utf8Length(encodeMessage(editEnvelope(batch,
       { anchor: LIMITS.documentUnits, head: LIMITS.documentUnits }), LIMITS.editBytes));
-    assertCredits(inFlight.size + 1, outstandingBytes() + batch.reservedBytes);
+    reserveCredits(batch.reservedBytes);
     return batch;
   };
   let batch: Pending | null;
@@ -170,18 +200,21 @@ function flush(): void {
   if (composing || !pending) return;
   requireThat(!frozen, 'Rejected edits remain in memory; do not overwrite this session.');
   const batch = pending;
+  batch.requestId = requestId();
   const encoded = encodeMessage(editEnvelope(batch, selectionOf(view.state)), LIMITS.editBytes);
   const bytes = utf8Length(encoded);
-  assertCredits(inFlight.size + 1, outstandingBytes() + bytes);
+  reserveCredits(bytes);
   clearTimeout(batchTimer);
   batchTimer = undefined;
   // Retain the exact wire message before calling the external channel, which may fail.
   pending = null;
   revision++;
   inFlight.set(batch.requestId, { revision, bytes, encoded });
+  undurable.set(batch.requestId, { revision, bytes });
   armTransportTimeout();
   memoryStatus();
   post(encoded);
+  sendActivity();
 }
 function scheduleSelection(): void {
   if (suppressSelection || composing || !ready || closed || selectionTimer !== undefined) return;
@@ -212,7 +245,7 @@ function applyTransaction(transaction: Transaction): boolean {
         const encoded = encodeMessage({ ...header('edit', 'editor-9007199254740991', revision + 1),
           baseRevision: revision, changes: changesOf(changes),
           selection: { anchor: LIMITS.documentUnits, head: LIMITS.documentUnits } }, LIMITS.editBytes);
-        assertCredits(inFlight.size + 1, outstandingBytes() + utf8Length(encoded));
+        reserveCredits(utf8Length(encoded));
       }
       composing.changes = changes;
       view.update([transaction]);
@@ -232,6 +265,7 @@ function applyTransaction(transaction: Transaction): boolean {
     scheduleBatch();
     scheduleSelection();
     memoryStatus();
+    sendActivity();
     return true;
   } catch (error) {
     // No view.update: document, selection, and history stay at the prior state.
@@ -256,9 +290,9 @@ function startComposition(): void {
   if (composing) return;
   let failure: string | null = null;
   try {
-    requireThat(ready && !closed && !frozen, 'Editing is unavailable.');
+    requireThat(ready && !closed && !frozen && !quiesced, 'Editing is unavailable.');
     flush();
-    assertCredits(inFlight.size + 1, outstandingBytes() + LIMITS.editBytes);
+    reserveCredits(LIMITS.editBytes);
   } catch (error) { failure = errorText(error); }
   composing = { base: view.state, baseBytes: documentBytes,
     changes: ChangeSet.empty(view.state.doc.length), failed: failure, reserved: failure === null };
@@ -266,6 +300,7 @@ function startComposition(): void {
     show('Finish the active composition before snapshot or close. Text is provisional and has not been written.', true);
   }, 5000);
   if (failure) show(failure, true); else memoryStatus();
+  sendActivity();
 }
 function finishComposition(): void {
   // Run after CM's compositionend observer and final DOM transaction have settled.
@@ -300,18 +335,23 @@ function finishComposition(): void {
       show(`${failure} Composition was refused; the previous document is retained.`, true);
     }
     else { try { flush(); } catch (error) { show(errorText(error), true); } }
+    sendActivity();
     while (controls.length) {
       const message = controls.shift()!;
       try { handle(message); } catch (error) { reject(message, error); }
     }
   }, 20);
 }
-function editorTheme(dark: boolean) {
+function editorTheme(dark: boolean, highContrast = false, fontScale = 1, reducedMotion = false) {
+  const foreground = highContrast ? (dark ? '#ffffff' : '#000000') : (dark ? '#e5eaf1' : '#17212b');
+  const background = highContrast ? (dark ? '#000000' : '#ffffff') : (dark ? '#171b22' : '#fafafa');
   return EditorView.theme({
-    '&': { backgroundColor: dark ? '#171b22' : '#fafafa', color: dark ? '#e5eaf1' : '#17212b' },
-    '.cm-content': { caretColor: dark ? '#e5eaf1' : '#17212b' },
-    '.cm-cursor': { borderLeftColor: dark ? '#e5eaf1' : '#17212b' },
-    '.cm-gutters': { backgroundColor: dark ? '#202731' : '#edf1f5', color: dark ? '#aebcd0' : '#52606d' },
+    '&': { backgroundColor: background, color: foreground, fontSize: `${16 * fontScale}px` },
+    '.cm-content': { caretColor: foreground },
+    '.cm-cursor': { borderLeftColor: foreground, ...(reducedMotion ? { animation: 'none' } : {}) },
+    '.cm-gutters': { backgroundColor: background, color: foreground },
+    ...(highContrast ? { '.cm-selectionBackground': { backgroundColor: dark ? '#555555 !important' : '#b0b0b0 !important' } } : {}),
+    ...(reducedMotion ? { '*': { animation: 'none !important', transition: 'none !important', scrollBehavior: 'auto' } } : {}),
   }, { dark });
 }
 function deletePairedLineBreak(editor: EditorView, backward: boolean): boolean {
@@ -330,6 +370,7 @@ function createState(source: string, selection: Selection, language: 'markdown' 
     extensions: [
       EditorState.lineSeparator.of('\n'),
       EditorState.allowMultipleSelections.of(false),
+      nonce.of(EditorView.cspNonce.of(scriptNonce)),
       writable.of([EditorState.readOnly.of(true), EditorView.editable.of(false)]), theme.of(editorTheme(false)),
       undoHistory.of(history({ minDepth: LIMITS.historyGroups })),
       language === 'markdown' ? markdown({ addKeymap: false }) : [],
@@ -387,6 +428,20 @@ function receiveAck(message: Extract<HostMessage, { type: 'ack' }>): void {
     show(`Host rejected editor data: ${message.error}`, true);
     return;
   }
+  if (message.stage === 'draftDurable' || message.stage === 'saved') {
+    requireThat(message.revision === message.throughRevision, 'Durability capture mismatch.');
+    if (message.stage === 'draftDurable') {
+      requireThat(message.throughRevision <= receivedRevision, 'Draft durability exceeds received source.');
+      if (message.throughRevision < durableRevision) return;
+      durableRevision = message.throughRevision;
+      for (const [id, entry] of undurable) if (entry.revision <= durableRevision) undurable.delete(id);
+    } else {
+      requireThat(message.throughRevision <= durableRevision, 'Saved receipt exceeds durable source.');
+      if (savedRevision === null || message.throughRevision > savedRevision) savedRevision = message.throughRevision;
+    }
+    memoryStatus();
+    return;
+  }
   if (message.requestId === readyRequest) {
     requireThat(message.revision === 0 && message.throughRevision === 0, 'Invalid ready acknowledgement.');
     if (ready) return;
@@ -394,11 +449,12 @@ function receiveAck(message: Extract<HostMessage, { type: 'ack' }>): void {
     cache.release('load', readyRequest);
     view.dispatch({ effects: writable.reconfigure([EditorState.readOnly.of(false), EditorView.editable.of(true)]) });
     memoryStatus();
+    sendActivity();
     return;
   }
   if (message.requestId === snapshot?.requestId) {
     requireThat(message.throughRevision === snapshot.revision && message.revision === snapshot.revision, 'Snapshot acknowledgement revision mismatch.');
-    cache.release('save', snapshot.requestId);
+    cache.release('resync', snapshot.requestId);
     snapshot = null;
     return;
   }
@@ -421,6 +477,7 @@ function handle(message: HostMessage): void {
     document.getElementById('editor')!.setAttribute('aria-label', `${title} editor`);
     documentBytes = validateSource(message.text);
     lineEnding = preferredLineEnding(state.doc);
+    editorLanguage = message.language;
     documentId = message.documentId;
     generation = message.generation;
     readyRequest = message.requestId;
@@ -433,6 +490,20 @@ function handle(message: HostMessage): void {
   validateSession(message, documentId!, generation, revision);
   if (message.type === 'ack') { receiveAck(message); return; }
   requireThat(ready && !closed, 'Editor session is not writable.');
+  if (message.type === 'close' && message.mode === 'abort') {
+    for (let i = controls.length - 1; i >= 0; i--) {
+      const queued = controls[i]!;
+      if (queued.type === 'close' && queued.mode === 'quiesce') {
+        controls.splice(i, 1);
+        reject(queued, new ProtocolError('Close was aborted; text is retained.'));
+      }
+    }
+    quiesced = false;
+    view.dispatch({ effects: writable.reconfigure([EditorState.readOnly.of(false), EditorView.editable.of(true)]) });
+    reply(message, { type: 'close', mode: 'aborted' });
+    memoryStatus();
+    return;
+  }
   if (composing) {
     requireThat(controls.length < LIMITS.pendingControls, 'Too many controls waiting for composition.');
     controls.push(message);
@@ -456,51 +527,82 @@ function handle(message: HostMessage): void {
       try { view.dispatch({ selection: { anchor: message.anchor, head: message.head } }); }
       finally { suppressSelection = false; }
       break;
-    case 'insert': {
-      requireThat(!frozen, 'Rejected text cannot accept an insertion.');
+    case 'insert':
+    case 'format': {
+      requireThat(!frozen && !quiesced, 'Retained text cannot accept a source operation.');
+      requireThat(message.type !== 'format' || editorLanguage === 'markdown', 'Formatting is available only for Markdown source.');
       flush();
       validateSession(message, documentId!, generation, revision, true);
-      const transaction = insertionTransaction(view.state, documentBytes, message);
-      requireThat(applyTransaction(transaction), 'Insertion was refused; the previous text is retained.');
-      // Publish through the normal bounded edit channel BEFORE acknowledging the
-      // host request. A channel failure retains that exact batch for retry.
+      const transaction = message.type === 'insert'
+        ? insertionTransaction(view.state, documentBytes, message)
+        : formattingTransaction(view.state, documentBytes, message, lineEnding);
+      sourceOperationId = message.requestId;
+      try { requireThat(applyTransaction(transaction), 'Source operation was refused; the previous text is retained.'); }
+      finally { sourceOperationId = undefined; }
+      // The ordinary validated batch carries the one shared operation correlation.
       flush();
-      reply(message, { type: 'ack', stage: 'received', throughRevision: revision });
+      reply(message, { type: 'ack', stage: 'received', throughRevision: revision, changed: transaction.docChanged });
       break;
     }
     case 'command':
-      requireThat(!frozen, 'Text is retained after host rejection; commands are paused.');
+      requireThat(!frozen && !quiesced, 'Text is retained; commands are paused.');
       if (message.command === 'undo') undo(view); else redo(view);
       break;
-    case 'theme':
-      document.documentElement.dataset.theme = message.theme;
-      view.dispatch({ effects: theme.reconfigure(editorTheme(message.theme === 'dark')) });
+    case 'preferences':
+      document.documentElement.dataset.theme = message.dark ? 'dark' : 'light';
+      document.documentElement.dataset.contrast = message.highContrast ? 'high' : 'normal';
+      document.documentElement.dataset.motion = message.reducedMotion ? 'reduced' : 'normal';
+      document.documentElement.style.fontSize = `${16 * message.fontScale}px`;
+      view.dispatch({ effects: theme.reconfigure(editorTheme(message.dark, message.highContrast, message.fontScale, message.reducedMotion)) });
       break;
-    case 'save':
-      requireThat(snapshot === null, 'A snapshot transfer is already awaiting receipt.');
-      requireThat(!frozen, 'Rejected text cannot be written; copy it before discarding.');
-      requireThat(refusal.hidden, 'Copy or dismiss the uncommitted composition before Write.');
+    case 'flush':
+      requireThat(!frozen && refusal.hidden, 'Resolve retained or provisional source before writing.');
       flush();
-      // The host revision is a lower bound; flush may have advanced it.
-      validateSession(message, documentId!, generation, revision);
+      reply(message, { type: 'flush', mode: 'ready', ...selectionOf(view.state) });
+      break;
+    case 'resync':
+      if (message.mode === 'resume') {
+        validateSession(message, documentId!, generation, revision, true);
+        requireThat(resyncSource === view.state.doc && !pending && !composing && refusal.hidden,
+          'Resync source changed; preserve both candidates.');
+        frozen = false;
+        resyncSource = null;
+        receivedRevision = revision;
+        inFlight.clear();
+        armTransportTimeout();
+        reply(message, { type: 'resync', mode: 'resumed' });
+        sendActivity();
+        memoryStatus();
+        break;
+      }
+      requireThat(snapshot === null && resyncSource === null, 'A resync candidate is already retained.');
+      if (!frozen) flush();
+      frozen = true;
+      // Replaying is bounded by the independent unreceived credit ceiling.
+      for (const entry of inFlight.values()) post(entry.encoded);
+      resyncSource = view.state.doc;
       snapshot = { requestId: message.requestId, revision };
-      reply(message, { type: 'save', mode: 'snapshot', text: view.state.doc.toString() });
+      reply(message, { type: 'resync', mode: 'candidate', text: resyncSource.toString(), ...selectionOf(view.state) });
       break;
     case 'close':
-      // The host is responsible for obtaining explicit user consent before this request.
-      flush();
-      if (message.disposition === 'written') {
-        requireThat(!frozen && !snapshot && refusal.hidden, 'Finish the active write and resolve uncommitted composition before closing.');
+      if (message.mode === 'quiesce') {
+        requireThat(!frozen && refusal.hidden, 'Resolve retained or provisional source before closing.');
+        flush();
+        quiesced = true;
+        view.dispatch({ effects: writable.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
+        reply(message, { type: 'close', mode: 'quiesced', ...selectionOf(view.state) });
+      } else if (message.mode === 'complete') {
+        requireThat(quiesced && !pending && !composing, 'Close requires a quiesced source.');
         validateSession(message, documentId!, generation, revision, true);
+        requireThat(message.disposition === 'discard' || durableRevision >= revision, 'Final source is not draft durable.');
+        closed = true;
+        clearTimeout(transportTimer);
+        clearTimeout(selectionTimer);
+        transportTimer = selectionTimer = undefined;
+        retry.hidden = true;
+        reply(message, { type: 'close', mode: 'closed' });
       }
-      closed = true;
-      view.dispatch({ effects: writable.reconfigure([EditorState.readOnly.of(true), EditorView.editable.of(false)]) });
-      clearTimeout(transportTimer);
-      clearTimeout(selectionTimer);
-      transportTimer = selectionTimer = undefined;
-      retry.hidden = true;
       memoryStatus();
-      reply(message, { type: 'close', mode: 'ready', disposition: message.disposition });
       break;
   }
 }

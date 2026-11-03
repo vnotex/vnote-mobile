@@ -18,6 +18,9 @@ import UniformTypeIdentifiers
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "DocumentTransferPlugin") {
       DocumentTransferPlugin.register(with: registrar)
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "WebSurfacePlugin") {
+      WebSurfacePlugin.register(with: registrar)
+    }
   }
 }
 
@@ -770,10 +773,16 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     for name in ["core", "notebooks", "exports", "imports", "cohorts", "resources"] {
       try prepareExcludedDirectory(root.appendingPathComponent(name, isDirectory: true))
     }
+    guard UIApplication.shared.isProtectedDataAvailable else { throw ExportError.unavailable }
+    for name in ["drafts", "previews"] {
+      try prepareExcludedDirectory(root.appendingPathComponent(name, isDirectory: true),
+                                   protection: .completeUntilFirstUserAuthentication)
+    }
     return root
   }
 
-  private func prepareExcludedDirectory(_ directory: URL) throws {
+  private func prepareExcludedDirectory(_ directory: URL,
+                                        protection: FileProtectionType? = nil) throws {
     var metadata = stat()
     let exists = directory.withUnsafeFileSystemRepresentation { pointer -> Int32 in
       guard let pointer = pointer else { return -1 }
@@ -781,10 +790,18 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     }
     if exists != 0 {
       guard errno == ENOENT else { throw ExportError.unavailable }
+      var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+      if let protection = protection { attributes[.protectionKey] = protection }
       try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false,
-                                              attributes: [.posixPermissions: 0o700])
+                                              attributes: attributes)
     }
     let before = try requireDirectory(directory)
+    if let protection = protection {
+      try FileManager.default.setAttributes([.protectionKey: protection], ofItemAtPath: directory.path)
+      let attributes = try FileManager.default.attributesOfItem(atPath: directory.path)
+      guard attributes[.protectionKey] as? FileProtectionType == protection
+      else { throw ExportError.unavailable }
+    }
     // Apple's group-directory exclusion mechanism: these stable directories
     // remain in place when child files are replaced. This is system guidance,
     // not proof that every OS/provider backup implementation excludes the data.

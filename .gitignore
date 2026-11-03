@@ -5,6 +5,7 @@ build/
 coverage/
 /apps/vnote_mobile/assets/editor/
 /apps/vnote_mobile/assets/legal/
+/apps/vnote_mobile/assets/preview/
 
 # Dart / Flutter
 .dart_tool/

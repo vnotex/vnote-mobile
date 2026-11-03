@@ -3,8 +3,10 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
+import 'package:path/path.dart' as p;
 
 import 'editor_session.dart';
+import 'editor_drafts.dart';
 import 'managed_notebook_storage.dart';
 import 'notebook_session.dart';
 
@@ -75,6 +77,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     required this._notebookId,
     OpenCatalog? openCatalog,
     OpenNote? openNote,
+    this._drafts,
   }) : _openCatalog = openCatalog ?? _managedCatalog,
        _openNote = openNote ?? _managedNote,
        super(const NotebookWorkspaceState());
@@ -83,8 +86,10 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   final String _notebookId;
   final OpenCatalog _openCatalog;
   final OpenNote _openNote;
+  EditorDrafts? _drafts;
   CatalogCore? _catalog;
   NotebookSession? _session;
+  String? _previewFragment;
   CoreDirectory? _directory;
   String? _folderId;
   String? _error;
@@ -109,6 +114,27 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
 
   String get notebookId => _notebookId;
   String get notebookLocation => _paths.notebook;
+
+  void attachDrafts(EditorDrafts drafts) {
+    if (_initialization != null || _session != null) {
+      throw StateError('Attach private draft storage before opening the workspace.');
+    }
+    _drafts = drafts;
+  }
+
+  Future<bool> openRecovered(String nodeId, Map<String, Object?> checkpoint) =>
+      _openNode(nodeId, restored: checkpoint);
+
+  /// Preview targets are stable native IDs, not note-controlled paths.
+  Future<bool> openPreviewTarget(String nodeId, {String? fragment}) =>
+      _openNode(nodeId, previewFragment: fragment);
+
+  String? takePreviewFragment(NotebookSession session) {
+    if (!identical(session, _session)) return null;
+    final fragment = _previewFragment;
+    _previewFragment = null;
+    return fragment;
+  }
 
   /// Unresolved ownership prevents native reopen/mutations. Library return
   /// remains available so a recovery owner can reconcile the pinned target.
@@ -369,16 +395,24 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     return _openNode(hit.id);
   }
 
-  Future<bool> _openNode(String nodeId) async {
+  Future<bool> _openNode(String nodeId, {Map<String, Object?>? restored, String? previewFragment}) async {
     if (_catalog == null || !_admit()) return false;
     _invalidateSnapshots();
     try {
+      final drafts = _drafts;
+      if (drafts == null || !drafts.value.initialized) {
+        throw StateError('Private draft recovery must finish before opening a note.');
+      }
       // Never relinquish the owner reference until its asynchronous join ends.
       await _catalog!.close();
       _catalog = null;
       if (_shuttingDown) return false;
+      _previewFragment = previewFragment;
       final session = NotebookSession(
         openCore: () => _openNote(_paths, _notebookId, nodeId),
+        drafts: drafts,
+        notebookRelative: p.basename(_paths.notebook),
+        restored: restored,
       );
       _session = session;
       await session.initialize();

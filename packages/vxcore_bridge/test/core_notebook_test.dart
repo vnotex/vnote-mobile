@@ -2,6 +2,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:isolate';
+import 'dart:typed_data';
 
 import 'package:test/test.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
@@ -72,12 +74,127 @@ Matcher _code(int code) => isA<CoreException>().having(
   code,
 );
 
+Future<Map<String, Object?>> _draft(
+  Map<String, Object?> request, [String? source]
+) => Isolate.run(() => CoreDraftStore.run(
+  request, payload: source == null ? null : Uint8List.fromList(utf8.encode(source)),
+));
+
+Future<Map<String, Object?>> _preview(Map<String, Object?> request) =>
+    Isolate.run(() => CoreImportStore.runPreview(request));
+
 void main() {
   late _Fixture fixture;
   setUp(() async {
     fixture = _Fixture(await Directory.systemTemp.createTemp('vnote-ffi-'));
   });
   tearDown(() => fixture.dispose());
+
+  test('prepared durable save publishes only its captured prefix and retains later edits', () async {
+    final host = await fixture.open(initial: 'base\r\n');
+    final base = await host.read();
+    final root = fixture.path('drafts');
+    await Directory(root).create();
+    final key = (await _draft({
+      'op': 'key', 'notebookId': base.notebookId, 'nodeId': base.nodeId,
+    }))['documentKey']! as String;
+    final token = 'a' * 32;
+    final capture = <String, Object?>{
+      'draftsRoot': root, 'documentKey': key, 'token': token,
+    };
+    await _draft({
+      ...capture, 'op': 'begin', 'descriptor': {
+        'notebookRelative': 'book', 'notebookId': base.notebookId,
+        'nodeId': base.nodeId, 'pathHint': base.path, 'editorType': 'markdown',
+        'openingDiskHash': base.baseHash, 'eol': base.lineEnding,
+      },
+    }, base.text);
+    Future<void> append(int revision, int offset, String insert) async {
+      await _draft({...capture, 'op': 'append', 'expectedRevision': revision}, jsonEncode({
+        'frames': [{
+          'token': token, 'baseRevision': revision, 'revision': revision + 1,
+          'requestId': 'edit-${revision + 1}',
+          'changes': [{'from': offset, 'to': offset, 'insert': insert}],
+          'selection': {'anchor': offset + insert.length, 'head': offset + insert.length},
+        }],
+      }));
+    }
+    await append(0, base.text.length, 'one\n');
+    final candidate = await _draft({
+      ...capture, 'op': 'prepareSave', 'revision': 1, 'requestId': 'save-one',
+    });
+    await append(1, base.text.length + 4, 'two\n');
+    final saved = await host.writeDraft(
+      draftsRoot: root, documentKey: key, token: token,
+      candidateId: candidate['candidateId']! as String,
+    );
+    expect(saved.summary.token, token);
+    expect(saved.summary.revision, 2);
+    expect(saved.summary.savedRevision, 1);
+    expect(saved.completedCandidateId, candidate['candidateId']);
+    expect(saved.completedRequestId, 'save-one');
+    expect(await fixture.note.readAsString(), '${base.text}one\n');
+    final retained = await _draft({...capture, 'op': 'read'});
+    expect(retained['source'], '${base.text}one\ntwo\n');
+    expect(retained['revision'], 2);
+    expect(retained['savedRevision'], 1);
+    final established = await host.reconcileDraft(
+      draftsRoot: root, documentKey: key, token: token,
+    );
+    expect(established.outcome, 'saved');
+    expect(established.summary.savedRevision, 1);
+    await fixture.note.writeAsString('newer disk', flush: true);
+    final conflict = await host.inspectDraft(
+      draftsRoot: root, documentKey: key, token: token,
+    );
+    expect(conflict.outcome, 'conflict');
+    expect(conflict.canRetry, isFalse);
+    expect(await fixture.note.readAsString(), 'newer disk');
+    expect((await _draft({...capture, 'op': 'read'}))['source'], '${base.text}one\ntwo\n');
+  });
+
+  test('preview captures current mirror without saving it or exposing its token', () async {
+    final host = await fixture.open(initial: '# on disk\r\n');
+    final root = fixture.path('previews');
+    await Directory(root).create();
+    final snapshot = await host.preparePreview(
+      previewsRoot: root, previewId: '1' * 32, renderId: '2' * 32,
+      token: '3' * 32, revision: 17, source: '# unsaved preview\r\n',
+    );
+    expect(snapshot.token, '3' * 32);
+    expect(snapshot.sourceRevision, 17);
+    expect(snapshot.sourceHash, matches(RegExp(r'^[0-9a-f]{64}$')));
+    expect(await fixture.note.readAsString(), '# on disk\r\n');
+    final manifest = await _preview(snapshot.command('inspect'));
+    expect(manifest['sourceHash'], snapshot.sourceHash);
+    expect(manifest.containsKey('token'), isFalse);
+    expect(manifest.containsKey('previewRoot'), isFalse);
+    final source = File('$root/${snapshot.previewId}/${snapshot.renderId}/source.md');
+    expect(await source.readAsString(), '# unsaved preview\r\n');
+    final revoked = await _preview(snapshot.command('revoke'));
+    expect(revoked['revoked'], isTrue);
+    expect(await fixture.note.readAsString(), '# on disk\r\n');
+  });
+
+  test('preview typed metadata accepts aliases but refuses crossed generations and unsafe intents', () {
+    final value = <String, Object?>{
+      'version': 1, 'previewId': 'a' * 32, 'renderId': 'b' * 32,
+      'sourceRevision': 0, 'sourceHash': 'c' * 64, 'manifestHash': 'd' * 64,
+      'imageCount': 2, 'fileCount': 1, 'navigationCount': 0, 'encodedBytes': 100,
+    };
+    final parsed = CorePreviewSnapshot.fromJson(value, previewsRoot: '/private/previews', token: 'e' * 32);
+    expect(parsed.imageCount, 2);
+    expect(() => CorePreviewSnapshot.fromJson({...value, 'token': 'e' * 32},
+      previewsRoot: '/private/previews', token: 'e' * 32), throwsA(_code(8)));
+    expect(() => CorePreviewNavigation.fromJson({
+      'source': 'unsafe', 'handle': 'f' * 32, 'kind': 'external',
+      'url': 'https://secret@example.com/', 'origin': 'https://example.com', 'insecure': false,
+    }), throwsA(_code(8)));
+    expect(() => CorePreviewNavigation.fromJson({
+      'source': 'unsafe', 'handle': 'f' * 32, 'kind': 'external',
+      'url': 'https://target.example/path', 'origin': 'https://different.example', 'insecure': false,
+    }), throwsA(_code(8)));
+  });
 
   test('real UTF8 and CRLF source survives write, close and reopen with stable IDs', () async {
     const source = '\ufeff# 中文 😀\r\ne\u0301\r\nالعربية\rlast\n';

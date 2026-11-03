@@ -23,7 +23,7 @@ abstract final class CoreImportStore {
     Map<String, Object?> request, {
     int cancellationAddress = 0,
   }) =>
-      _run(request, cancellationAddress: cancellationAddress, transfer: false);
+      _run(request, cancellationAddress: cancellationAddress, transport: 0);
 
   /// Executes cohort/resource staging commands on a joined filesystem worker.
   /// This shares bounded decoding and cancellation ownership with [run], but
@@ -31,12 +31,19 @@ abstract final class CoreImportStore {
   static Map<String, Object?> runTransfer(
     Map<String, Object?> request, {
     int cancellationAddress = 0,
-  }) => _run(request, cancellationAddress: cancellationAddress, transfer: true);
+  }) => _run(request, cancellationAddress: cancellationAddress, transport: 1);
+
+  /// Runs immutable preview inspection, leases, navigation and export work on
+  /// a joined filesystem worker. This never borrows a core context.
+  static Map<String, Object?> runPreview(
+    Map<String, Object?> request, {
+    int cancellationAddress = 0,
+  }) => _run(request, cancellationAddress: cancellationAddress, transport: 2);
 
   static Map<String, Object?> _run(
     Map<String, Object?> request, {
     required int cancellationAddress,
-    required bool transfer,
+    required int transport,
   }) {
     if (cancellationAddress < 0) {
       throw const CoreException(_invalid, 'Invalid import cancellation token');
@@ -48,7 +55,11 @@ abstract final class CoreImportStore {
     }
     return using((arena) {
       final output = arena<Pointer<Char>>();
-      final invoke = transfer ? native.vxm_transfer_run : native.vxm_import_run;
+      final invoke = switch (transport) {
+        0 => native.vxm_import_run,
+        1 => native.vxm_transfer_run,
+        _ => native.vxm_preview_run,
+      };
       final code = invoke(
         encoded.toNativeUtf8(allocator: arena).cast(),
         Pointer<native.VxmImportCancel>.fromAddress(cancellationAddress),
@@ -59,16 +70,18 @@ abstract final class CoreImportStore {
         if (code != native.VxCoreError.VXCORE_OK) {
           throw CoreException(
             code,
-            transfer ? _transferMessage(code) : _message(code),
+            transport == 0 ? _message(code) : transport == 1
+                ? _transferMessage(code) : _previewMessage(code),
           );
         }
         if (response == nullptr) _malformed();
         final bytes = response.cast<Uint8>();
+        final maximum = transport == 2 ? 16 * 1024 * 1024 : _maximumResponse;
         var size = 0;
-        while (size <= _maximumResponse && bytes[size] != 0) {
+        while (size <= maximum && bytes[size] != 0) {
           size++;
         }
-        if (size > _maximumResponse) _malformed();
+        if (size > maximum) _malformed();
         final Object? value;
         try {
           value = jsonDecode(
@@ -179,6 +192,18 @@ abstract final class CoreImportStore {
     native.VxCoreError.VXCORE_ERR_JSON_PARSE,
     'Malformed native import response',
   );
+
+  static String _previewMessage(int code) => switch (code) {
+    native.VxCoreError.VXCORE_ERR_CANCELLED =>
+      'Preview work was cancelled; retain its snapshot until all readers join',
+    native.VxCoreError.VXCORE_ERR_FILE_CHANGED_OUTSIDE =>
+      'Preview identity changed; its retained snapshot cannot be reused',
+    native.VxCoreError.VXCORE_ERR_UNSUPPORTED =>
+      'Preview refused unsafe content, storage, or a size limit',
+    native.VxCoreError.VXCORE_ERR_JSON_PARSE =>
+      'Preview metadata is malformed',
+    _ => 'Preview work failed; retained source remains available',
+  };
 
   static String _transferMessage(int code) => switch (code) {
     native.VxCoreError.VXCORE_ERR_CANCELLED => 'Transfer work was cancelled; retain its data until all workers have joined',
