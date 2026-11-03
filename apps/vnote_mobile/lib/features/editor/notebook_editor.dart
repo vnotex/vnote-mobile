@@ -18,6 +18,8 @@ import '../../services/transfer_worker.dart' show runPreviewStore;
 import '../preview/notebook_preview.dart';
 import '../resources/resource_panel.dart';
 import '../about/license_sheet.dart';
+import '../sync/notebook_sync_panel.dart';
+import '../../services/notebook_sync.dart';
 
 class NotebookEditor extends StatefulWidget {
   const NotebookEditor({
@@ -527,7 +529,7 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
       final editor = state.editor?.value;
       final enabled = editor?.ready == true && editor?.closing != true && editor?.quiesced != true;
       final markdown = state.note?.editorType == CoreEditorType.markdown;
-      final error = state.durabilityError ?? state.error ?? editor?.error;
+      final error = state.syncError ?? state.durabilityError ?? state.error ?? editor?.error;
       final saved = editor != null && !state.dirty && !state.recoveryRequired &&
           state.durabilityError == null && state.error == null && editor.locallySaved;
       return PopScope<Object?>(
@@ -538,7 +540,8 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
           appBar: AppBar(
             title: Text(state.note == null ? 'Note' : '${state.note!.notebookName} / ${state.note!.path}'),
             actions: [
-              IconButton(tooltip: 'Attachments and images', onPressed: state.note != null && !state.busy ? _showResources : null, icon: const Icon(Icons.attach_file)),
+              IconButton(tooltip: 'Attachments and images', onPressed: state.note != null && !state.busy && !state.syncBusy ? _showResources : null, icon: const Icon(Icons.attach_file)),
+              IconButton(tooltip: 'WebDAV synchronization', icon: const Icon(Icons.sync), onPressed: () => showNotebookSyncPanel(context, widget.workspace.synchronization)),
               IconButton(tooltip: 'Legal notices', icon: const Icon(Icons.info_outline), onPressed: () => showNotebookLicenses(context, _notebook.nativeNotices)),
               IconButton(tooltip: 'Return to notebook', onPressed: state.transitioning ? null : _requestExit, icon: const Icon(Icons.close)),
             ],
@@ -547,6 +550,10 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               if (state.busy) const LinearProgressIndicator(),
+              ValueListenableBuilder<NotebookSyncState>(valueListenable: widget.workspace.synchronization,
+                builder: (context, sync, _) => TextButton.icon(
+                  onPressed: () => showNotebookSyncPanel(context, widget.workspace.synchronization),
+                  icon: const Icon(Icons.cloud_outlined), label: Text(notebookSyncStatus(sync)))),
               Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4), child: Semantics(liveRegion: true,
                 child: Text(editor == null ? 'Opening selected note…' : '${saved ? 'Saved locally' : 'Unwritten changes'} · Received ${state.receivedRevision} · Draft ${state.draftRevision} · Saved ${state.onDiskRevision ?? 'none'}'))),
               Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text(
@@ -590,7 +597,8 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
                   SelectableText(error),
                   if (editor != null) Wrap(children: [
                     TextButton(onPressed: _copyReceivedText, child: const Text('Copy received source')),
-                    TextButton(onPressed: state.transitioning ? null : _recoverView, child: const Text('Recover editor view')),
+                    if (state.syncRecoveryRequired) TextButton(onPressed: () => widget.workspace.synchronization.recover(), child: const Text('Recover sync'))
+                    else TextButton(onPressed: state.transitioning ? null : _recoverView, child: const Text('Recover editor view')),
                     TextButton(onPressed: !state.busy && state.editor?.canFlushSource == true ? () => _notebook.write(_transport) : null, child: const Text('Retry save / reconcile')),
                   ]) else if (!state.busy) TextButton(onPressed: _notebook.retryOpen, child: const Text('Retry open')),
                 ])),

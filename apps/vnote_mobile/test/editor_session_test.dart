@@ -1384,6 +1384,29 @@ void main() {
       expect(() => session.preferences(dark: true, fontScale: double.nan), throwsArgumentError);
     });
 
+    test('a superseded abort reply cannot unfreeze a newer quiesce', () async {
+      final session = sessionWith('retained'); open(session);
+      final sent = <Map<String, Object?>>[];
+      Future<void> quiesce() async {
+        final pending = session.quiesce(sent.add);
+        deliver(session, message('close', 0, sent.last['requestId']! as String,
+          {'mode': 'quiesced', 'anchor': 0, 'head': 0}));
+        await pending;
+      }
+      await quiesce();
+      final old = session.abortClose(sent.add);
+      final oldId = sent.last['requestId']! as String;
+      final superseded = expectLater(old, throwsStateError);
+      final current = session.abortClose(sent.add);
+      deliver(session, message('close', 0, sent.last['requestId']! as String, {'mode': 'aborted'}));
+      await current; await superseded;
+      await quiesce();
+      deliver(session, message('close', 0, oldId, {'mode': 'aborted'}));
+      expect(session.value.quiesced, isTrue);
+      expect(session.value.text, 'retained');
+      expect(session.value.error, isNull);
+    });
+
     test('transport failure settles a pending flush and retains source', () async {
       final session = sessionWith('base');
       open(session);

@@ -2259,10 +2259,68 @@ void cohort_admission_never_uses_export_owner() {
   host.close();
 }
 
+void sync_control_bypasses_full_operation_capacity() {
+  Fixture fixture;
+  Host owner(fixture, "capacity source", true);
+  owner.signals.wait_entered();
+  auto opened = owner.next();
+  const char *operation = "12345678-0000-4000-8000-000000000002";
+  const auto command = Json{{"action", "stage"}, {"operationId", operation}}.dump();
+  for (uint64_t id = 2; id <= VXM_MAX_OPERATIONS; ++id)
+    CHECK(vxm_host_sync(owner.handle, id, owner.generation, command.c_str(), nullptr) == VXCORE_OK);
+  CHECK(vxm_host_sync(owner.handle, VXM_MAX_OPERATIONS + 1, owner.generation,
+      command.c_str(), nullptr) == VXCORE_ERR_OUT_OF_MEMORY);
+  CHECK(vxm_host_sync_cancel(owner.handle, owner.generation, operation) == VXCORE_OK);
+  owner.signals.release();
+  for (uint64_t id = 2; id <= VXM_MAX_OPERATIONS; ++id) {
+    auto event = owner.next();
+    CHECK(event->kind == VXM_EVENT_SYNC && event->request_id == id && event->code == VXCORE_ERR_CANCELLED);
+    CHECK(Json::parse(text(event)).at("executed") == false);
+  }
+  opened.reset();
+  owner.close();
+  CHECK(disk(fixture.note()) == "capacity source");
+}
+
+void sync_owner_facts_and_phase_admission() {
+  Fixture fixture;
+  fixture.seed("local source\n");
+  for (const auto mode : {VXM_MODE_NOTE, VXM_MODE_CATALOG}) {
+    std::unique_ptr<Host> owner = mode == VXM_MODE_NOTE ?
+        std::make_unique<Host>(fixture, "local source\n") :
+        std::make_unique<Host>(fixture, VXM_MODE_CATALOG, false, fixture.notebook_id.c_str());
+    CHECK(owner->next()->code == VXCORE_OK);
+    const char *operation = "12345678-0000-4000-8000-000000000001";
+    CHECK(vxm_host_sync(owner->handle, 2, owner->generation, "{\"action\":\"inspect\"}", nullptr) == VXCORE_OK);
+    auto facts_event = owner->next();
+    CHECK(facts_event->kind == VXM_EVENT_SYNC && facts_event->code == VXCORE_OK);
+    const auto facts = Json::parse(text(facts_event));
+    CHECK(facts.at("notebookId") == fixture.notebook_id && facts.at("registered") == false);
+    CHECK(facts.at("refreshRequired") == false && facts.at("lastSuccessUtcMillis") == 0);
+    facts_event.reset();
+    const auto invalid = Json{{"action", "stage"}, {"operationId", operation}, {"allowUnknown", true}}.dump();
+    CHECK(vxm_host_sync(owner->handle, 3, owner->generation, invalid.c_str(), nullptr) == VXCORE_ERR_INVALID_PARAM);
+    const auto stage = Json{{"action", "stage"}, {"operationId", operation}}.dump();
+    CHECK(vxm_host_sync(owner->handle, 3, owner->generation, stage.c_str(), nullptr) == VXCORE_OK);
+    auto failed = owner->next();
+    CHECK(failed->code == VXCORE_ERR_INVALID_STATE && failed->size != 0);
+    const auto result = Json::parse(text(failed));
+    CHECK(result.at("operationId") == operation && result.at("code") == failed->code);
+    CHECK(result.at("executed") == false && result.at("committed") == false && result.at("changedPaths").is_null());
+    CHECK(vxm_host_sync_cancel(owner->handle, owner->generation + 1, operation) == VXCORE_ERR_INVALID_STATE);
+    CHECK(vxm_host_sync_cancel(owner->handle, owner->generation, operation) == VXCORE_ERR_INVALID_STATE);
+    failed.reset();
+    owner->close();
+  }
+  CHECK(disk(fixture.note()) == "local source\n");
+}
+
 }  // namespace
 
 int main() {
   try {
+    sync_control_bypasses_full_operation_capacity();
+    sync_owner_facts_and_phase_admission();
     round_trip_and_conflict();
     admission_cancellation_and_close();
     output_and_input_reservations();

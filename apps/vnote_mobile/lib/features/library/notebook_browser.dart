@@ -7,6 +7,8 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 import '../../services/notebook_workspace.dart';
 import '../../services/document_transfer_platform.dart';
 import '../about/license_sheet.dart';
+import '../sync/notebook_sync_panel.dart';
+import '../../services/notebook_sync.dart';
 
 class NotebookBrowser extends StatefulWidget {
   const NotebookBrowser({
@@ -203,10 +205,13 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
             title: Text(directory?.notebookName ?? 'Notebook'),
             leading: IconButton(
               tooltip: 'Notebooks',
-              onPressed: state.canBrowse ? widget.onShowNotebooks : null,
+              onPressed: !state.busy && !state.closed ? widget.onShowNotebooks : null,
               icon: const Icon(Icons.library_books_outlined),
             ),
             actions: [
+              IconButton(tooltip: 'WebDAV synchronization',
+                onPressed: state.closed ? null : () => showNotebookSyncPanel(context, _workspace.synchronization),
+                icon: const Icon(Icons.sync)),
               IconButton(
                 tooltip: 'Rename notebook',
                 onPressed: state.canMutate
@@ -243,6 +248,10 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
                 if (state.busy) const LinearProgressIndicator(),
+                ValueListenableBuilder<NotebookSyncState>(valueListenable: _workspace.synchronization,
+                  builder: (context, sync, _) => TextButton.icon(
+                    onPressed: () => showNotebookSyncPanel(context, _workspace.synchronization),
+                    icon: const Icon(Icons.cloud_outlined), label: Text(notebookSyncStatus(sync)))),
                 if (!_showSearch)
                   Padding(
                     padding: const EdgeInsets.symmetric(

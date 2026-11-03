@@ -12,6 +12,7 @@ import 'notebook_export.dart';
 import 'notebook_import.dart';
 import 'document_transfer_platform.dart';
 import 'notebook_workspace.dart';
+import 'sync_credentials.dart';
 import 'notebook_session.dart';
 import 'cohort_import.dart';
 import 'resource_transfer.dart';
@@ -113,6 +114,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     LibraryCreateCohortImporter? createCohortImporter,
     LibraryCreateResourceTransfer? createResourceTransfer,
     EditorDrafts Function(String root)? createDrafts,
+    SyncCredentials? syncCredentials,
   }) : _obtainStorage = obtainStorage ?? ManagedNotebookStorage.obtain,
        _openCatalog = openCatalog ?? _open,
        _createCatalog = createCatalog ?? _create,
@@ -123,8 +125,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
        _createCohortImporter = createCohortImporter ?? _cohortImporterFor,
        _createResourceTransfer = createResourceTransfer ?? _resourceTransferFor,
        _createDrafts = createDrafts ?? _draftsFor,
+       syncCredentials = syncCredentials ?? SyncCredentials(),
        super(const NotebookLibraryState());
 
+  final SyncCredentials syncCredentials;
+  bool _foreground = true;
   final Future<ManagedNotebookStorage> Function() _obtainStorage;
   final LibraryOpenCatalog _openCatalog;
   final LibraryCreateCatalog _createCatalog;
@@ -162,6 +167,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   Future<void>? _initialization;
   Future<void>? _shutdownFuture;
 
+  void setForeground(bool foreground) {
+    _foreground = foreground;
+    _workspace?.setForeground(foreground);
+  }
+
   Future<void> initialize() =>
       _stopping ? Future<void>.value() : _initialization ??= _initialize();
   Future<void> _initialize() async {
@@ -185,6 +195,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   void _publish() {
     if (_disposed) return;
+    _workspace?.setExternalTransferBusy(_scanningTransfers || _transferCall != null);
     value = NotebookLibraryState(
       entries: _entries,
       workspace: _workspace,
@@ -225,6 +236,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   bool _claimTransfer(String owner, {bool cleanup = false}) {
     if (_stopping ||
+        (!cleanup && (_workspace?.synchronization.value.busy ?? false)) ||
         _scanningTransfers ||
         _transferCall != null ||
         _transferOwner == 'checking' ||
@@ -1248,6 +1260,105 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
   }
 
+  Future<void> connectWebDav({required String endpoint, required String username,
+      required String password, bool autoSyncEnabled = false}) async {
+    if (_workspace != null || _active != null || _stale || _importer == null ||
+        !_claimTransfer('import')) { return; }
+    try {
+      final canonical = canonicalSyncEndpoint(endpoint);
+      if (!await syncCredentials.vault.trustAvailable()) {
+        throw StateError('The native HTTPS trust provider is unavailable.');
+      }
+      final operation = newSyncOperationId();
+      await _importer!.prepareWebDav(operationId: operation,
+        configuration: CoreSyncConfiguration(endpoint: canonical, autoSyncEnabled: autoSyncEnabled),
+        loadCredentials: (attempt) async {
+          final staged = await syncCredentials.stageClone(operationId: operation,
+            endpoint: canonical, username: username, password: password,
+            autoSyncEnabled: autoSyncEnabled);
+          return syncCredentials.cloneCredentials(staged);
+        });
+    } on SyncVaultException {
+      _error = 'Secure credential storage is unavailable or changed. Connection staging is retained.';
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally { _finishTransferCall(); }
+  }
+
+  Future<CoreSyncCloneReceipt> _cloneReceipt(ImportAttempt attempt) async {
+    if (!attempt.isWebDavClone || attempt.operationId == null) {
+      throw StateError('The WebDAV clone identity is unavailable.');
+    }
+    final record = await _importer!.runStore({'op': 'inspectClone', 'id': attempt.id,
+      'operationId': attempt.operationId!}, cancellationAddress: 0);
+    return CoreSyncCloneReceipt.fromJson(record);
+  }
+
+  Future<SyncClonePublicationReceipt> _clonePublication(ImportAttempt attempt,
+      SyncCloneCredentials clone, {bool requireCommitted = false}) async {
+    final actual = await _importer!.runStore({'op': 'recover', 'id': attempt.id}, cancellationAddress: 0);
+    if (actual['origin'] != 'webdavClone' || actual['operationId'] != clone.operationId ||
+        actual['id'] != attempt.id) { throw StateError('The clone publication identity changed.'); }
+    final phase = actual['phase'];
+    if (phase != 'staged' && phase != 'published' && phase != 'committed') {
+      throw StateError('Clone publication is unresolved.');
+    }
+    if (requireCommitted && phase != 'committed') throw StateError('The final import receipt is unavailable.');
+    final published = phase == 'published' || phase == 'committed';
+    if (published && actual['notebookId'] != clone.notebookId) {
+      throw StateError('The published clone notebook identity changed.');
+    }
+    return SyncClonePublicationReceipt(operationId: clone.operationId,
+      importId: attempt.id, notebookId: published ? actual['notebookId'] as String? : clone.notebookId,
+      endpoint: clone.provisionalScope.endpoint, published: published);
+  }
+
+  Future<void> _stageCloneRekey(ImportAttempt attempt) async {
+    if (!attempt.isWebDavClone) return;
+    final receipt = await _cloneReceipt(attempt);
+    final clone = await syncCredentials.recoverClone(receipt.endpoint, receipt.operationId);
+    await syncCredentials.rekeyClone(clone, notebookId: receipt.notebookId,
+      importId: receipt.importId, cloneReceipt: receipt);
+  }
+
+  Future<void> _finishCloneCredentials(ImportAttempt attempt,
+      Map<String, Object?> publication) async {
+    if (!attempt.isWebDavClone || publication['credentialsSettled'] == true) return;
+    if (publication['phase'] != 'committed') throw StateError('Clone credentials require a committed import receipt.');
+    final receipt = await _cloneReceipt(attempt);
+    final clone = await syncCredentials.findClone(receipt.operationId);
+    final targetScope = SyncCredentialScope.notebook(receipt.endpoint, receipt.notebookId);
+    if (clone != null && clone.notebookId != receipt.notebookId) {
+      throw StateError('Clone credential rekey has not been proved.');
+    }
+    // Configure routing only AFTER native publication. There is deliberately no
+    // network or claim of current authentication here; workspace reconcile owns it.
+    final destination = publication['destination'] as String;
+    final paths = await _storage!.existing(destination);
+    final core = await _openCatalog(paths, receipt.notebookId);
+    _temporary = core;
+    try {
+      final result = await core.sync(CoreSyncCommand(action: CoreSyncAction.configure,
+        operationId: receipt.operationId, cloneImportId: attempt.id,
+        configuration: CoreSyncConfiguration(
+          endpoint: receipt.endpoint, autoSyncEnabled: receipt.autoSyncEnabled)));
+      if (!result.success) throw StateError('Imported notebook routing still requires recovery.');
+    } finally { await _release(core); }
+    if (clone != null) {
+      await syncCredentials.promoteClone(clone,
+        readPublicationReceipt: () => _clonePublication(attempt, clone, requireCommitted: true));
+    } else {
+      // A promotion may have removed provisional storage before its reply was
+      // lost. Read the actual destination; never overwrite a later generation.
+      final target = await syncCredentials.read(targetScope);
+      if (!target.present || target.pending || !target.hasUsableCredentials) {
+        throw StateError('The imported notebook is retained while credential promotion is unresolved.');
+      }
+    }
+    await _importer!.runStore({'op': 'finishCloneCredentials', 'id': attempt.id,
+      'operationId': receipt.operationId}, cancellationAddress: 0);
+  }
+
   Future<void> retryImport(ImportAttempt attempt) async {
     if (_workspace != null ||
         _active != null ||
@@ -1267,6 +1378,17 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   Future<void> discardImport(ImportAttempt attempt) async {
     if (_importer == null || !_claimTransfer('import', cleanup: true)) return;
     try {
+      if (attempt.isWebDavClone) {
+        final actual = await _importer!.runStore({'op': 'recover', 'id': attempt.id}, cancellationAddress: 0);
+        if (actual['phase'] != 'staged') {
+          throw StateError('Finish published clone credential recovery before discarding its private receipt.');
+        }
+        final clone = await syncCredentials.findClone(attempt.operationId!);
+        if (clone != null) {
+          await syncCredentials.abandonClone(clone,
+            readPublicationReceipt: () => _clonePublication(attempt, clone));
+        }
+      }
       await _importer!.discard(attempt);
     } on Object catch (error) {
       _error = _describe(error);
@@ -1427,6 +1549,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       'id': attempt.id,
     }, cancellationAddress: 0);
     if (status['phase'] == 'committed') {
+      await _finishCloneCredentials(attempt, status);
       return ImportCommitResult(
         status: ImportCommitStatus.imported,
         notebookId: status['notebookId'] as String?,
@@ -1467,6 +1590,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       publishedLocation: published ? status['destination'] as String : null,
     );
     if (collision != null) return collision;
+    if (!published) await _stageCloneRekey(attempt);
     if (!published) {
       try {
         status = await importer.runStore({
@@ -1509,6 +1633,10 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         'op': 'commit',
         'id': attempt.id,
       }, cancellationAddress: 0);
+    }
+    if (attempt.isWebDavClone) {
+      final committed = await importer.runStore({'op': 'recover', 'id': attempt.id}, cancellationAddress: 0);
+      await _finishCloneCredentials(attempt, committed);
     }
     return ImportCommitResult(
       status: ImportCommitStatus.imported,
@@ -1851,10 +1979,13 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     if (_stopping) return false;
     final workspace = _createWorkspace(paths, id);
     workspace.attachDrafts(_drafts!);
+    workspace.attachSyncCredentials(syncCredentials);
+    workspace.setForeground(_foreground);
     _workspace = workspace;
     await workspace.initialize();
     if (_stopping) return false;
-    if (workspace.value.directory == null || workspace.value.stale) {
+    if (workspace.value.directory == null ||
+        (workspace.value.stale && !workspace.value.syncRecoveryRequired)) {
       final message = workspace.value.error ?? 'The notebook could not open.';
       try {
         await workspace.shutdown();
@@ -1914,13 +2045,15 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   Future<bool> returnToLibrary(NotebookWorkspace workspace) async {
     if (!identical(_workspace, workspace) ||
-        !workspace.value.canBrowse ||
+        workspace.value.session != null || workspace.value.busy || workspace.value.closed ||
         !_admit()) {
       return false;
     }
     String? closeError;
     try {
       try {
+        final cleanup = await workspace.synchronization.closeNotebook();
+        if (!cleanup.success) closeError = cleanup.error ?? 'Credential cleanup remains pending for this notebook.';
         await workspace.shutdown();
       } on Object catch (error) {
         closeError = _describe(error);

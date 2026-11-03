@@ -97,6 +97,23 @@ Maintain separate `editorRevision`, `receivedRevision`, `draftRevision`, pending
 
 **Complete-release durability gate:** the Android/iOS ordinary writer no longer truncates the live note first. File/directory flushing improves the mobile explicit-write boundary, but parent flush can fail after publication; an IO error is not proof the old bytes remained at the original path. The implemented journal, saved receipt and startup reconciliation do not establish iOS file-protection or physical-device power-loss behavior. Those checks remain required before claiming complete-release crash recovery. Desktop retains its pre-mobile in-place writer; host tests do not establish device durability. No Dart direct-write bypass is authorized.
 
+## Synchronization reservations
+
+Network-phase sync does not freeze received input, private draft persistence or
+ordinary saves. Stage drains already admitted writes without force-saving queued
+dirty text. Apply synchronously installs an operation/generation-owned reservation,
+blocks new saves, drains admitted writers, quiesces the existing view and flushes
+its acknowledged draft capture before classifying dirty paths. Composition is not
+forcibly committed. Native resolution protects stable dirty node IDs and their
+authoritative parallel metadata; unresolved transfer ownership refuses apply.
+
+Timeout/cancel requires correlated abort acknowledgement before safe unfreezing.
+Late replies cannot reacquire a retired token. Failed abort/metadata refresh or
+unavailable changed paths retain explicit source recovery rather than stale writable
+content. Clean affected sources reload only after actual metadata refresh; unchanged
+sources keep their view and Undo, and dirty sources are never overwritten. Sync
+last-success is independent of received/draft/saved watermarks (ADR 0005).
+
 ## Draft recovery and retention
 
 Use a small app-private persistent append-only journal and manifest, outside notebook roots and cache directories. Write checksummed framed records, flush them, then atomically replace/flush the manifest before acknowledging its revision. Ignore an incomplete unacknowledged tail after interruption, never an acknowledged prefix. Base snapshots are created only at load/recovery-resync or save checkpoints; keystrokes append deltas, not full note copies. Compact only after a new base/manifest is durable; retain the preceding generation until replacement is complete.

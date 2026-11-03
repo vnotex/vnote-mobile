@@ -7,6 +7,7 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 import 'editor_drafts.dart';
 import 'editor_session.dart';
 import 'transfer_worker.dart';
+import 'notebook_sync.dart';
 
 enum NotebookDisposition { write, retain, discard, cancel }
 
@@ -17,7 +18,8 @@ class NotebookSessionState {
     this.pendingRevision, this.loading = false,
     this.writing = false, this.transitioning = false, this.resourcesBusy = false,
     this.closed = false, this.recoveryRequired = false, this.durabilityError,
-    this.error});
+    this.error, this.syncBusy = false, this.syncReserved = false,
+    this.syncRecoveryRequired = false, this.syncError});
   final EditorSession? editor;
   final CoreNote? note;
   final int? onDiskRevision;
@@ -34,12 +36,16 @@ class NotebookSessionState {
   final bool recoveryRequired;
   final String? durabilityError;
   final String? error;
-  bool get dirty => editor != null && (recoveryRequired || durabilityError != null ||
+  final bool syncBusy;
+  final bool syncReserved;
+  final bool syncRecoveryRequired;
+  final String? syncError;
+  bool get dirty => editor != null && (recoveryRequired || syncRecoveryRequired || durabilityError != null ||
     error != null || editor!.value.error != null ||
     editor!.value.pending || editor!.value.composing ||
     editor!.value.resyncCandidate != null || savedToken != editor!.generation ||
     editor!.value.revision != onDiskRevision);
-  bool get busy => loading || writing || transitioning || resourcesBusy;
+  bool get busy => loading || writing || transitioning || resourcesBusy || syncReserved;
 }
 
 class _SaveTarget {
@@ -57,10 +63,19 @@ class _SaveTarget {
 class NotebookSession extends ValueNotifier<NotebookSessionState> {
   NotebookSession({required this._openCore,
     required this.drafts, required this.notebookRelative,
-    this._restored}) : super(const NotebookSessionState());
+    this._restored, this._beforeCoreClose, this._onCoreChanged, this._onLocalSaved})
+      : super(const NotebookSessionState());
   final Future<NotebookCore> Function() _openCore;
   final EditorDrafts drafts;
   final String notebookRelative;
+  final Future<void> Function()? _beforeCoreClose;
+  final VoidCallback? _onCoreChanged;
+  final VoidCallback? _onLocalSaved;
+  _NoteSyncReservation? _syncReservation;
+  _NoteSyncReservation? _syncRecovery;
+  String? _syncError;
+  bool _syncBusy = false;
+  bool _syncAllowsWrites = true;
   Map<String, Object?>? _restored;
   NotebookCore? _core;
   EditorDraftCapture? _capture;
@@ -81,6 +96,32 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   bool _stopping = false;
 
   String get nativeNotices => _core?.nativeNotices ?? '';
+  SyncCore? get synchronizationCore => _core;
+
+  void setSyncActivity({required bool busy, required bool allowsLocalWrites}) {
+    if (_syncBusy == busy && _syncAllowsWrites == allowsLocalWrites) return;
+    _syncBusy = busy; _syncAllowsWrites = allowsLocalWrites;
+    if (!allowsLocalWrites) _cancelTimers();
+    _publish(); _startSaving(); _schedule();
+  }
+
+  NotebookSyncReservation installSyncReservation(SyncReservationRequest request) {
+    if (_stopping || _syncReservation != null || value.transitioning || _core == null ||
+        _capture == null || _resourceBlock != null || (_syncRecovery?._abortPending ?? false)) {
+      throw StateError('The note cannot reserve synchronization while another owner is active.');
+    }
+    final reservation = _NoteSyncReservation(this, request);
+    _syncReservation = reservation;
+    _cancelTimers(); _publish();
+    return reservation;
+  }
+
+  Future<bool> recoverSyncSources() async {
+    final retained = _syncRecovery;
+    if (retained == null) return true;
+    final current = _syncReservation;
+    return current == null ? retained.recover() : current.recoverRetained(retained);
+  }
 
   void bindTransport(EditorSend send) { _send = send; _schedule(); }
   void unbindTransport(EditorSend send) {
@@ -130,10 +171,11 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
         _install(note);
       }
     } on Object catch (error) { _publish(error: _error(error)); }
-    finally { _publish(loading: false); }
+    finally { _publish(loading: false); _onCoreChanged?.call(); }
   }
   Future<void> retryOpen() async {
     if (_stopping || value.busy || value.editor != null) return;
+    await _beforeCoreClose?.call();
     await _core?.close();
     _core = null;
     await (_initialization = _initialize());
@@ -160,7 +202,9 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     _observedRevision = 0;
     _candidate = null;
     value = NotebookSessionState(editor: editor, note: note,
-      onDiskRevision: saved ? 0 : null, savedToken: saved ? editor.generation : null);
+      onDiskRevision: saved ? 0 : null, savedToken: saved ? editor.generation : null,
+      syncBusy: _syncBusy, syncReserved: _syncReservation != null,
+      syncRecoveryRequired: _syncRecovery != null, syncError: _syncError);
     previous?.dispose();
     _schedule();
   }
@@ -178,7 +222,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
   void _cancelTimers() { _idle?.cancel(); _ceiling?.cancel(); _idle = null; _ceiling = null; }
   void _schedule() {
-    if (_stopping || !_foreground || _send == null || !value.dirty ||
+    if (_stopping || !_foreground || !_syncAllowsWrites || _syncReservation != null ||
+        _syncRecovery != null || _send == null || !value.dirty ||
         value.editor?.value.ready != true || value.editor?.value.error != null ||
         value.error != null || value.recoveryRequired || value.durabilityError != null ||
         value.transitioning) {
@@ -215,7 +260,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
 
   Future<T> withResources<T>(Future<T> Function(ResourceCore core) action) async {
-    if (_stopping || _resources != null || value.transitioning || _core == null) {
+    if (_stopping || _syncBusy || _syncReservation != null || _syncRecovery != null ||
+        _resources != null || value.transitioning || _core == null) {
       throw StateError('The note is not available for a resource operation.');
     }
     // Reserve before awaiting an in-flight write so no second borrower enters.
@@ -260,7 +306,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     return target.completion.future;
   }
   void _startSaving() {
-    if (_saving != null || _pending == null || _resources != null || _stopping) return;
+    if (_saving != null || _pending == null || _resources != null || _stopping ||
+        !_syncAllowsWrites || _syncReservation != null || _syncRecovery != null) { return; }
     final done = Completer<void>();
     _saving = done.future;
     unawaited(_drainSaves().whenComplete(() {
@@ -270,7 +317,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     }));
   }
   Future<void> _drainSaves() async {
-    while (_pending != null && _resources == null && !_stopping) {
+    while (_pending != null && _resources == null && !_stopping &&
+        _syncAllowsWrites && _syncReservation == null && _syncRecovery == null) {
       final target = _pending!;
       _pending = null;
       final result = await _save(target.editor, target.send, explicit: target.explicit);
@@ -283,7 +331,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
   Future<bool> _save(EditorSession editor, EditorSend send, {required bool explicit,
       EditorSnapshot? quiesced}) async {
-    if (!identical(editor, value.editor) || _core == null) return false;
+    if (!identical(editor, value.editor) || _core == null || _syncRecovery != null) return false;
     if (_resourceBlock != null) { _publish(error: _resourceBlock); return false; }
     _cancelTimers();
     _publish(writing: true, clearError: true);
@@ -347,10 +395,12 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     }
     capture.summary = result;
     if (!identical(capture, _capture)) return;
+    final advanced = value.savedToken != capture.token || value.onDiskRevision != revision;
     final message = capture.editor.acknowledgeSaved(capture.capture(revision));
     _publish(onDiskRevision: revision, savedToken: capture.token,
       recoveryRequired: result['candidateId'] != null, clearDurabilityError: true);
     if (message != null) _sendControl(message);
+    if (advanced) _onLocalSaved?.call();
   }
   Future<Map<String, Object?>> _reconcile(EditorDraftCapture capture) async {
     final result = (await _core!.reconcileDraft(draftsRoot: drafts.root,
@@ -360,7 +410,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       _acceptSaved(capture, result, result['savedRevision'] as int);
       if (result['candidateId'] == null) _candidate = null;
     } else {
-      _publish(recoveryRequired: true);
+      _publish(recoveryRequired: result['outcome'] != 'base' || result['candidateId'] != null);
     }
     return result;
   }
@@ -381,12 +431,13 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     _pending?.completion.complete(false);
     _pending = null;
     try {
+      await _beforeCoreClose?.call();
       await _resources?.future;
       await _saving;
       // Explicit discard may abandon a failed view, but is never reported as a
       // successful flush/quiesce or as persistence of unreceived input.
       final abandonView = disposition == NotebookDisposition.discard && editor.value.error != null;
-      final snapshot = abandonView
+      final snapshot = abandonView || editor.value.quiesced
         ? EditorSnapshot(editor.value.text, editor.value.revision,
             documentId: editor.documentId, generation: editor.generation,
             anchor: editor.value.anchor, head: editor.value.head)
@@ -397,6 +448,18 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
         }
       } else if (disposition == NotebookDisposition.retain) {
         await _flush(_capture!, ensure: value.dirty);
+        final capture = _capture!;
+        if (_syncRecovery != null && !reopen && capture.begun &&
+            capture.summary?['savedRevision'] == snapshot.revision &&
+            capture.summary?['candidateId'] == null) {
+          // Explicit Keep draft after a remote replacement must not leave the
+          // received old source hidden as fully-saved retention history.
+          final retained = await drafts.rebase(DraftRecoveryEntry(capture.summary!), newTransferId());
+          if (retained['token'] == capture.token || retained['revision'] != 0 ||
+              retained['savedRevision'] != null || retained['sourceHash'] != capture.summary!['sourceHash']) {
+            throw StateError('The retained synchronization source was not safely checkpointed.');
+          }
+        }
       }
       if (reopen && disposition == NotebookDisposition.retain && _capture!.begun) {
         final actual = await _core!.reconcileDraft(draftsRoot: drafts.root,
@@ -465,7 +528,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       head: useViewSource ? candidate.head : null);
   }
   Future<EditorSession> _replaceView({String? chosenSource, int? anchor, int? head}) async {
-    if (_stopping || value.transitioning || _resources != null || _capture == null) {
+    if (_stopping || _syncBusy || _syncReservation != null || _syncRecovery != null ||
+        value.transitioning || _resources != null || _capture == null) {
       throw StateError('The note cannot replace its source view during an operation.');
     }
     _cancelTimers();
@@ -499,6 +563,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     _cancelTimers();
     _pending?.completion.complete(false);
     _pending = null;
+    await _beforeCoreClose?.call();
     value.editor?.reportTransportError('The notebook session is closing; accepted draft obligations are being joined.');
     await _initialization;
     await _resources?.future;
@@ -523,12 +588,12 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     value.editor?.dispose();
     super.dispose();
   }
-  void _publish({bool? loading, bool? writing, bool? transitioning,
+  void _publish({CoreNote? note, bool? loading, bool? writing, bool? transitioning,
       bool? resourcesBusy, bool? closed, int? onDiskRevision, int? draftRevision,
       String? savedToken, bool? recoveryRequired, String? durabilityError,
       bool clearDurabilityError = false, String? error, bool clearError = false}) {
     if (_disposed) return;
-    value = NotebookSessionState(editor: value.editor, note: value.note,
+    value = NotebookSessionState(editor: value.editor, note: note ?? value.note,
       onDiskRevision: onDiskRevision ?? value.onDiskRevision,
       draftRevision: draftRevision ?? value.draftRevision,
       savedToken: savedToken ?? value.savedToken,
@@ -539,10 +604,230 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       resourcesBusy: resourcesBusy ?? value.resourcesBusy, closed: closed ?? value.closed,
       recoveryRequired: recoveryRequired ?? value.recoveryRequired,
       durabilityError: clearDurabilityError ? null : durabilityError ?? value.durabilityError,
-      error: clearError ? null : error ?? value.error);
+      error: clearError ? null : error ?? value.error, syncBusy: _syncBusy,
+      syncReserved: _syncReservation != null, syncRecoveryRequired: _syncRecovery != null,
+      syncError: _syncError);
   }
   static String _error(Object error) => error is CoreException
       ? 'Core error ${error.code}: ${error.message}' : error is StateError
       ? error.message.toString() : error is TransferFailure ? error.message
       : 'Notebook operation failed. Received source and private recovery data are retained.';
+}
+
+
+/// One identity-bound exclusion. Error retirement keeps source ownership explicit;
+/// it never turns a failed abort/refresh into permission to write or replace text.
+class _NoteSyncReservation implements NotebookSyncReservation {
+  _NoteSyncReservation(this.session, this.request)
+      : editor = session.value.editor!, capture = session._capture!,
+        core = session._core!, note = session.value.note!, send = session._send;
+  final NotebookSession session;
+  final SyncReservationRequest request;
+  final EditorSession editor;
+  final EditorDraftCapture capture;
+  final NotebookCore core;
+  final CoreNote note;
+  final EditorSend? send;
+  EditorSnapshot? snapshot;
+  EditorSession? _replacement;
+  Future<void>? _draining;
+  Future<bool>? _aborting;
+  bool _quiesceRequested = false;
+  bool _abortPending = false;
+  bool _cancelled = false;
+  bool _released = false;
+  bool _dirty = true;
+
+  bool get _owns => !_released && identical(session._syncReservation, this) &&
+      identical(session._core, core) && identical(session.value.editor, _replacement ?? editor);
+  void _check() {
+    if (!_owns || _cancelled) throw StateError('The synchronization reservation retired.');
+  }
+
+  @override
+  Future<void> drainWriters() => _draining ??= _drain();
+  Future<void> _drain() async {
+    _check();
+    await session._resources?.future;
+    await session._saving;
+    _check();
+  }
+
+  @override
+  Future<SyncProtection> quiesceAndDrainDrafts() async {
+    await drainWriters(); _check();
+    if (session._syncRecovery != null && !editor.value.ready) {
+      // A prior failed retirement already blocks source writes/replacement. A
+      // lifecycle recovery may repair native state, but cannot infer clean text.
+      await session._flush(capture, ensure: true); _check();
+      _dirty = true;
+      return SyncProtection(dirtyNodeIds: [note.nodeId]);
+    }
+    final transport = send;
+    if (transport == null || !editor.value.ready) {
+      throw StateError('Wait for the secure editor, or close the note before synchronizing.');
+    }
+    _quiesceRequested = true;
+    if (session._syncRecovery != null && (editor.value.closing || editor.value.quiesced)) {
+      await editor.abortClose(transport); _check();
+    }
+    snapshot = await editor.quiesce(transport);
+    _check();
+    await session._resources?.future;
+    await session._saving;
+    await session._flush(capture, ensure: true);
+    _check();
+    if (capture.durableRevision < snapshot!.revision) {
+      throw StateError('The quiesced prefix is not yet a durable private draft.');
+    }
+    // Opening a clean document need not have created a receipt. Establish saved0
+    // by exact native disk equality, never by the quiesce or draft acknowledgement.
+    if (!session.value.dirty) {
+      await session._reconcile(capture); _check();
+    }
+    _dirty = session.value.dirty;
+    return SyncProtection(dirtyNodeIds: _dirty ? [note.nodeId] : const []);
+  }
+
+  bool _affected(List<String> paths) => paths.any((path) => path == note.path ||
+      note.path.startsWith('$path/') || path == 'vx_notebook/config.json' ||
+      path.startsWith('vx_notebook/contents/'));
+
+  void _release() {
+    if (!identical(session._syncReservation, this)) return;
+    session._syncReservation = null;
+    _released = true;
+    session._publish(); session._startSaving(); session._schedule();
+  }
+
+  Future<void> _unfreeze() async {
+    if (_quiesceRequested && !editor.value.closed) {
+      final transport = send;
+      if (transport == null) throw StateError('Source abort transport is unavailable.');
+      await editor.abortClose(transport);
+    }
+  }
+
+  Future<void> _reloadClean() async {
+    _check();
+    final actual = await core.read(); _check();
+    if (actual.notebookId != note.notebookId || actual.nodeId != note.nodeId) {
+      throw StateError('The synchronized note identity changed. Received source is retained.');
+    }
+    final savedHash = capture.summary?['savedDiskHash'] as String? ?? note.baseHash;
+    if (actual.baseHash == savedHash && actual.path == note.path &&
+        actual.editorType == note.editorType && actual.lineEnding == note.lineEnding) {
+      // A receipt may project LF source to CRLF disk. Equal disk bytes preserve
+      // the original source representation and undo history.
+      session._publish(note: actual);
+      await _unfreeze(); _check();
+      return;
+    }
+    final transport = send;
+    final captured = snapshot;
+    if (transport == null || captured == null || captured.revision != editor.value.revision) {
+      throw StateError('The clean source changed during synchronization.');
+    }
+    await editor.completeClose(transport, capture: captured, discard: false);
+    _check();
+    await session.drafts.detach(capture); _check();
+    session._send = null;
+    session._syncRecovery = null; session._syncError = null;
+    session._install(actual);
+    _replacement = session.value.editor;
+    // _install intentionally retires the old editor; ownership is still this
+    // reservation until its token is released, but its source identity is new.
+  }
+
+  @override
+  Future<SyncSettlement> settle(SyncRefreshReport? report) async {
+    try {
+      _check();
+      if (report != null && (!report.metadataRefreshed || report.changedPaths == null)) {
+        if (_dirty) await _unfreeze();
+        retainRecovery('Synchronization source refresh needs explicit recovery.');
+        return const SyncSettlement(safe: false, recoveryRequired: true);
+      }
+      if (report != null && !_dirty && _affected(report.changedPaths!)) {
+        await _reloadClean();
+      } else {
+        await _unfreeze(); _check();
+      }
+      _release();
+      return const SyncSettlement(safe: true);
+    } on Object {
+      retainRecovery('Synchronization could not safely refresh or resume the source.');
+      return const SyncSettlement(safe: false, recoveryRequired: true);
+    }
+  }
+
+  @override
+  Future<bool> abort() => _aborting ??= _abort();
+  Future<bool> _abort() async {
+    if (!_owns) return _released;
+    _abortPending = true;
+    _cancelled = true;
+    try {
+      var safe = true;
+      // Sending abort removes old quiesce/abort correlations immediately. A
+      // retired token cannot send a control that unfreezes its successor.
+      try { await _unfreeze(); } on Object { safe = false; }
+      try {
+        await session._resources?.future; await session._saving;
+        await session._flush(capture, ensure: _quiesceRequested);
+      } on Object { safe = false; }
+      if (!_owns) return _released;
+      if (safe) { _release(); }
+      else { retainRecovery('Synchronization cancellation could not resume the source safely.'); }
+      return safe;
+    } finally { _abortPending = false; }
+  }
+
+  @override
+  void retainRecovery(String code) {
+    if (!_owns) return;
+    session._syncRecovery = this; session._syncError = code;
+    session._syncReservation = null; _released = true;
+    session._cancelTimers(); session._publish();
+  }
+
+  Future<bool> recoverRetained(_NoteSyncReservation previous) async {
+    if (!_owns || !identical(session._syncRecovery, previous) ||
+        !identical(previous.core, core) || !identical(previous.editor, editor)) { return false; }
+    snapshot = previous.snapshot;
+    _dirty = previous._dirty;
+    _quiesceRequested = previous._quiesceRequested || editor.value.quiesced;
+    return _recoverSource(release: false);
+  }
+
+  Future<bool> recover() async {
+    if (!identical(session._syncRecovery, this) || !identical(session._core, core) ||
+        !identical(session.value.editor, editor) || session._syncReservation != null) { return false; }
+    session._syncReservation = this; _released = false; _cancelled = false;
+    session._publish();
+    return _recoverSource(release: true);
+  }
+
+  Future<bool> _recoverSource({required bool release}) async {
+    try {
+      _check();
+      final hadDirtySource = _dirty || editor.value.pending || editor.value.composing ||
+          editor.value.resyncCandidate != null ||
+          (snapshot != null && editor.value.revision != snapshot!.revision);
+      if (hadDirtySource) {
+        final proof = await session._reconcile(capture); _check();
+        if (proof['outcome'] == 'conflict') throw StateError('Disk and draft still conflict.');
+        await _unfreeze(); _check();
+      } else {
+        await _reloadClean();
+      }
+      session._syncRecovery = null; session._syncError = null;
+      if (release) { _release(); } else { session._publish(); }
+      return true;
+    } on Object {
+      retainRecovery('Sync recovery could not prove safe source replacement. Keep the received draft.');
+      return false;
+    }
+  }
+
 }

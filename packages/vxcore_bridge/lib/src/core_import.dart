@@ -5,6 +5,7 @@ import 'dart:ffi';
 import 'package:ffi/ffi.dart';
 
 import 'core_notebook.dart' show CoreException;
+import 'sync_models.dart';
 import 'generated/vxcore_host_bindings.dart' as native;
 
 /// Synchronous filesystem transport for a worker isolate, never a UI callback.
@@ -97,6 +98,26 @@ abstract final class CoreImportStore {
       }
     });
   }
+
+  /// Worker-only receipt inspection. No input flag can mint clone authority.
+  static CoreSyncCloneReceipt inspectSyncClone({required String importsRoot,
+    required String notebooksRoot, required String importId, required String operationId}) =>
+      CoreSyncCloneReceipt.fromJson(run({'op': 'inspectClone', 'importsRoot': importsRoot,
+        'notebooksRoot': notebooksRoot, 'id': importId, 'operationId': operationId}));
+
+  /// Seals a proved native clone into the ordinary managed publication journal.
+  static Map<String, Object?> prepareSyncClone({required String importsRoot,
+    required String notebooksRoot, required String importId, required String operationId,
+    int cancellationAddress = 0}) => run({'op': 'prepareClone', 'importsRoot': importsRoot,
+      'notebooksRoot': notebooksRoot, 'id': importId, 'operationId': operationId},
+      cancellationAddress: cancellationAddress);
+
+  /// Call only after receipt-gated secure credential promotion actually settles.
+  /// This preserves the committed wrapper across crashes/lost vault replies.
+  static Map<String, Object?> finishSyncCloneCredentials({required String importsRoot,
+    required String notebooksRoot, required String importId, required String operationId}) =>
+      run({'op': 'finishCloneCredentials', 'importsRoot': importsRoot,
+        'notebooksRoot': notebooksRoot, 'id': importId, 'operationId': operationId});
 
   /// Portable full case-folded NFC and NFD keys, preserving neither spelling
   /// nor identity. Callers must retain the original spelling independently.

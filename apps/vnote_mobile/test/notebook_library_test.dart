@@ -98,6 +98,13 @@ class _Catalog implements CatalogCore {
   @override
   String get nativeNotices => core.nativeNotices;
   @override
+  Future<CoreSyncFacts> inspectSync() => core.inspectSync();
+  @override
+  Future<CoreSyncResult> sync(CoreSyncCommand command, {CoreSyncCredentials? credentials}) => core.sync(command, credentials: credentials);
+  @override
+  void cancelSync(String operationId) => core.cancelSync(operationId);
+
+  @override
   Future<CoreDirectory> list([String? id]) => core.list(id);
   @override
   Future<String> createNote(String id, String name) =>

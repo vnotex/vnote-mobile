@@ -40,10 +40,13 @@ enum {
   VXM_EVENT_RESOURCE = 14,
   VXM_EVENT_DRAFT = 15,
   VXM_EVENT_PREVIEW = 16,
+  VXM_EVENT_SYNC = 17,
+  VXM_EVENT_SYNC_CLONE_OPEN = 18,
   VXM_MODE_NOTE = 1,
   VXM_MODE_CATALOG = 2,
   VXM_MODE_COHORT_BUILDER = 3,
   VXM_MODE_RESOURCES = 4,
+  VXM_MODE_SYNC_CLONE = 5,
   VXM_EXPORT_NOTEBOOK = 0,
   VXM_EXPORT_FILES_AND_ASSETS = 1,
   VXM_EDITOR_MARKDOWN = 1,
@@ -75,8 +78,9 @@ typedef struct VxmOpenOptions {
   // Explicit-root contexts never restore legacy core sessions; ordinary notebook
   // owners retain core's normal selected-notebook recovery behavior.
   int32_t export_only;
-  // Builder-only owned cohorts/<id>. All core/workbook paths are derived by
-  // native preflight before context creation. Other modes require null/empty.
+  // Builder/clone-only owned cohorts/<id> or imports/<id>. Native preflight
+  // derives workbook/unpacked and isolated runtime paths before context creation.
+  // Other modes require null/empty.
   const char *transaction_root;
 } VxmOpenOptions;
 
@@ -106,8 +110,8 @@ typedef struct VxmEvent {
 
 // Copies bounded input and starts an owner thread. The mode-specific OPEN event
 // is request1, revision0. Only one host may own a storage root until teardown.
-// create_notebook=0 requires an existing notebook except COHORT_BUILDER, whose
-// transaction_root preflight derives an isolated workbook before creation.
+// create_notebook=0 requires an existing notebook except COHORT_BUILDER and
+// SYNC_CLONE, whose transaction_root preflight derives private target/runtime roots.
 // create_notebook=1 remains catalog-only, with a display name and no expected UUID.
 // All returns are actual VxCoreError values. Admission failure produces no event.
 // Success reserves terminal storage before work starts. Notify runs outside the
@@ -186,6 +190,20 @@ VXM_API int32_t vxm_host_draft(VxmHost *host, uint64_t request_id,
 VXM_API int32_t vxm_host_preview(VxmHost *host, uint64_t request_id,
                                 uint64_t generation, const char *json,
                                 const uint8_t *source, uint64_t size);
+// NOTE/CATALOG owner synchronization, or clone on its private clone owner.
+// Closed command <=16 KiB, separate transient credentials <=16 KiB. Every
+// admitted phase owns a terminal including actual partial failure data. Network
+// runs outside the owner gate; cancellation never depends on queue capacity.
+VXM_API int32_t vxm_host_sync(VxmHost *host, uint64_t request_id,
+                             uint64_t generation, const char *command_json,
+                             const char *credentials_json);
+VXM_API int32_t vxm_host_sync_cancel(VxmHost *host, uint64_t generation,
+                                    const char *operation_id);
+// Desktop integration helper is not compiled/exported by Android or iOS. The
+// implementation rejects calls after the first native context in the process.
+#if !defined(__ANDROID__) && !defined(VXM_PLATFORM_TLS)
+VXM_API int32_t vxm_host_test_enable_sync_fixture(void);
+#endif
 // Request IDs strictly increase per host. Rejected IDs do not consume a number.
 // Cancel affects pending requests and the matching active read-only search/export,
 // checked between files/nodes and each 256 KiB export chunk. Active writes (including tags) are never cancelled. INVALID_STATE
@@ -226,6 +244,13 @@ VXM_API int32_t vxm_import_path_keys(const uint8_t *input, uint64_t size,
 // after its caller's guarded destination owner has closed successfully.
 // discard: +allowPublished? (default false) -> {discarded:true}. A valid committed
 // receipt permits PRIVATE cleanup only, even after legitimate live edits/removal.
+// Managed clone only: inspectClone/prepareClone/finishCloneCredentials add
+// operationId. prepareClone seals actual sibling-receipt-proved unpacked bytes;
+// finishCloneCredentials requires committed publication and the trusted caller's
+// completed vault promotion. Unsettled committed clones refuse generic discard.
+// Committed inspectClone returns original pinned receipt without rehashing live edits.
+// Clone summaries also expose origin,operationId,cloneComplete,credentialsSettled,
+// endpoint,autoSyncEnabled,cloneReceipt. Ordinary imports cannot mint these permits.
 // writeMarker: +marker(request|captured|prepared),data -> durable phase.
 // checkSpace: +requiredBytes (additional bytes, not headroom) -> {availableBytes};
 // no-follow imports+exports+cohorts+resources and moved-attempt charges plus

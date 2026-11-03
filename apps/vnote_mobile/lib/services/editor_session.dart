@@ -204,7 +204,8 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
 
   Future<void> abortClose(EditorSend send) {
     if (_disposed || value.closed || _loadRequest == null) return Future.error(StateError('Close abort is unavailable.'));
-    for (final id in _pending.keys.where((id) => _pending[id]!.kind == 'quiesce').toList()) {
+    for (final id in _pending.keys.where((id) =>
+        _pending[id]!.kind == 'quiesce' || _pending[id]!.kind == 'abort').toList()) {
       _failControl(id, 'Close aborted; source is retained.');
     }
     return _barrier(send, 'close', {'mode': 'abort'}, 'abort').then((_) {});

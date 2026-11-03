@@ -1,4 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- Native WebDAV only; offline WebViews retain their request/network fences. -->
+    <uses-permission android:name="android.permission.INTERNET" />
     <application
         android:label="VNote Mobile"
         android:name="${applicationName}"

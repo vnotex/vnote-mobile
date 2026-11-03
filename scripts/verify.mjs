@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pins = JSON.parse(readFileSync(join(root, 'toolchains.json'), 'utf8'));
 const mode = process.argv[2] ?? 'verify';
-if (!['verify', 'assets', 'check', 'android', 'ios', 'run'].includes(mode)) {
-  throw new Error('Usage: node scripts/verify.mjs [verify|assets|check|android|ios|run]');
+if (!['verify', 'sync', 'assets', 'check', 'android', 'ios', 'run'].includes(mode)) {
+  throw new Error('Usage: node scripts/verify.mjs [verify|sync|assets|check|android|ios|run]');
 }
 if (process.version !== `v${pins.node}`) {
   throw new Error(`Node ${pins.node} required; found ${process.version}`);
@@ -28,6 +28,7 @@ const bridge = join(root, 'packages', 'vxcore_bridge');
 const npm = win ? join(dirname(process.execPath), 'npm.cmd') : 'npm';
 const editor = join(root, 'packages', 'editor_web');
 const app = join(root, 'apps', 'vnote_mobile');
+const python = process.env.PYTHON ?? (win ? 'python' : 'python3');
 
 function run(command, args, cwd = root, capture = false) {
   console.log(`> ${command} ${args.join(' ')}`);
@@ -45,6 +46,10 @@ function run(command, args, cwd = root, capture = false) {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error(`${command} failed (${result.status ?? result.signal})`);
   return result.stdout?.trim() ?? '';
+}
+
+function verifySync() {
+  run(python, [join(root, 'scripts', 'verify_sync.py'), '--dart', dart, '--flutter', flutter]);
 }
 
 if (run(npm, ['--version'], root, true) !== pins.npm) {
@@ -71,9 +76,12 @@ if (mode === 'check') {
       run(npm, ['test'], editor);
       run(dart, ['run', 'scripts/generate_bindings.dart', '--check']);
       run(dart, ['analyze'], bridge);
-      run(dart, ['test'], bridge);
+      run(dart, ['test', '--exclude-tags', 'webdav-integration'], bridge);
       run(flutter, ['analyze', '--no-pub'], app);
-      run(flutter, ['test', '--no-pub'], app);
+      run(flutter, ['test', '--no-pub', '--exclude-tags', 'webdav-integration'], app);
+      verifySync();
+    } else if (mode === 'sync') {
+      verifySync();
     } else if (mode === 'android') {
       run(flutter, ['build', 'apk', '--debug', '--no-pub', '--target-platform', 'android-arm64,android-x64'], app);
     } else if (mode === 'ios') {

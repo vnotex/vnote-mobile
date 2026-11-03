@@ -9,6 +9,7 @@ import '../../services/document_transfer_platform.dart';
 import '../../services/cohort_import.dart';
 import '../../services/resource_transfer.dart';
 import '../recovery/draft_recovery_panel.dart';
+import '../sync/notebook_sync_panel.dart';
 
 class NotebookLibraryScreen extends StatefulWidget {
   const NotebookLibraryScreen({
@@ -47,6 +48,14 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
     );
     if (name == null || !_isCurrent(library, snapshot)) return;
     await library.createNotebook(name);
+  }
+
+  Future<void> _connect(NotebookLibrary library, NotebookLibraryState snapshot) async {
+    if (!_isCurrent(library, snapshot) || snapshot.transferReserved) return;
+    final input = await showWebDavConnectionDialog(context);
+    if (input == null || !_isCurrent(library, snapshot)) return;
+    await library.connectWebDav(endpoint: input.endpoint, username: input.username,
+      password: input.password, autoSyncEnabled: input.autoSyncEnabled);
   }
 
   Future<void> _export(
@@ -164,6 +173,11 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                     onPressed: available ? () => _create(library, state) : null,
                     icon: const Icon(Icons.add),
                     label: const Text('New notebook'),
+                  ),
+                  TextButton.icon(
+                    onPressed: available && !state.transferReserved ? () => _connect(library, state) : null,
+                    icon: const Icon(Icons.cloud_download_outlined),
+                    label: const Text('Connect WebDAV'),
                   ),
                   PopupMenuButton<DocumentImportKind>(
                     tooltip: 'Import notebook',
@@ -752,7 +766,9 @@ class _ImportPanel extends StatelessWidget {
             if (state.busy) ...[
               const LinearProgressIndicator(),
               Text(switch (state.phase) {
-                NotebookImportPhase.receiving => 'Copying the selected source…',
+                NotebookImportPhase.receiving => current?.isWebDavClone == true
+                    ? 'Downloading the WebDAV notebook into private staging…'
+                    : 'Copying the selected source…',
                 NotebookImportPhase.validating =>
                   'Validating notebook archive and paths…',
                 NotebookImportPhase.publishing =>
@@ -768,6 +784,10 @@ class _ImportPanel extends StatelessWidget {
                 'Import: ${current.notebookName ?? current.sourceName ?? 'Notebook source'}',
               ),
               Text('${current.entries} entries · ${current.bytes} bytes'),
+              if (current.isWebDavClone && !current.cloneComplete)
+                const Text('An incomplete WebDAV download cannot be resumed as a proved notebook. Discard its private staging before reconnecting.'),
+              if (current.isWebDavClone && current.destination != null && !current.credentialsSettled)
+                const Text('The complete notebook is published and retained. Finish connection recovery before clearing its private publication receipt.'),
             ],
             if (state.error != null) SelectableText(state.error!),
             if (state.message != null) SelectableText(state.message!),
@@ -786,9 +806,11 @@ class _ImportPanel extends StatelessWidget {
                       onPressed: () async {
                         if (await _confirm(
                               context,
-                              'Import this notebook?',
-                              'The complete copy will be checked and registered with its original identities. Existing notebooks will not be overwritten or merged.',
-                              'Import notebook',
+                              current.isWebDavClone && current.destination != null ? 'Finish connection recovery?' : 'Import this notebook?',
+                              current.isWebDavClone && current.destination != null
+                                ? 'The already-published notebook is retained while its credential and routing transaction finishes. No new copy is created.'
+                                : 'The complete copy will be checked and registered with its original identities. Existing notebooks will not be overwritten or merged.',
+                              current.isWebDavClone && current.destination != null ? 'Finish connection' : 'Import notebook',
                             ) &&
                             context.mounted &&
                             identical(
@@ -800,18 +822,17 @@ class _ImportPanel extends StatelessWidget {
                         }
                       },
                       child: Text(
-                        current.destination == null
-                            ? 'Validate and import'
-                            : 'Resume import',
+                        current.destination == null ? 'Validate and import'
+                            : current.isWebDavClone ? 'Finish connection' : 'Resume import',
                       ),
                     ),
-                  if (idle && current.treeRelative == null)
+                  if (idle && current.treeRelative == null && (!current.isWebDavClone || current.cloneComplete))
                     TextButton(
                       onPressed: () => library.retryImport(current),
                       child: const Text('Retry preparation'),
                     ),
                   TextButton(
-                    onPressed: idle
+                    onPressed: idle && !(current.isWebDavClone && current.destination != null && !current.credentialsSettled)
                         ? () async {
                             if (await _confirm(
                                   context,

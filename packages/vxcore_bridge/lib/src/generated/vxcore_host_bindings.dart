@@ -219,6 +219,32 @@ external int vxm_host_resource(
   ffi.Pointer<ffi.Char> json,
 );
 
+@ffi.Native<
+  ffi.Int32 Function(
+    ffi.Pointer<VxmHost>,
+    ffi.Uint64,
+    ffi.Uint64,
+    ffi.Pointer<ffi.Char>,
+    ffi.Pointer<ffi.Char>,
+  )
+>()
+external int vxm_host_sync(
+  ffi.Pointer<VxmHost> host,
+  int request_id,
+  int generation,
+  ffi.Pointer<ffi.Char> command_json,
+  ffi.Pointer<ffi.Char> credentials_json,
+);
+
+@ffi.Native<
+  ffi.Int32 Function(ffi.Pointer<VxmHost>, ffi.Uint64, ffi.Pointer<ffi.Char>)
+>()
+external int vxm_host_sync_cancel(
+  ffi.Pointer<VxmHost> host,
+  int generation,
+  ffi.Pointer<ffi.Char> operation_id,
+);
+
 @ffi.Native<ffi.Pointer<VxmEvent> Function(ffi.Pointer<VxmHost>)>()
 external ffi.Pointer<VxmEvent> vxm_host_take_event(ffi.Pointer<VxmHost> host);
 
@@ -361,6 +387,10 @@ const int VXM_EVENT_RESOURCE = 14;
 
 const int VXM_EVENT_RESOURCE_OPEN = 12;
 
+const int VXM_EVENT_SYNC = 17;
+
+const int VXM_EVENT_SYNC_CLONE_OPEN = 18;
+
 const int VXM_EVENT_TAG = 9;
 
 const int VXM_EVENT_WRITE = 3;
@@ -386,6 +416,8 @@ const int VXM_MODE_COHORT_BUILDER = 3;
 const int VXM_MODE_NOTE = 1;
 
 const int VXM_MODE_RESOURCES = 4;
+
+const int VXM_MODE_SYNC_CLONE = 5;
 
 const int VXM_MOVE = 4;
 

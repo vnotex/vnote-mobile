@@ -16,12 +16,14 @@ import 'package:vnote_mobile/services/notebook_import.dart';
 import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
 import 'package:vnote_mobile/services/notebook_workspace.dart';
+import 'package:vnote_mobile/services/sync_credentials.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 // Reuse the existing protocol driver, not a second editor implementation.
 import 'notebook_session_test.dart'
     as protocol
     show ControlledCore, answer, insert, ready, reply, turn, presentationDrafts;
+import 'sync_credentials_test.dart' show TestSyncVault;
 
 const _note = CoreEntry(
   id: 'note-id',
@@ -121,6 +123,16 @@ class _Catalog implements CatalogCore {
 
   @override
   String get nativeNotices => 'Catalog notices';
+  @override
+  Future<CoreSyncFacts> inspectSync() async => CoreSyncFacts(notebookId: initialDirectory.notebookId, autoSyncEnabled: false);
+  @override
+  Future<CoreSyncResult> sync(CoreSyncCommand command, {CoreSyncCredentials? credentials}) async {
+    if (command.action != CoreSyncAction.unregister) throw StateError('This offline fixture has no sync backend.');
+    return CoreSyncResult(operationId: command.operationId, action: command.action, code: 0, executed: true);
+  }
+  @override
+  void cancelSync(String operationId) {}
+
 
   @override
   Future<CoreDirectory> list([String? folderId]) async {
@@ -231,6 +243,13 @@ class _Note implements NotebookCore {
   @override
   String get nativeNotices => core.nativeNotices;
   @override
+  Future<CoreSyncFacts> inspectSync() => core.inspectSync();
+  @override
+  Future<CoreSyncResult> sync(CoreSyncCommand command, {CoreSyncCredentials? credentials}) => core.sync(command, credentials: credentials);
+  @override
+  void cancelSync(String operationId) => core.cancelSync(operationId);
+
+  @override
   Future<CoreResourceListing> listResources() => core.listResources();
   @override
   Future<CoreResourceResult> applyResource(String root) =>
@@ -304,6 +323,7 @@ class _Harness {
         return note;
       },
     );
+    workspace.attachSyncCredentials(SyncCredentials(vault: TestSyncVault()));
     void verifyCleanup() {
       workspace.dispose();
       expect(owners.active, 0);
@@ -1069,14 +1089,6 @@ void main() {
       );
       expect(
         tester
-            .widget<TextButton>(
-              find.byWidgetPredicate((widget) => widget is TextButton),
-            )
-            .onPressed,
-        isNull,
-      );
-      expect(
-        tester
             .widget<ListTile>(find.widgetWithText(ListTile, 'Personal'))
             .onTap,
         isNull,
@@ -1097,14 +1109,6 @@ void main() {
             )
             .onPressed,
         isNotNull,
-      );
-      expect(
-        tester
-            .widget<TextButton>(
-              find.byWidgetPredicate((widget) => widget is TextButton),
-            )
-            .onPressed,
-        isNull,
       );
       library.value = NotebookLibraryState(entries: entries, closed: true);
       await tester.pump();

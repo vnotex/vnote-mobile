@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export either a complete saved notebook backup or a files-and-assets ZIP from its library row through system Save As. The editor now has durable private drafts, bounded foreground autosave, source-preserving formatting and isolated Markdown/math/diagram preview. **Save** commits a captured revision plus its receipt; newer input remains dirty. Closing offers Save and close, Keep draft, Discard or Cancel. Library discovery, catalog and editor owners never overlap. Share-in, WebDAV and full device/iOS release gates remain open; see [verification and blockers](docs/verification.md).
+The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export either a complete saved notebook backup or a files-and-assets ZIP from its library row through system Save As. The editor now has durable private drafts, bounded foreground autosave, source-preserving formatting and isolated Markdown/math/diagram preview. **Save** commits a captured revision plus its receipt; newer input remains dirty. Closing offers Save and close, Keep draft, Discard or Cancel. Library discovery, catalog and editor owners never overlap. WebDAV uses core-owned phased synchronization and native secure credentials. Share-in and full device/iOS release gates remain open; see [verification and blockers](docs/verification.md) for exact execution evidence.
 
 ## Development
 
@@ -16,7 +16,7 @@ node scripts/verify.mjs ios
 node scripts/verify.mjs run
 ```
 
-Run commands at the repository root. `verify` installs locked editor/Dart dependencies, builds and checks assets, then checks generated FFI drift, TypeScript, the real native bridge tests, and Flutter. `android` produces an arm64/x86_64 debug APK requiring Android 9/API 28; `ios` requires macOS/Xcode 26.6 and builds unsigned device and simulator apps. `run` performs the same asset/dependency gate before Flutter device selection. These commands publish/check bundled editor assets before packaging; tests alone do not update the WebView bundle. They do not configure release signing, accept SDK licenses or publish anything.
+Run commands at the repository root. `verify` installs locked editor/Dart dependencies, builds and checks assets, then checks generated FFI drift, TypeScript, native bridge/Flutter tests and separately isolated real-HTTPS synchronization fixtures. The sync fixtures require Python and OpenSSL (or Git-for-Windows OpenSSL); `node scripts/verify.mjs sync` runs that focused gate without personal credentials or an OS trust-store change. `android` produces an arm64/x86_64 debug APK requiring Android 9/API 28; `ios` requires macOS/Xcode 26.6 and builds unsigned device and simulator apps. `run` performs the same asset/dependency gate before Flutter device selection. These commands publish/check bundled editor assets before packaging; tests alone do not update the WebView bundle. They do not configure release signing, accept SDK licenses or publish anything.
 
 Flutter may be on PATH, specified by the `FLUTTER` environment variable, or installed at `.tools/flutter`. Windows commands require PowerShell 7. On Windows the locally downloaded Node can be invoked as `./.tools/node-v24.22.2-win-x64/node.exe`; its matching npm is used by the script. Set `JAVA_HOME` to a JDK matching the Android pin before building (the local download is `.tools/java/jdk-17.0.20.1+1`). SDK caches and machine paths are not committed.
 
@@ -51,7 +51,7 @@ Generated editor, preview/font and legal assets are ignored, never downloaded at
 - `packages/vxcore_bridge` wraps the C++17 core C ABI on a dedicated native owner thread. The core selects sandbox-root initialization and checked ordinary-note publication only for Android/iOS; desktop builds retain in-place saves; there is no global core context or second note database.
 - Desktop compatibility reference: `f8026adb4c43f78d90251148e24b6e72ca28f3d7`; original core baseline: `c3319ca9a7dfd5432cad1f7c35de6be099fc87bf`. The current core gitlink and `toolchains.json` record the separately committed implementation pin.
 
-Read [architecture](docs/architecture.md), [compatibility](docs/compatibility.md) and the six ADRs linked there before extending the boundary. Mobile TLS trust integration, iOS execution and physical-device/power-loss durability remain gates, not ignored errors or permission to replace core operations with Dart filesystem writes.
+Read [architecture](docs/architecture.md), [compatibility](docs/compatibility.md) and the six ADRs linked there before extending the boundary. Android native TLS/credential and interoperability checks are recorded there; iOS execution, physical-device/power-loss durability and release trust-store coverage remain gates, not permission to replace core operations with Dart filesystem writes.
 
 Android `com.example.vnote_mobile` and iOS `com.example.vnoteMobile` are generated development identities, not owner-approved store identifiers.
 
@@ -155,6 +155,29 @@ and a successful per-document native offline-policy proof. Older/incapable provi
 fail closed with source/recovery/export retained. Current public WK APIs do not
 supply the required all-protocol guarantee: **iOS 15–26 editing/preview is not
 claimed enabled**. See the [security contract](docs/adr/0004-rendering-security.md).
+
+## WebDAV workflow
+
+Use **Connect WebDAV** in the library to download an existing compatible notebook
+into private staging, then validate/import it without changing UUIDs or overwriting
+an existing notebook. For an existing local notebook, open **Synchronization** in
+the browser/editor to configure an HTTPS endpoint and bootstrap an empty remote.
+The endpoint must satisfy the core's identity and conditional-request checks;
+unsupported servers and certificate errors are not bypassed.
+
+**Sync now** synchronizes the saved snapshot. Foreground automatic sync uses one
+coalesced 30-second window; it does not promise background execution or force-save
+unsent editor text. Received, draft-durable, saved and last-synced states remain
+separate. Supported conflict choices come from the core, not filename guesses.
+Cancellation drains actual effects; retained recovery is explicit, not rollback.
+
+Credentials stay in Android Keystore-backed no-backup ciphertext or iOS Keychain,
+never notebook JSON or editor JavaScript. Failed rotation retains the old version
+or an explicit recovery transaction. Endpoint changes retain core-owned archives.
+Logical notebook close can retire credentials; note/browser transitions and app
+shutdown do not. Missing/locked/corrupt storage blocks sync, not offline access.
+See [ADR 0005](docs/adr/0005-webdav-coordination.md) for the transaction contract and
+[verification](docs/verification.md) for exercised platforms and remaining gates.
 
 ## License
 

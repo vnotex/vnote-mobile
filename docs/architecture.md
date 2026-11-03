@@ -43,17 +43,34 @@ are checked after core success. This is not a new transaction/rollback guarantee
 The offline application includes the managed library, search/tags, notebook and
 files/assets interchange, standalone cohorts, and ordinary-note resources.
 Durable drafts/autosave and isolated preview are implemented; the stopped-app
-share inbox, sync and unverified platform/release gates remain separate.
+share inbox and unverified platform/release gates remain separate; WebDAV execution is recorded independently.
 
 ## Native ownership and storage
 
 `packages/vxcore_bridge` owns the real context, notebook, buffer, bounded requests/events and FFI allocation releases. The Android/iOS extension `vxcore_context_create_with_paths`, declared in `vxcore/mobile/vxcore_mobile.h`, copies validated, nonoverlapping app/local roots before configuration loading. Default desktop builds neither expose this extension nor change legacy context defaults. Desktop-hosted bridge tests explicitly enable only the context extension, not mobile persistence. The platform adapter obtains persistent Application Support/internal-files locations. Notebook bodies and metadata are written only through core APIs.
 
-The implemented host has one native owner OS thread for context/metadata/buffer lifetime and ordinary writes. Explicit-root context construction skips legacy core session loading before any manager can reopen notebooks or buffers; app-owned draft recovery and explicit admission determine all live owners. A process-wide core-job mutex additionally protects the core's unsynchronized global UUID generator across separate hosts; admission, cancellation, notification and event drain stay outside it. There are no network workers yet. The later sync design requires the additional upstream concurrency gates before network/owner overlap. Dart calls bounded enqueue/control functions, not synchronous disk/network APIs. Ordinary writes reload and compare the exact disk SHA-256 before `set_content_raw` plus `buffer_save` under owner exclusion; memory-only prepared saves are not a substitute.
+The host has one native owner OS thread for context/metadata/buffer lifetime and ordinary saves, plus at most two joined network workers globally. Explicit-root contexts skip legacy session restoration; app recovery explicitly admits every owner. A core-job gate serializes owner work and stage/apply, but is not held during network or UI handshakes. Core UUID generation and latest-context diagnostic snapshots are synchronized. Dart uses bounded enqueue/control/events, not synchronous disk/network calls. Ordinary saves reload/compare exact disk SHA-256 before set-content/save under owner exclusion; memory-only prepared saves are not a substitute.
 
 CMake selects the checked POSIX writer from `src/mobile/` only for Android/iOS; desktop saves use the original in-place implementation from `src/platform/buffer_file_save_desktop.cpp`. The Windows DACL/recovery path from the initial native slice has been removed. Shared callsites and the native owner-thread protocol are unchanged.
 
-No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires share-in, WebDAV interoperability and the documented platform/release evidence.
+No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires share-in and the documented platform/release evidence; WebDAV uses the same core rather than a replacement protocol engine.
+
+## WebDAV ownership
+
+`notebook_sync.dart` owns readiness, coalescing, credential transactions and typed
+phase orchestration. Workspace transitions drain/detach sync before closing the
+old catalog/note owner, then reconcile the successor. Native context shutdown
+preserves per-device metadata; explicit clone registration is private until join.
+`sync_credentials.dart` owns versioned scope/CAS recovery, backed by the native
+Keystore/Keychain adapter; secrets never cross the editor bridge.
+
+Stage drains admitted writes without force-saving pending text; network permits
+ordinary saves. Apply owns a synchronously installed editor/writer reservation,
+actual private-draft drain and native-resolved protection. Refresh and source
+settlement precede last-success. Persistent refresh markers and core journals
+survive interrupted work; missing path reports are not empty reports. Library
+Connect uses the existing sealed import publication with a native-only clone
+receipt, not a second installer. See ADR 0005 for the exact transaction contract.
 
 ## Durable source and preview ownership
 

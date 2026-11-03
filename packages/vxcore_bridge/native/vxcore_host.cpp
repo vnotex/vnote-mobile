@@ -4,6 +4,7 @@
 #include "notebook_transfers.h"
 #include "editor_drafts.h"
 #include "notebook_preview.h"
+#include "notebook_sync.h"
 
 #include <algorithm>
 #include <array>
@@ -859,7 +860,7 @@ bool transfer_event(int32_t kind) {
 }
 bool opening_event(int32_t kind) {
   return kind == VXM_EVENT_OPEN || kind == VXM_EVENT_CATALOG_OPEN ||
-         kind == VXM_EVENT_COHORT_OPEN || kind == VXM_EVENT_RESOURCE_OPEN;
+         kind == VXM_EVENT_COHORT_OPEN || kind == VXM_EVENT_RESOURCE_OPEN || kind == VXM_EVENT_SYNC_CLONE_OPEN;
 }
 const char *transfer_redacted(int32_t code) {
   switch (code) {
@@ -976,7 +977,9 @@ struct Request {
   int32_t export_format = VXM_EXPORT_NOTEBOOK;
   size_t input_cost = 0;
   uint64_t staging_budget = 0;
-  bool cancelled = false;
+  std::atomic<bool> cancelled{false};
+  bool sensitive = false;
+  ~Request() { if (sensitive && !input.empty()) sodium_memzero(input.data(), input.size()); }
 };
 std::atomic<uint64_t> next_generation{1};
 uint64_t new_generation() {
@@ -1037,6 +1040,13 @@ struct VxmHost {
   VxmNotify notify = nullptr;
   int64_t token = 0;
   std::thread owner;
+  vxm_sync::Runtime sync;
+  std::thread sync_worker;
+  std::unique_ptr<Request> sync_request;
+  std::unique_ptr<vxm_sync::Work> sync_work;
+  bool sync_running = false, sync_ready = false;
+  Request *active_sync_command = nullptr; // Protected by mutex; never owns storage.
+  int32_t close_code = VXCORE_OK;
   std::string app_path, local_path, notebook_path, notebook_name, note_path;
   std::string expected_notebook_id;
   std::string transaction_root;
@@ -2042,6 +2052,25 @@ struct VxmHost {
     check(vxcore_log_enable_console(0));
     check(vxcore_log_set_file(""));
     require(sodium_init() >= 0, VXCORE_ERR_NOT_INITIALIZED);
+    if (mode == VXM_MODE_SYNC_CLONE) {
+      Json options;
+      check(static_cast<VxCoreError>(vxm_import::PreflightClone(transaction_root, options)));
+      notebook_path = json_string(options.at("notebookPath"));
+      app_path = json_string(options.at("appDataPath"));
+      local_path = json_string(options.at("localDataPath"));
+      const auto canonical = fs::weakly_canonical(fs::u8path(notebook_path));
+      for (const auto &active : owned_notebooks) {
+        std::error_code error;
+        require(canonical != active && !fs::equivalent(canonical, active, error), VXCORE_ERR_INVALID_STATE);
+      }
+      owned_root = canonical;
+      owned_notebooks.insert(owned_root);
+      owns_root = true;
+      vxm_sync::ContextCreated();
+      check(vxcore_context_create_with_paths(nullptr, app_path.c_str(), local_path.c_str(), &context));
+      sync.Initialize(context, "", notebook_path, local_path, true);
+      return;
+    }
     if (mode == VXM_MODE_COHORT_BUILDER) {
       Json options;
       check(static_cast<VxCoreError>(vxm_transfer::PreflightCohortBuilder(transaction_root, options)));
@@ -2077,6 +2106,7 @@ struct VxmHost {
     owned_root = canonical;
     owned_notebooks.insert(owned_root);
     owns_root = true;
+    vxm_sync::ContextCreated();
     check(vxcore_context_create_with_paths(nullptr, app_path.c_str(), local_path.c_str(), &context));
     check(vxcore_context_update_config(context, "{\"search\":{\"backends\":[\"simple\"]}}"));
     CoreString notebook;
@@ -2089,6 +2119,8 @@ struct VxmHost {
     }
     notebook_id = notebook.take();
     require(expected_notebook_id.empty() || notebook_id == expected_notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    if (!export_only && (mode == VXM_MODE_NOTE || mode == VXM_MODE_CATALOG))
+      sync.Initialize(context, notebook_id, notebook_path, local_path, false);
     if (export_only) {
       const auto code = vxcore_sync_check_reconfiguration(context, notebook_id.c_str());
       export_require(code == VXCORE_OK, "Export requires synchronization conflicts and recovery to be resolved", code);
@@ -2129,6 +2161,20 @@ struct VxmHost {
     fill_note(*request.result, data, size);
   }
   void read_note(Request &request) {
+    if (sync.CanRefreshSource()) {
+      const auto current = resolve(node_id);
+      require(!current.folder, VXCORE_ERR_UNSUPPORTED);
+      if (current.path != note_path) {
+        // A clean source reload after metadata refresh follows its stable ID,
+        // not an old path which may now identify a different incoming node.
+        check(vxcore_buffer_close(context, buffer_id.c_str()));
+        buffer_id.clear(); note_path.clear();
+        note_metadata(); check_disk_size();
+        CoreString buffer;
+        check(vxcore_buffer_open_by_node_id(context, node_id.c_str(), &buffer.value));
+        buffer_id = buffer.take();
+      }
+    }
     const uint8_t *data = nullptr;
     size_t size = 0;
     reload(data, size);
@@ -2277,8 +2323,17 @@ struct VxmHost {
     std::lock_guard<std::mutex> core_lock(core_owner_gate);
     int32_t result = VXCORE_OK;
     if (context) {
-      if (!buffer_id.empty()) result = vxcore_buffer_close(context, buffer_id.c_str());
-      if (!notebook_id.empty()) {
+      result = sync.Shutdown();
+      if (mode == VXM_MODE_SYNC_CLONE) notebook_id = sync.NotebookId();
+      if (!buffer_id.empty()) {
+        const auto code = vxcore_buffer_close(context, buffer_id.c_str());
+        if (result == VXCORE_OK) result = code;
+      }
+      // Transient NOTE/CATALOG owners must retain the per-device metadata DB,
+      // including last-success time. Context destruction closes its handles;
+      // explicit notebook close deletes that DB and is only needed by a clone's
+      // private registration before its publication receipt is issued.
+      if (mode == VXM_MODE_SYNC_CLONE && !notebook_id.empty()) {
         const auto code = vxcore_notebook_close(context, notebook_id.c_str());
         if (result == VXCORE_OK) result = code;
       }
@@ -2287,21 +2342,29 @@ struct VxmHost {
       vxcore_context_destroy(context);
       context = nullptr;
     }
-    if (owns_root) owned_notebooks.erase(owned_root);
+    if (owns_root && mode != VXM_MODE_SYNC_CLONE) owned_notebooks.erase(owned_root);
     return result;
   }
   void run() noexcept {
     for (;;) {
       std::unique_ptr<Request> request;
+      bool completing_sync = false;
       {
         std::unique_lock<std::mutex> lock(mutex);
-        wake.wait(lock, [this] { return pending_size || stopping; });
-        if (!pending_size) break;
-        request.reset(pending[pending_start]);
-        pending_start = (pending_start + 1) % pending.size();
-        --pending_size;
-        request->cancelled |= stopping;
+        wake.wait(lock, [this] { return sync_ready || pending_size || (stopping && !sync_running); });
+        if (sync_ready) {
+          completing_sync = true;
+          sync_ready = false;
+          request = std::move(sync_request);
+        } else {
+          if (!pending_size) break;
+          request.reset(pending[pending_start]);
+          pending_start = (pending_start + 1) % pending.size();
+          --pending_size;
+          if (stopping) request->cancelled.store(true);
+        }
         const auto kind = request->result->event.kind;
+        if (kind == VXM_EVENT_SYNC) active_sync_command = request.get();
         if ((kind == VXM_EVENT_QUERY && request->operation == kSearch) ||
             kind == VXM_EVENT_EXPORT || kind == VXM_EVENT_PREVIEW ||
             (kind == VXM_EVENT_COHORT && request->operation == kBuild) ||
@@ -2310,15 +2373,64 @@ struct VxmHost {
           read_cancelled.store(request->cancelled, std::memory_order_relaxed);
         }
       }
+      // A completion has dedicated capacity: it never competes for admission.
+      // Joining here, before taking G, also makes close safe during stage/apply.
+      if (completing_sync && sync_worker.joinable()) sync_worker.join();
       auto &event = request->result->event;
       const char *failure_message = nullptr;
       try {
-        require(!request->cancelled, VXCORE_ERR_CANCELLED);
+        require(completing_sync || !request->cancelled, VXCORE_ERR_CANCELLED);
         std::lock_guard<std::mutex> core_lock(core_owner_gate);
-        if (opening_event(event.kind)) initialize(*request);
+        if (completing_sync) {
+          const auto output = sync.Complete(*sync_work);
+          const auto encoded = output.dump();
+          require(encoded.size() <= request->result->reserved_output - kMetadata, VXCORE_ERR_UNSUPPORTED);
+          std::memcpy(request->result->body.get(), encoded.data(), encoded.size());
+          event.data = request->result->body.get(); event.size = encoded.size();
+          event.code = output.at("code").get<int32_t>();
+        } else if (opening_event(event.kind)) initialize(*request);
         else {
           require(init_error == VXCORE_OK, init_error);
-          if (event.kind == VXM_EVENT_READ) read_note(*request);
+          if (event.kind == VXM_EVENT_SYNC) {
+            require(!sync_running, VXCORE_ERR_SYNC_IN_PROGRESS);
+            Json output;
+            sync_work = sync.Prepare(vxm_import::storage::Parse(request->command, kString),
+                request->input.empty() ? nullptr : reinterpret_cast<const char *>(request->input.data()), output);
+            if (!request->input.empty()) sodium_memzero(request->input.data(), request->input.size());
+            if (sync_work) {
+              {
+                std::lock_guard<std::mutex> lock(mutex);
+                sync_running = true;
+                if (request->cancelled.load() || stopping) sync.Cancel(sync_work->operation_id);
+              }
+              try {
+                sync_worker = std::thread([this] {
+                  if (sync_work->action == "stage" || sync_work->action == "apply") {
+                    std::lock_guard<std::mutex> gate(core_owner_gate);
+                    sync.Execute(*sync_work);
+                  } else sync.Execute(*sync_work);
+                  { std::lock_guard<std::mutex> lock(mutex); sync_ready = true; }
+                  wake.notify_one();
+                });
+              } catch (...) {
+                sync.Abort(*sync_work);
+                sync_work.reset();
+                { std::lock_guard<std::mutex> lock(mutex); sync_running = false; }
+                throw;
+              }
+              sync_request = std::move(request);
+              continue;
+            }
+            const auto encoded = output.dump();
+            require(encoded.size() <= request->result->reserved_output - kMetadata, VXCORE_ERR_UNSUPPORTED);
+            std::memcpy(request->result->body.get(), encoded.data(), encoded.size());
+            event.data = request->result->body.get(); event.size = encoded.size();
+            event.code = output.value("code", int32_t(VXCORE_OK));
+          } else {
+            require(sync.Allows(event.kind), VXCORE_ERR_SYNC_IN_PROGRESS);
+            if (event.kind == VXM_EVENT_DRAFT && request->operation == kDraftWrite)
+              require(sync.Allows(VXM_EVENT_WRITE), VXCORE_ERR_SYNC_IN_PROGRESS);
+            if (event.kind == VXM_EVENT_READ) read_note(*request);
           else if (event.kind == VXM_EVENT_WRITE) write_note(*request);
           else if (event.kind == VXM_EVENT_DRAFT) draft(*request);
           else if (event.kind == VXM_EVENT_PREVIEW) preview(*request);
@@ -2329,6 +2441,7 @@ struct VxmHost {
           else if (event.kind == VXM_EVENT_EXPORT) export_catalog(*request);
           else if (transfer_event(event.kind)) transfer(*request);
           else throw Failure{VXCORE_ERR_INVALID_STATE};
+          }
         }
       } catch (const Failure &failure) { event.code = failure.code; failure_message = failure.message; }
       catch (const vxm_import::StorageFailure &failure) { event.code = failure.code; }
@@ -2346,12 +2459,39 @@ struct VxmHost {
           read_cancelled.store(false, std::memory_order_relaxed);
         }
       }
+      if (completing_sync) {
+        if (event.size == 0) sync.Abort(*sync_work);
+        sync_work.reset();
+        std::lock_guard<std::mutex> lock(mutex);
+        sync_running = false;
+      }
+      {
+        std::lock_guard<std::mutex> lock(mutex);
+        if (active_sync_command == request.get()) active_sync_command = nullptr;
+      }
+      if (event.kind == VXM_EVENT_SYNC && event.size == 0) {
+        // Reserved terminal storage survives dispatch errors; never erase an
+        // apply failure merely because the ordinary error path drops payloads.
+        try {
+          const auto command = Json::parse(request->command);
+          if (command.at("action") != "inspect") {
+            const auto body = Json{{"action", command.at("action")}, {"operationId", command.at("operationId")},
+                {"code", event.code}, {"executed", completing_sync}, {"committed", false},
+                {"cleanupRequired", completing_sync}, {"refreshRequired", sync.RefreshRequired()},
+                {"changedPaths", nullptr}, {"refreshCode", nullptr}, {"didCommit", false},
+                {"settled", false}, {"notebookId", notebook_id.empty() ? Json(nullptr) : Json(notebook_id)},
+                {"cloneReceipt", nullptr}}.dump();
+            std::memcpy(request->result->body.get(), body.data(), body.size());
+            event.data = request->result->body.get(); event.size = body.size();
+          }
+        } catch (...) { /* The nonzero terminal code still reports allocation failure. */ }
+      }
       if (opening_event(event.kind)) init_error = event.code;
       event.message = event.code != VXCORE_ERR_CANCELLED && failure_message ? failure_message :
           event.kind == VXM_EVENT_EXPORT ? export_redacted(event.code) :
           transfer_event(event.kind) || event.kind == VXM_EVENT_RESOURCE_OPEN || event.kind == VXM_EVENT_COHORT_OPEN
               ? transfer_redacted(event.code) : redacted(event.code);
-      if (event.code != VXCORE_OK) {
+      if (event.code != VXCORE_OK && event.kind != VXM_EVENT_SYNC) {
         event.size = 0;
         event.data = nullptr;
         if (event.kind == VXM_EVENT_QUERY || event.kind == VXM_EVENT_EXPORT || event.kind == VXM_EVENT_DRAFT || event.kind == VXM_EVENT_PREVIEW || transfer_event(event.kind)) request->result->body.reset();
@@ -2369,7 +2509,7 @@ struct VxmHost {
     }
     closed->event.kind = VXM_EVENT_CLOSED;
     closed->event.generation = generation;
-    closed->event.code = teardown();
+    closed->event.code = close_code = teardown();
     closed->event.message = redacted(closed->event.code);
     publish(std::move(closed));
   }
@@ -2389,13 +2529,17 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     const bool exporting = kind == VXM_EVENT_EXPORT;
     require(!exporting || export_format == VXM_EXPORT_NOTEBOOK || export_format == VXM_EXPORT_FILES_AND_ASSETS);
     require(!exporting || host.export_only, VXCORE_ERR_INVALID_STATE);
-    require(!host.export_only || (kind != VXM_EVENT_MUTATE && kind != VXM_EVENT_TAG && kind != VXM_EVENT_WRITE && kind != VXM_EVENT_DRAFT && kind != VXM_EVENT_PREVIEW && !transfer_event(kind)),
+    require(!host.export_only || (kind != VXM_EVENT_MUTATE && kind != VXM_EVENT_TAG && kind != VXM_EVENT_WRITE && kind != VXM_EVENT_DRAFT && kind != VXM_EVENT_PREVIEW && kind != VXM_EVENT_SYNC && !transfer_event(kind)),
             VXCORE_ERR_INVALID_STATE);
     const bool query = kind == VXM_EVENT_QUERY;
     const bool catalog = kind == VXM_EVENT_CATALOG_OPEN || kind == VXM_EVENT_LIST || query;
     const bool source = kind == VXM_EVENT_OPEN || kind == VXM_EVENT_READ;
     const bool transfer = transfer_event(kind);
-    if (kind == VXM_EVENT_RESOURCE || kind == VXM_EVENT_RESOURCE_OPEN || kind == VXM_EVENT_DRAFT)
+    if (kind == VXM_EVENT_SYNC)
+      require(host.mode == VXM_MODE_NOTE || host.mode == VXM_MODE_CATALOG || host.mode == VXM_MODE_SYNC_CLONE, VXCORE_ERR_INVALID_STATE);
+    else if (kind == VXM_EVENT_SYNC_CLONE_OPEN)
+      require(host.mode == VXM_MODE_SYNC_CLONE, VXCORE_ERR_INVALID_STATE);
+    else if (kind == VXM_EVENT_RESOURCE || kind == VXM_EVENT_RESOURCE_OPEN || kind == VXM_EVENT_DRAFT)
       require(host.mode == VXM_MODE_NOTE || host.mode == VXM_MODE_RESOURCES, VXCORE_ERR_INVALID_STATE);
     else if (kind == VXM_EVENT_COHORT)
       require(host.mode == VXM_MODE_CATALOG || host.mode == VXM_MODE_COHORT_BUILDER, VXCORE_ERR_INVALID_STATE);
@@ -2406,7 +2550,21 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     if (transfer) operation = transfer_operation(data, static_cast<size_t>(size), kind, host.mode);
     if (kind == VXM_EVENT_DRAFT) operation = draft_operation(data, static_cast<size_t>(size), host.mode);
     auto command_value = optional_string(command);
+    std::string sync_operation;
     if (kind == VXM_EVENT_PREVIEW) preview_command(command_value);
+    if (kind == VXM_EVENT_SYNC) {
+      const auto parsed = vxm_import::storage::Parse(command_value, kString);
+      vxm_sync::ValidateCommand(parsed, host.mode == VXM_MODE_SYNC_CLONE);
+      sync_operation = parsed.value("operationId", "");
+      operation = parsed.at("action") == "inspect" || parsed.at("action") == "apply" ? 1 : 0;
+      require(size <= kString);
+      const auto action = parsed.at("action").get<std::string>();
+      const bool needs_credentials = action == "enable" || action == "credentials" || action == "credentialRecovery" || action == "clone";
+      require(needs_credentials == (size != 0));
+      // Core prepare performs the closed credential-schema validation. The
+      // bridge owns one transient copy, never another parsed password object.
+      if (size) require(std::find(data, data + static_cast<size_t>(size), uint8_t(0)) == data + static_cast<size_t>(size));
+    }
     auto node_value = optional_string(node);
     auto name_value = optional_string(name);
     auto destination_value = optional_string(destination);
@@ -2421,9 +2579,9 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     std::lock_guard<std::mutex> lock(host.mutex);
     require(!host.stopping && generation == host.generation && id > host.last_request && id <= kMaxRevision, VXCORE_ERR_INVALID_STATE);
     std::lock_guard<std::mutex> capacity_lock(host.capacity->mutex);
-    const size_t input_cost = static_cast<size_t>(size) + metadata_cost + node_value.size() + name_value.size() + destination_value.size() + command_value.size() + (hash ? 64 : 0);
+    const size_t input_cost = static_cast<size_t>(size) + metadata_cost + node_value.size() + name_value.size() + destination_value.size() + command_value.size() + sync_operation.size() + (kind == VXM_EVENT_SYNC && size ? 1 : 0) + (hash ? 64 : 0);
     const bool owner_json = kind == VXM_EVENT_DRAFT || kind == VXM_EVENT_PREVIEW;
-    const size_t body_cost = owner_json ? kOwnerSummary : transfer ? (operation == kResourceList ? kCatalog : kString) :
+    const size_t body_cost = kind == VXM_EVENT_SYNC ? (operation ? kCatalog : kOwnerSummary) : owner_json ? kOwnerSummary : transfer ? (operation == kResourceList ? kCatalog : kString) :
         exporting ? kExportSummary : catalog ? kCatalog : source ? kSource : 0;
     const size_t output_cost = kMetadata + body_cost;
     auto &capacity = *host.capacity;
@@ -2431,11 +2589,16 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     auto request = std::make_unique<Request>();
     request->result = std::make_unique<EventStorage>();
     auto &result = *request->result;
-    if (source || query || exporting || transfer || owner_json) result.body.reset(new uint8_t[body_cost]);
-    if (size) request->input.assign(data, data + static_cast<size_t>(size));
+    if (source || query || exporting || transfer || owner_json || kind == VXM_EVENT_SYNC) result.body.reset(new uint8_t[body_cost]);
+    if (size) {
+      request->input.reserve(static_cast<size_t>(size) + (kind == VXM_EVENT_SYNC ? 1 : 0));
+      request->input.assign(data, data + static_cast<size_t>(size));
+      if (kind == VXM_EVENT_SYNC) request->input.push_back(0);
+    }
     if (hash) request->expected_hash = hash;
     request->node = std::move(node_value);
-    request->name = std::move(name_value);
+    request->name = kind == VXM_EVENT_SYNC ? std::move(sync_operation) : std::move(name_value);
+    request->sensitive = kind == VXM_EVENT_SYNC;
     request->destination = std::move(destination_value);
     request->command = std::move(command_value);
     request->operation = operation;
@@ -2459,6 +2622,7 @@ int32_t admit(VxmHost &host, int32_t kind, uint64_t id, uint64_t generation,
     host.wake.notify_one();
     return VXCORE_OK;
   } catch (const Failure &failure) { return failure.code; }
+  catch (const vxm_import::StorageFailure &failure) { return failure.code; }
   catch (const std::bad_alloc &) { return VXCORE_ERR_OUT_OF_MEMORY; }
   catch (const Json::exception &) { return VXCORE_ERR_INVALID_PARAM; }
   catch (...) { return VXCORE_ERR_UNKNOWN; }
@@ -2481,13 +2645,14 @@ int32_t vxm_host_create(const VxmOpenOptions *options, VxmNotify notify, int64_t
   std::unique_ptr<VxmHost> host;
   try {
     require(options->mode == VXM_MODE_NOTE || options->mode == VXM_MODE_CATALOG ||
-            options->mode == VXM_MODE_COHORT_BUILDER || options->mode == VXM_MODE_RESOURCES);
+            options->mode == VXM_MODE_COHORT_BUILDER || options->mode == VXM_MODE_RESOURCES || options->mode == VXM_MODE_SYNC_CLONE);
     require(options->create_notebook == 0 || options->create_notebook == 1);
     require(options->export_only == 0 || options->export_only == 1);
     host = std::make_unique<VxmHost>();
     host->notify = notify;
     host->token = token;
-    const bool builder = options->mode == VXM_MODE_COHORT_BUILDER;
+    const bool clone = options->mode == VXM_MODE_SYNC_CLONE;
+    const bool builder = options->mode == VXM_MODE_COHORT_BUILDER || clone;
     host->app_path = builder ? optional_string(options->app_data_path) : input_string(options->app_data_path);
     host->local_path = builder ? optional_string(options->local_data_path) : input_string(options->local_data_path);
     host->notebook_path = builder ? optional_string(options->notebook_path) : input_string(options->notebook_path);
@@ -2516,7 +2681,7 @@ int32_t vxm_host_create(const VxmOpenOptions *options, VxmNotify notify, int64_t
     const auto cost = host->app_path.size() + host->local_path.size() + host->notebook_path.size() + host->notebook_name.size() + host->expected_notebook_id.size() + host->node_id.size() + host->transaction_root.size();
     const auto kind = host->mode == VXM_MODE_NOTE ? VXM_EVENT_OPEN :
         host->mode == VXM_MODE_RESOURCES ? VXM_EVENT_RESOURCE_OPEN :
-        builder ? VXM_EVENT_COHORT_OPEN : VXM_EVENT_CATALOG_OPEN;
+        clone ? VXM_EVENT_SYNC_CLONE_OPEN : builder ? VXM_EVENT_COHORT_OPEN : VXM_EVENT_CATALOG_OPEN;
     const auto code = admit(*host, kind, 1, host->generation, 0, nullptr, nullptr, 0, cost);
     require(code == VXCORE_OK, code);
     host->owner = std::thread([pointer = host.get()] { pointer->run(); });
@@ -2566,6 +2731,40 @@ int32_t vxm_host_catalog_export(VxmHost *host, uint64_t id, uint64_t generation,
   return host ? admit(*host, VXM_EVENT_EXPORT, id, generation, 0, nullptr, nullptr, 0,
                        0, 0, nullptr, nullptr, destination, staging_budget_bytes, format) : VXCORE_ERR_NULL_POINTER;
 }
+int32_t vxm_host_sync(VxmHost *host, uint64_t id, uint64_t generation,
+                       const char *command, const char *credentials) {
+  if (!host) return VXCORE_ERR_NULL_POINTER;
+  try {
+    const auto size = credentials ? bounded_length(credentials, kString) : 0;
+    return admit(*host, VXM_EVENT_SYNC, id, generation, 0, nullptr,
+        reinterpret_cast<const uint8_t *>(credentials), size, 0, 0, nullptr, nullptr, nullptr,
+        0, VXM_EXPORT_NOTEBOOK, command);
+  } catch (const Failure &failure) { return failure.code; }
+  catch (...) { return VXCORE_ERR_INVALID_PARAM; }
+}
+int32_t vxm_host_sync_cancel(VxmHost *host, uint64_t generation, const char *operation) {
+  if (!host || !operation) return VXCORE_ERR_NULL_POINTER;
+  try {
+    const auto value = input_string(operation);
+    require(vxm_sync::Uuid(value));
+    std::lock_guard<std::mutex> lock(host->mutex);
+    require(generation == host->generation, VXCORE_ERR_INVALID_STATE);
+    bool found = false;
+    if (host->active_sync_command && host->active_sync_command->name == value) {
+      host->active_sync_command->cancelled.store(true); found = true;
+    }
+    for (size_t i = 0; i < host->pending_size; ++i) {
+      auto &request = *host->pending[(host->pending_start + i) % host->pending.size()];
+      if (request.result->event.kind == VXM_EVENT_SYNC &&
+          request.name == value) {
+        request.cancelled = true; found = true;
+      }
+    }
+    const auto code = host->sync.Cancel(value);
+    return found ? VXCORE_OK : code;
+  } catch (const Failure &failure) { return failure.code; }
+  catch (...) { return VXCORE_ERR_INVALID_PARAM; }
+}
 int32_t vxm_host_cancel(VxmHost *host, uint64_t id, uint64_t generation) {
   if (!host) return VXCORE_ERR_NULL_POINTER;
   std::lock_guard<std::mutex> lock(host->mutex);
@@ -2587,6 +2786,7 @@ void vxm_host_request_close(VxmHost *host) {
   if (!host) return;
   std::lock_guard<std::mutex> lock(host->mutex);
   host->stopping = true;
+  host->sync.Stop();
   if (host->active_read_only) host->read_cancelled.store(true, std::memory_order_relaxed);
   host->wake.notify_one();
 }
@@ -2604,6 +2804,17 @@ void vxm_host_destroy(VxmHost *host) {
   if (!host) return;
   vxm_host_request_close(host);
   if (host->owner.joinable()) host->owner.join();
+  // Only a completed clone whose transaction-private owner has joined may mint
+  // the sibling permit. Failure leaves an incomplete wrapper, never a cursor
+  // reconstructed from state.json by a later filesystem command.
+  if (host->mode == VXM_MODE_SYNC_CLONE && host->close_code == VXCORE_OK && host->sync.CloneCommitted())
+    vxm_import::SealClone(host->transaction_root, host->sync.CloneOperation(), host->sync.NotebookId(), host->sync.CloneAutoSyncEnabled());
+  if (host->mode == VXM_MODE_SYNC_CLONE && host->owns_root) {
+    // Keep the unpacked root unavailable to every other owner through receipt
+    // minting, not merely through private-context teardown.
+    std::lock_guard<std::mutex> gate(core_owner_gate);
+    owned_notebooks.erase(host->owned_root);
+  }
   while (auto *event = vxm_host_take_event(host)) vxm_event_free(event);
   delete host;
 }

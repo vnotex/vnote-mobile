@@ -199,6 +199,7 @@ Future<void> main(List<String> args) async {
         final name = entity.uri.pathSegments.last;
         if (name.endsWith('.c') ||
             name.endsWith('.cpp') ||
+            name.endsWith('.mm') ||
             name.endsWith('.h') ||
             name.endsWith('.hpp') ||
             name.endsWith('.cmake') ||

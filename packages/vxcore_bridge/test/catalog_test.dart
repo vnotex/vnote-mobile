@@ -379,7 +379,7 @@ void main() {
         jsonEncode({
           'version': 1,
           'notebookId': fixture.notebookId,
-          'remoteUrl': 'https://example.invalid/notes',
+          'remoteUrl': 'https://example.invalid/notes/',
           'usernameHash': '0' * 64,
           'entries': {},
           'conflicts': {},

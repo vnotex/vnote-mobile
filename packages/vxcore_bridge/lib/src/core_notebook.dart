@@ -12,8 +12,10 @@ import 'generated/vxcore_host_bindings.dart' as native;
 import 'transfer_models.dart';
 import 'core_drafts.dart';
 import 'preview_models.dart';
+import 'sync_models.dart';
+import 'core_import.dart';
 
-abstract interface class NotebookCore implements ResourceCore, DraftCore, PreviewCore {
+abstract interface class NotebookCore implements ResourceCore, DraftCore, PreviewCore, SyncCore {
   Future<CoreNote> read();
   Future<CoreWriteResult> write(
     String text, {
@@ -149,7 +151,7 @@ final class CoreExportSnapshot {
   final int archiveLimit;
 }
 
-abstract interface class CatalogCore {
+abstract interface class CatalogCore implements SyncCore {
   CoreDirectory get initialDirectory;
   String get nativeNotices;
   Future<CoreDirectory> list([String? folderId]);
@@ -738,6 +740,7 @@ final class CoreNotebook
   int? _previewRequest;
   String? _resourceNotebookId;
   String? _resourceNodeId;
+  String? _cloneTransactionRoot;
   final _closedEvent = Completer<int>();
   Future<void>? _closing;
 
@@ -847,6 +850,55 @@ final class CoreNotebook
         mode: native.VXM_MODE_COHORT_BUILDER,
       );
 
+  /// Private IMPORT wrapper only; native derives unpacked/runtime paths.
+  static Future<CoreNotebook> createSyncClone({required String transactionRoot}) async {
+    final owner = await _open(appDataPath: '', localDataPath: '', notebookPath: '',
+      transactionRoot: transactionRoot, mode: native.VXM_MODE_SYNC_CLONE);
+    owner._cloneTransactionRoot = transactionRoot;
+    return owner;
+  }
+
+  /// Returns a receipt only after the actual private owner has closed and joined.
+  Future<CoreSyncResult> cloneSync({required String operationId,
+    required CoreSyncConfiguration configuration, required CoreSyncCredentials credentials,
+    required int stagingBudgetBytes}) async {
+    _requireMode(native.VXM_MODE_SYNC_CLONE);
+    final CoreSyncResult result;
+    try {
+      result = await sync(CoreSyncCommand(action: CoreSyncAction.clone,
+        operationId: operationId, configuration: configuration,
+        stagingBudgetBytes: stagingBudgetBytes), credentials: credentials);
+    } catch (error, stack) {
+      try { await close(); } catch (_) { /* Preserve the original admission/transport failure. */ }
+      Error.throwWithStackTrace(error, stack);
+    }
+    try {
+      await close();
+      if (!result.success || !result.committed) {
+        return CoreSyncResult(operationId: operationId, action: CoreSyncAction.clone,
+          code: result.code, executed: result.executed, committed: result.committed,
+          cleanupRequired: true, notebookId: result.notebookId);
+      }
+      final transaction = _cloneTransactionRoot!.replaceAll('\\', '/').replaceFirst(RegExp(r'/+$'), '');
+      final slash = transaction.lastIndexOf('/');
+      final imports = transaction.substring(0, slash);
+      final notebooks = '${imports.substring(0, imports.lastIndexOf('/'))}/notebooks';
+      final id = transaction.substring(slash + 1);
+      final receipt = await Isolate.run(() => CoreImportStore.inspectSyncClone(
+        importsRoot: imports, notebooksRoot: notebooks, importId: id, operationId: operationId));
+      if (receipt.notebookId != result.notebookId || receipt.operationId != operationId) {
+        throw const CoreException(_unusable, 'Clone receipt identity changed');
+      }
+      return CoreSyncResult(operationId: operationId, action: CoreSyncAction.clone,
+        code: result.code, executed: result.executed, committed: result.committed,
+        cleanupRequired: result.cleanupRequired, notebookId: result.notebookId, cloneReceipt: receipt);
+    } on CoreException catch (error) {
+      return CoreSyncResult(operationId: operationId, action: CoreSyncAction.clone,
+        code: error.code, executed: result.executed, committed: false,
+        cleanupRequired: true, notebookId: result.notebookId);
+    }
+  }
+
   static Future<CoreNotebook> _open({
     required String appDataPath,
     required String localDataPath,
@@ -870,19 +922,20 @@ final class CoreNotebook
       native.VXM_MODE_CATALOG => native.VXM_EVENT_CATALOG_OPEN,
       native.VXM_MODE_COHORT_BUILDER => native.VXM_EVENT_COHORT_OPEN,
       native.VXM_MODE_RESOURCES => native.VXM_EVENT_RESOURCE_OPEN,
+      native.VXM_MODE_SYNC_CLONE => native.VXM_EVENT_SYNC_CLONE_OPEN,
       _ => native.VXM_EVENT_OPEN,
     }, 0);
     try {
       using((arena) {
         final options = arena<native.VxmOpenOptions>();
         options.ref
-          ..app_data_path = mode == native.VXM_MODE_COHORT_BUILDER
+          ..app_data_path = (mode == native.VXM_MODE_COHORT_BUILDER || mode == native.VXM_MODE_SYNC_CLONE)
               ? nullptr
               : _option(arena, appDataPath)
-          ..local_data_path = mode == native.VXM_MODE_COHORT_BUILDER
+          ..local_data_path = (mode == native.VXM_MODE_COHORT_BUILDER || mode == native.VXM_MODE_SYNC_CLONE)
               ? nullptr
               : _option(arena, localDataPath)
-          ..notebook_path = mode == native.VXM_MODE_COHORT_BUILDER
+          ..notebook_path = (mode == native.VXM_MODE_COHORT_BUILDER || mode == native.VXM_MODE_SYNC_CLONE)
               ? nullptr
               : _option(arena, notebookPath)
           ..notebook_name = notebookName == null
@@ -948,6 +1001,63 @@ final class CoreNotebook
       );
     }
     return handle;
+  }
+
+  Future<T> _syncRequest<T>(Map<String, Object?> command,
+      T Function(Object?) decode, {CoreSyncCredentials? credentials}) async {
+    if (_mode != native.VXM_MODE_NOTE && _mode != native.VXM_MODE_CATALOG &&
+        _mode != native.VXM_MODE_SYNC_CLONE) {
+      throw const CoreException(_unusable, 'Synchronization requires the selected notebook owner');
+    }
+    final handle = _usableHandle();
+    final encoded = jsonEncode(command);
+    _encode(encoded, maximum: 16384);
+    final secret = credentials == null ? null : jsonEncode(credentials.toNativeJson());
+    final secretSize = secret == null ? 0 : _encode(secret, maximum: 16384).length;
+    final id = _nextRequest++;
+    final pending = _Pending(native.VXM_EVENT_SYNC, 0, decode: (event) {
+      if (event.data == nullptr || event.size == 0 || event.size > _maxCatalog) {
+        throw const CoreException(_unusable, 'Synchronization outcome is unavailable; recover actual state');
+      }
+      final decoded = jsonDecode(utf8.decode(event.data.asTypedList(event.size), allowMalformed: false));
+      final value = decode(decoded);
+      if (value is CoreSyncResult && (value.code != event.code ||
+          value.operationId != command['operationId'] || value.action.name != command['action'])) {
+        throw const CoreException(_unusable, 'Synchronization completion correlation failed');
+      }
+      return value as Object;
+    });
+    final code = using((arena) {
+      final transient = secret?.toNativeUtf8(allocator: arena);
+      try {
+        return native.vxm_host_sync(handle, id, _generation,
+          encoded.toNativeUtf8(allocator: arena).cast(), transient?.cast() ?? nullptr);
+      } finally {
+        if (transient != null) transient.cast<Uint8>().asTypedList(secretSize).fillRange(0, secretSize, 0);
+      }
+    });
+    if (code != native.VxCoreError.VXCORE_OK) throw CoreException(code, 'Synchronization admission failed');
+    _pending[id] = pending;
+    return await pending.completer.future as T;
+  }
+
+  @override
+  Future<CoreSyncFacts> inspectSync() => _syncRequest({'action': 'inspect'}, CoreSyncFacts.fromJson);
+
+  @override
+  Future<CoreSyncResult> sync(CoreSyncCommand command, {CoreSyncCredentials? credentials}) =>
+      _syncRequest(command.toJson(), CoreSyncResult.fromJson, credentials: credentials);
+
+  @override
+  void cancelSync(String operationId) {
+    final handle = _handle;
+    if (handle == null) return;
+    _queryInput(operationId, maximum: 36);
+    final code = using((arena) => native.vxm_host_sync_cancel(handle, _generation,
+      operationId.toNativeUtf8(allocator: arena).cast()));
+    if (code != native.VxCoreError.VXCORE_OK && code != _unusable) {
+      throw CoreException(code, 'Synchronization cancellation failed');
+    }
   }
 
   @override
@@ -1588,7 +1698,8 @@ final class CoreNotebook
               'Native completion correlation failed',
             );
           }
-          if (event.code != native.VxCoreError.VXCORE_OK) {
+          if (event.code != native.VxCoreError.VXCORE_OK &&
+              !(event.kind == native.VXM_EVENT_SYNC && event.data != nullptr && event.size != 0)) {
             throw CoreException(
               event.code,
               event.message.cast<Utf8>().toDartString(),
@@ -1608,8 +1719,12 @@ final class CoreNotebook
               event.kind == native.VXM_EVENT_COHORT ||
               event.kind == native.VXM_EVENT_RESOURCE ||
               event.kind == native.VXM_EVENT_DRAFT ||
-              event.kind == native.VXM_EVENT_PREVIEW) {
+              event.kind == native.VXM_EVENT_PREVIEW ||
+              event.kind == native.VXM_EVENT_SYNC) {
             pending.completer.complete(pending.decode!(event));
+          } else if (event.kind == native.VXM_EVENT_SYNC_CLONE_OPEN) {
+            if (event.size != 0 || event.data != nullptr) _badTransfer();
+            pending.completer.complete(true);
           } else if (event.kind == native.VXM_EVENT_COHORT_OPEN ||
               event.kind == native.VXM_EVENT_RESOURCE_OPEN) {
             if (event.size != 0 ||

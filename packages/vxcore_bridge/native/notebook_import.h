@@ -12,6 +12,16 @@
 
 struct VxmImportCancel;
 namespace vxm_import {
+// These are host-internal; no filesystem command can mint a clone permit.
+int32_t PreflightClone(const std::string &transaction_root, nlohmann::json &options) noexcept;
+// The requested maximum is reduced to current capacity after private owner creation.
+int32_t CheckClone(const std::string &transaction_root, const std::string &operation_id, uint64_t &budget) noexcept;
+int32_t SealClone(const std::string &transaction_root, const std::string &operation_id,
+                  const std::string &notebook_id, bool auto_sync_enabled) noexcept;
+// Returns only the routing values authorized by an unsettled committed clone.
+int32_t CommittedCloneConfiguration(const std::string &notebook_root, const std::string &notebook_id,
+                                    const std::string &import_id, const std::string &operation_id,
+                                    nlohmann::json &configuration) noexcept;
 struct Inspection {
   std::string notebook_id;
   std::string notebook_name;

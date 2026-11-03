@@ -1101,3 +1101,228 @@ No iOS build/runtime, physical-device, actual power-loss/disk-full or OEM backup
 promise follows from these checks. Public WK APIs still lack the required
 all-protocol guarantee; iOS editing/preview remains visibly fail-closed, not a
 claimed working port. Share-in, WebDAV, publication and release gates remain open.
+
+
+## Phase 4: native WebDAV coordination and interoperability
+
+Core prerequisite: `c7ea3454edbe1bb2b3bde7e964b6d999bb9fcb77`, reviewed and
+committed before the parent pin. No core or mobile changes were pushed. The
+implementation retains the existing WebDAV protocol and portable notebook format;
+no Dart uploader, alternate notebook database or permissive TLS fallback was added.
+
+### Executed core boundary and review corrections
+
+The repaired Windows MSVC build passed the ten selected context, filesystem,
+credential, lifecycle, retirement, factory/reentrancy and concurrency targets.
+Focused HTTPS cases covered candidate observer failure, exact private clone budget,
+Windows import-path admission, private clone completion/registration and prepared
+C API rotation. The complete transport and synchronization CTest suites then passed
+(41.67 s and 1132.24 s in the recorded repaired run).
+
+The default desktop shared SDK was rebuilt and exercised directly against an owned
+HTTPS endpoint: prepare on the owner, execute on a separate worker, complete on the
+owner; pre-cancelled enable left config/baseline unchanged; rejected credentials
+retained the published provider/baseline and explicit candidate cleanup. Recovery
+reported committed=false, then the old account completed actual synchronization.
+These are runtime calls, not mock echoes or compilation-only evidence.
+
+Independent review required the following corrections before core approval:
+
+- Propagate private native I/O through every prepared candidate/clone path and use
+  strict WebDAV storage preflight instead of entering legacy provider walkers.
+- Include projected-config and baseline atomic-sibling peaks in the clone budget.
+- Report a proved durable publication as committed even if later cleanup/observer
+  work fails; preserve the real error rather than inventing rollback.
+- Fence registration, disable/unregister and lifecycle admission under the same
+  mutex, with external destruction outside it and publication capacity reserved.
+- Leave TLS policy mutable after failed prepare; lock only a returned valid handle.
+- Keep ordinary Windows registration behavior: reject unsupported fixed registration
+  paths and downloaded import-recovery paths before writes, only on Windows.
+  A supported registration root with a private asset descendant >=290 WCHARs
+  executed, registered and closed. Direct private backend roots >=290 and 259/260
+  registration boundaries were separately exercised. Mobile paths were not capped
+  by Windows MAX_PATH, and no long-path-aware executable workaround shipped.
+
+A sharing fixture initially used FILE_READ_ATTRIBUTES, which does not establish
+its assumed deletion denial. An isolated real Win32 probe showed that removal
+succeeded under that handle and failed with sharing violation32 under GENERIC_READ.
+The fixture was corrected without changing valid production metadata-probe access.
+
+### Executed Android trust and credential storage
+
+The arm64/x86_64 debug APK ran on the existing 16 KiB x86_64 AVD. Its actual WebView
+reported Chrome156.0.8078.47. An owned loopback HTTPS fixture was reached only through
+owned ADB reverse mappings; no personal account or system trust store was used.
+
+The strict APK rejected the owned untrusted certificate after native worker
+execution (code24, uncommitted). A temporary DEBUG-only application trust resource
+then allowed the same endpoint and preserved the original notebook UUID. Further
+actual native attempts rejected a wrong hostname, an expired certificate and a
+missing intermediate (code24, zero DAV requests for each). The matching full
+supplied chain succeeded with30 DAV requests. Its leaf contained AIA/CRL URLs to an
+owned observer. An HTTP200 positive control came from the actual app process; the
+observer saw only that control, with no issuer/CRL fetch during native verification.
+The temporary anchor is not a production trust fallback; final strict packaging
+and removal evidence is recorded with delivery below.
+
+Native Keystore storage produced a no-backup AES-GCM envelope, not plaintext
+credentials. Its bytes survived force-stop and APK replacement; the restarted app
+read it and performed exact-generation discard/cleanup. A rejected password
+rotation retained the old account and a recoverable candidate; explicit recovery
+followed by real sync proved the retained account remained usable.
+
+The app was killed after actual secure promotion but before old-version retirement.
+The paused record proved the new active credential and retained old version without
+printing either secret. Restart required explicit recovery; the promoted credential
+was authenticated and subsequently synchronized without reentry or source changes.
+An owned ciphertext was then corrupted while the app was stopped: storage stayed
+unknown/unavailable, its bytes were retained, and offline note access remained
+available. Restoring exactly that ciphertext recovered configuration. No key was
+regenerated to hide existing ciphertext.
+
+Disable was interrupted at the real post-routing/pre-secret-delete boundary by a
+controlled private-directory permission fault. Persisted routing was already off,
+its auto preference remained unchanged, and failed native cleanup retained the
+ciphertext. After permissions were restored, explicit recovery removed the captured
+record. Remote notebook bytes were unchanged throughout.
+
+### Executed desktop/mobile data and lifecycle behavior
+
+A real desktop SDK peer created notebook/node UUIDs, Unicode and combining text,
+CRLF source, a tag, a PNG, a 2048-byte opaque asset, hidden bytes and unknown supported
+configuration. Actual Connect downloaded and validated13 entries/4972 bytes. The
+native receipt survived sealed publication with the same UUIDs and baseline. Six
+portable payloads matched byte-for-byte; config matched after excluding only the
+four device routing/preference fields.
+
+The first library handoff exposed a real mismatch: normal routing publication
+requires an authenticated runtime, but committed-clone completion intentionally
+runs before it. The corrected path requires the genuine native committed receipt,
+exact command/configuration/identity agreement and an unsettled wrapper. Ordinary
+configure guards remain unchanged; matching registered retries are no-ops. The
+already committed AVD transaction completed on the corrected build without another
+download or replacement notebook. Full real-library HTTPS tests cover this path
+and retry after post-publication vault failure.
+
+The mobile editor's real CodeMirror transaction path saved the owned note, and the
+desktop SDK pulled exact UTF-8/CRLF bytes while retaining notebook/node IDs and opaque
+assets. A subsequent desktop revision applied to a clean mobile source. During a
+real held network phase, a newer mobile save remained on disk while the remote
+received the staged older snapshot. Core exposed the resulting file conflict; the
+actual UI offered Keep local/Keep remote/Keep both according to its capability.
+Explicit Keep local published the exact newer bytes. Failed attempts did not
+advance last-success.
+
+Instrumented network runs also encountered editor barrier timeouts. Received and
+private-durable source remained retained; explicit view resynchronization followed
+by Retry save preserved the newer draft exactly once. One native offline-policy
+startup refused source delivery; explicit view recovery succeeded without relaxing
+policy or timeout values. These observations are not a universal latency claim.
+
+Foreground automatic sync persisted its preference and uploaded a real saved edit
+without pressing Sync now. Moving the app to the background during a held native
+network request retired cancellation without advancing last-success or changing
+local/remote bytes. Removing the owned ADB reverse connection produced a visible
+network failure; restoring it and manually retrying succeeded without data loss.
+
+The app was force-stopped after proved native apply and before owner refresh. The
+incoming bytes and persistent refresh marker were present before termination.
+Startup blocked unsafe admission. Explicit recovery refreshed actual state, cleared
+the marker and retained the incoming bytes without inventing a successful-sync
+timestamp. This is process-kill evidence, not power-loss evidence.
+
+A separately owned empty collection was bootstrapped from a new local notebook
+through the actual UI. Authenticated enable did not publish notebook config before
+Sync now. The real round trip created the original notebook/node IDs and empty note;
+disabling left the complete remote notebook intact.
+
+### Integration corrections exercised during verification
+
+- Clone admission now derives its effective budget after private runtime allocation;
+  the earlier space snapshot is a ceiling, not an exact reservation of all free bytes.
+- Receipt identity validation distinguishes regular files from directory roots.
+- Transient owner shutdown preserves metadata.db and its per-device last-success.
+- A real SQLite writer lock reproduced the legacy timestamp setter returning success
+  without persistence. Mobile finish now reads back the value before reporting a
+  recorded successful snapshot; the regression changed from failure to pass.
+- Application reservation settlement is separate from operation success. Safe
+  refresh/retirement does not falsely retain a block or advance last-success after
+  a failed apply; actual conflict facts are refreshed.
+- Candidate cleanup includes its retained endpoint configuration. Real authentication
+  failure plus cleanup/rollback is exercised, not just a successful fake command.
+- Widget fixtures inject their vault instead of waiting on native messaging under a
+  fake clock. Real HTTPS app tests do not install Flutter's fake HTTP400 override.
+- Existing export coverage now supplies a canonical stored WebDAV endpoint; corrupt
+  provider storage is not silently accepted as a clean runtime-exclusion fixture.
+
+All65 pre-phase notebook files matched their persisted byte-safe SHA-256 baseline
+at the recorded preservation checkpoint. The owned interoperability/bootstrapping
+notebooks are additional data, not replacements for those files.
+
+No iOS build/runtime, physical-device, actual power-loss or OEM backup/transfer
+promise follows from these checks. Public WK APIs still lack the required native
+all-protocol guarantee; iOS15–26 editing/preview remains fail-closed. Locked-device
+Keychain/Keystore behavior and physical IME/accessibility certification remain
+platform gates. Share-in and publication/signing are separate product work.
+
+
+The disabled-but-retained endpoint case initially refused a confirmed replacement:
+the UI used the actual provider binding, but the coordinator tested only enabled
+routing and skipped retirement. It now derives the previous endpoint from retained
+native facts, preserving prior runtime state during compensation. The new real
+HTTPS regression passes confirmation refusal, byte-exact archive retention and
+bootstrap at a replacement collection. On the AVD, an explicit confirmed change
+from the disabled original binding enabled the replacement endpoint, retained the
+old baseline byte-for-byte in the core archive and left note bytes unchanged.
+The owned notebook was then disabled again without deleting remote data.
+
+
+### Final gate, strict packaging and preservation
+
+The complete pinned `node scripts/verify.mjs verify` gate exited successfully after
+the final retained-binding correction. Generated assets/notices/manifests, C FFI,
+CoreJsonKeys and CoreSyncJsonKeys matched; TypeScript and both Dart/Flutter analyzers
+were clean. Pass counts exclude the explicitly skipped cases:
+
+| Check | Result |
+| --- | --- |
+| Editor/rendering JavaScript | 103 passed |
+| Native bridge normal suite | 159 passed, 1 skipped |
+| Flutter normal suite | 476 passed, 2 skipped |
+| Isolated real-HTTPS bridge suite | 19 passed |
+| Isolated real-HTTPS application suite | 9 passed |
+| Repaired core context/filesystem/lifecycle/concurrency targets | 10 passed |
+| Complete core HTTPS transport/synchronization suites | 2 passed |
+| Android debug build | arm64-v8a and x86_64 packaged |
+
+The bridge skip explicitly requires a separately provisioned Windows symlink
+privilege; skipped cases are not claimed executed. Pinned npm/ffigen emitted their
+install-script/deprecated-YAML/opaque-handle notices; builds and generated checks
+completed without relaxing the project checks or upgrading dependencies.
+
+Final strict APK SHA-256:
+`fd97bf4d02222fc0bda440355c9f35450d3fcab3da6ecdc3d34cc1d65b077a59`.
+The debug manifest was restored exactly and both temporary trust resources removed.
+The APK contains no fixture trust resource. `zipalign -c -P 16 -v 4` passed, and all
+eight packaged native libraries had LOAD alignment at least16384; both host ABIs
+reported16384 for every LOAD segment. Runtime was the API37 x86_64 AVD with an
+observed16384-byte page size, not an arm64 physical device.
+
+That strict APK was installed without clearing app data and again rejected the
+owned untrusted endpoint after actual worker execution (code24, uncommitted).
+The failed private clone was explicitly discarded. The final source view was
+recovered through the existing native proof and left readable with Sync off;
+no policy or timeout was weakened to obtain it.
+
+Final byte-safe archive comparison matched all65 pre-phase notebook files to their
+original SHA-256 baselines. Both additional owned notebooks retained their IDs and
+were disabled with empty routing/backend; no credential ciphertext or import
+staging remained. The interoperability source still matched its expected exact
+UTF-8/CRLF bytes. Core-owned retired baseline archives were retained intentionally,
+not deleted as temporary data.
+
+All three owned fixture services exited cleanly. Thirteen owned debugger forwards
+and seven owned reverse mappings were removed; no ADB mappings remained. Owned TLS
+keys, credentials, desktop copies, probe scripts/binaries and extracted ELF checks
+under the temporary fixture directory were removed. The AVD and final application
+remained running; personal notebooks were neither reset nor replaced.

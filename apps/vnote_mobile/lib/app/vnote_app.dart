@@ -26,22 +26,31 @@ class VNoteApp extends StatefulWidget {
   State<VNoteApp> createState() => _VNoteAppState();
 }
 
-class _VNoteAppState extends State<VNoteApp> {
+class _VNoteAppState extends State<VNoteApp> with WidgetsBindingObserver {
   bool _dark = false;
   late final WebSurfacePlatform _surfaces;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    widget.library.setForeground(WidgetsBinding.instance.lifecycleState == null ||
+      WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed);
     _surfaces = WebSurfacePlatform();
     unawaited(widget.library.initialize());
   }
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     widget.library.dispose();
     unawaited(widget.library.shutdown().then((_) => _surfaces.shutdown()).catchError((Object _) {}));
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    widget.library.setForeground(state == AppLifecycleState.resumed);
   }
 
   @override

@@ -21,6 +21,9 @@ import UniformTypeIdentifiers
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "WebSurfacePlugin") {
       WebSurfacePlugin.register(with: registrar)
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "SyncPlatformPlugin") {
+      SyncPlatformPlugin.register(with: registrar)
+    }
   }
 }
 

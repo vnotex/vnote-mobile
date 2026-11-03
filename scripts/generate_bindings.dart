@@ -138,48 +138,59 @@ Future<void> main(List<String> args) async {
 }
 
 Future<void> generateCoreJsonKeys(Directory root, {required bool check}) async {
-  final header = await File(
-    '${root.path}/third_party/vxcore/include/vxcore/notebook_json_keys.h',
-  ).readAsString();
-  const symbols = {
-    'Id': 'id',
-    'Name': 'name',
-    'Files': 'files',
-    'Folders': 'folders',
-    'Metadata': 'metadata',
-    'Encrypted': 'encrypted',
-    'NodeExists': 'nodeExists',
-  };
+  await _generateJsonKeys(root, check: check,
+    headerPath: 'include/vxcore/notebook_json_keys.h',
+    description: 'vxcore/notebook_json_keys.h',
+    className: 'CoreJsonKeys', outputName: 'core_json_keys.dart',
+    symbols: const {
+      'Id': 'id', 'Name': 'name', 'Files': 'files', 'Folders': 'folders',
+      'Metadata': 'metadata', 'Encrypted': 'encrypted', 'NodeExists': 'nodeExists',
+    });
+  await _generateJsonKeys(root, check: check,
+    headerPath: 'src/sync/sync_json_keys.h',
+    description: 'src/sync/sync_json_keys.h',
+    className: 'CoreSyncJsonKeys', outputName: 'core_sync_json_keys.dart',
+    symbols: const {
+      'SyncEnabled': 'syncEnabled', 'SyncBackend': 'syncBackend',
+      'SyncRemoteUrl': 'syncRemoteUrl', 'AutoSyncEnabled': 'autoSyncEnabled',
+      'Backend': 'backend', 'RemoteUrl': 'remoteUrl',
+      'BackendOptions': 'backendOptions', 'ExcludePaths': 'excludePaths',
+      'AutoCommitMerges': 'autoCommitMerges', 'Extra': 'extra',
+      'Username': 'username', 'Password': 'password', 'Path': 'path',
+      'LocalModifiedUtc': 'localModifiedUtc', 'RemoteModifiedUtc': 'remoteModifiedUtc',
+      'IsBinary': 'isBinary', 'CanKeepBoth': 'canKeepBoth',
+    });
+}
+
+Future<void> _generateJsonKeys(Directory root, {required bool check,
+    required String headerPath, required String description,
+    required String className, required String outputName,
+    required Map<String, String> symbols}) async {
+  final header = await File('${root.path}/third_party/vxcore/$headerPath').readAsString();
   final declarations = RegExp(
     r'inline\s+constexpr\s+const\s+char\s*\*\s*kJsonKey([A-Za-z0-9_]+)\s*=\s*("(?:[^"\\]|\\.)*")\s*;',
   ).allMatches(header).toList();
   final generated = StringBuffer(
     '// SPDX-License-Identifier: LGPL-3.0-only\n'
-    '// Generated from vxcore/notebook_json_keys.h. Do not edit by hand.\n'
-    'abstract final class CoreJsonKeys {\n',
+    '// Generated from $description. Do not edit by hand.\n'
+    'abstract final class $className {\n',
   );
   for (final entry in symbols.entries) {
-    final matches = declarations
-        .where((match) => match.group(1) == entry.key)
-        .toList();
+    final matches = declarations.where((match) => match.group(1) == entry.key).toList();
     if (matches.length != 1) {
-      throw StateError(
-        'Expected exactly one literal kJsonKey${entry.key} declaration',
-      );
+      throw StateError('Expected exactly one literal kJsonKey${entry.key} declaration');
     }
     final value = jsonDecode(matches.single.group(2)!) as String;
     generated.writeln('  static const ${entry.value} = ${jsonEncode(value)};');
   }
   generated.writeln('}');
-  final output = File(
-    '${root.path}/packages/vxcore_bridge/lib/src/generated/core_json_keys.dart',
-  );
+  final output = File('${root.path}/packages/vxcore_bridge/lib/src/generated/$outputName');
   final expected = generated.toString();
   if (check) {
     if (!await output.exists() || await output.readAsString() != expected) {
-      throw StateError('Generated core JSON keys are stale');
+      throw StateError('Generated $className are stale');
     }
-    print('Generated JSON keys match the public core constants.');
+    print('Generated $className match the authoritative core constants.');
   } else {
     await output.parent.create(recursive: true);
     await output.writeAsString(expected);

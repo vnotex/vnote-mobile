@@ -38,6 +38,10 @@ class ImportAttempt {
     this.notebookId,
     this.notebookName,
     this.destination,
+    this.origin,
+    this.operationId,
+    this.cloneComplete = false,
+    this.credentialsSettled = false,
   });
 
   final String id;
@@ -53,6 +57,11 @@ class ImportAttempt {
   final String? notebookId;
   final String? notebookName;
   final String? destination;
+  final String? origin;
+  final String? operationId;
+  final bool cloneComplete;
+  final bool credentialsSettled;
+  bool get isWebDavClone => origin == 'webdavClone';
 }
 
 @immutable
@@ -145,6 +154,8 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
   Future<void>? _providerCancellation;
   int _cancellationAddress = 0;
   String? _providerId;
+  CoreNotebook? _cloneOwner;
+  String? _cloneOperation;
   bool _initialized = false;
   bool _closing = false;
   bool _disposed = false;
@@ -401,6 +412,63 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
     }, cancellable: true);
   }
 
+  Future<ImportAttempt?> prepareWebDav({required String operationId,
+      required CoreSyncConfiguration configuration,
+      required Future<CoreSyncCredentials> Function(ImportAttempt) loadCredentials}) {
+    _admit(); _checkAdmission?.call();
+    if (!_initialized || value.hasStaging) throw StateError('Resolve existing import staging first.');
+    return _operation(() async {
+      _busy(NotebookImportPhase.receiving);
+      String? id;
+      try {
+        final request = await _job('allocate', arguments: {
+          'kind': 'folder', 'operationId': operationId});
+        id = request['id'] as String;
+        final attempt = _attempt(request);
+        _publish(NotebookImportState(phase: NotebookImportPhase.receiving, current: attempt));
+        _checkCancelled();
+        // The owned wrapper exists before secure staging, so even a lost vault
+        // reply leaves a discoverable operation identity for explicit recovery.
+        final credentials = await loadCredentials(attempt);
+        _checkCancelled();
+        final space = await runStore({'op': 'checkSpace', 'id': id, 'requiredBytes': 0},
+          cancellationAddress: _cancellationAddress);
+        final remaining = space['remainingBytes'] as int;
+        final available = (space['availableBytes'] as int) - 64 * 1024 * 1024;
+        final budget = remaining < available ? remaining : available;
+        if (budget <= 0) throw const _ImportFailure('Private clone staging has no available budget.');
+        final owner = await CoreNotebook.createSyncClone(transactionRoot: p.join(root, id));
+        _cloneOwner = owner; _cloneOperation = operationId;
+        try {
+          _checkCancelled();
+          final result = await owner.cloneSync(operationId: operationId,
+            configuration: configuration, credentials: credentials, stagingBudgetBytes: budget);
+          if (!result.success || result.cloneReceipt == null) {
+            throw const _ImportFailure('The WebDAV download did not produce a complete native receipt. Private data is retained.');
+          }
+        } finally {
+          await owner.close();
+          _cloneOwner = null; _cloneOperation = null;
+        }
+        _checkCancelled();
+        await _prepareClone(attempt);
+      } on Object catch (error) {
+        await _recoverFailure(error, preferredId: id);
+      }
+      return value.current;
+    }, cancellable: true);
+  }
+
+  Future<void> _prepareClone(ImportAttempt attempt) async {
+    final operation = attempt.operationId;
+    if (!attempt.isWebDavClone || operation == null) throw StateError('The clone identity is unavailable.');
+    _busy(NotebookImportPhase.validating);
+    await runStore({'op': 'prepareClone', 'id': attempt.id, 'operationId': operation},
+      cancellationAddress: _cancellationAddress);
+    _publish(_state(await _scan(preferredId: attempt.id),
+      message: 'WebDAV notebook downloaded and validated. Import preserves its identity and proved baseline.'));
+  }
+
   Future<void> _capture(ImportAttempt attempt) async {
     _checkCancelled();
     // Reserve before the provider lease: input, bounded escaped JSONL records
@@ -502,7 +570,12 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
           'id': attempt.id,
         }, cancellationAddress: 0);
         final phase = recovered['phase'];
-        if (phase == 'staged' && recovered['prepared'] != true) {
+        if (attempt.isWebDavClone && phase == 'staged' && recovered['prepared'] != true) {
+          if (recovered['cloneComplete'] != true) {
+            throw const _ImportFailure('The interrupted WebDAV download is incomplete. Discard private staging before reconnecting.');
+          }
+          await _prepareClone(_attempt(recovered));
+        } else if (phase == 'staged' && recovered['prepared'] != true) {
           _checkCancelled();
           if (recovered['captured'] == true) {
             await _extract(attempt.id);
@@ -649,6 +722,8 @@ class NotebookImporter extends ValueNotifier<NotebookImportState> {
       });
 
   void cancel() {
+    final cloneOperation = _cloneOperation;
+    if (cloneOperation != null) _cloneOwner?.cancelSync(cloneOperation);
     final address = _cancellationAddress;
     if (address != 0) CoreImportStore.requestCancellation(address);
     final id = _providerId;
@@ -707,11 +782,12 @@ String _displayName(String? name, DocumentImportKind kind) {
 ImportAttempt _attempt(Map<String, Object?> record) => ImportAttempt(
   id: record['id'] as String,
   kind: DocumentImportKind.values.byName(record['kind'] as String),
-  phase: record['phase'] == 'published'
+  phase: record['phase'] == 'published' ||
+      (record['phase'] == 'committed' && record['origin'] == 'webdavClone' && record['credentialsSettled'] != true)
       ? NotebookImportPhase.finishing
       : record['prepared'] == true
       ? NotebookImportPhase.prepared
-      : record['captured'] == true
+      : record['captured'] == true || record['cloneComplete'] == true
       ? NotebookImportPhase.validating
       : NotebookImportPhase.receiving,
   sourceName: record['sourceName'] as String?,
@@ -722,6 +798,10 @@ ImportAttempt _attempt(Map<String, Object?> record) => ImportAttempt(
   notebookId: record['notebookId'] as String?,
   notebookName: record['notebookName'] as String?,
   destination: record['destination'] as String?,
+  origin: record['origin'] as String?,
+  operationId: record['operationId'] as String?,
+  cloneComplete: record['cloneComplete'] == true,
+  credentialsSettled: record['credentialsSettled'] == true,
 );
 
 Future<Map<String, Object?>> _runImportWorker(
@@ -783,7 +863,8 @@ Future<void> _importWorker(
     final result = switch (command) {
       'store' => store.run(arguments, cancellation),
       'scan' => await store.scan(arguments['preferredId'] as String?),
-      'allocate' => await store.allocate(arguments['kind'] as String),
+      'allocate' => await store.allocate(arguments['kind'] as String,
+        operationId: arguments['operationId'] as String?),
       'resetCapture' => await store.resetCapture(arguments['id'] as String),
       'extract' => await store.extract(arguments['id'] as String, cancellation),
       'resetInspection' => await store.resetInspection(
@@ -968,7 +1049,8 @@ class _ImportStore {
         _transaction(id);
         await _directory(location);
         final recovered = _recover(id);
-        if (recovered['phase'] == 'committed') {
+        if (recovered['phase'] == 'committed' &&
+            !(recovered['origin'] == 'webdavClone' && recovered['credentialsSettled'] != true)) {
           committed.add(recovered);
           try {
             // A valid receipt permits private cleanup after legitimate edits.
@@ -1002,7 +1084,7 @@ class _ImportStore {
             ...recovered,
             'sourceName': recovered['sourceName'] ?? await _sourceName(id),
           });
-          if (recovered['phase'] == 'published') blocked.add(_destination(id));
+          if (recovered['phase'] == 'published' || recovered['phase'] == 'committed') blocked.add(_destination(id));
         }
       } catch (_) {
         if (_transactionId.hasMatch(id)) blocked.add(_destination(id));
@@ -1045,7 +1127,7 @@ class _ImportStore {
     };
   }
 
-  Future<Map<String, Object?>> allocate(String kind) async {
+  Future<Map<String, Object?>> allocate(String kind, {String? operationId}) async {
     await validateRoot();
     if (!const ['zip', 'folder'].contains(kind)) {
       throw const _ImportFailure('Unsupported import source kind.');
@@ -1056,7 +1138,11 @@ class _ImportStore {
       );
     }
     final random = Random.secure();
-    final id = List.generate(
+    if (operationId != null && (kind != 'folder' ||
+        !RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$').hasMatch(operationId))) {
+      throw const _ImportFailure('Invalid WebDAV clone identity.');
+    }
+    final id = operationId?.replaceAll('-', '') ?? List.generate(
       16,
       (_) => random.nextInt(256).toRadixString(16).padLeft(2, '0'),
     ).join();
@@ -1072,7 +1158,8 @@ class _ImportStore {
       'op': 'writeMarker',
       'id': id,
       'marker': 'request',
-      'data': {'version': 1, 'id': id, 'kind': kind},
+      'data': {'version': 1, 'id': id, 'kind': kind,
+        if (operationId != null) ...{'origin': 'webdavClone', 'operationId': operationId}},
     }, 0);
     return _recover(id);
   }

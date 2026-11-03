@@ -23,3 +23,4 @@ export 'src/core_notebook.dart'
 export 'src/transfer_models.dart';
 export 'src/core_drafts.dart';
 export 'src/preview_models.dart';
+export 'src/sync_models.dart';

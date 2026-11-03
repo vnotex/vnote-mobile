@@ -84,6 +84,29 @@ Stable private records are `request.json`, `captured.json`, `prepared.json`,
 derived core state only after owner join. The shared `DocumentTransferPlatform`
 channel owns both directions; the former export-only channel has no alias.
 
+### Receipt-bound WebDAV connection
+
+Connect reuses the import reservation, quota ledger and sealed publication. Its
+private `runtime/{app,local}` owner and `unpacked` target share an owned wrapper;
+no shared library context opens downloaded data. Core clone success and private
+owner join precede the sibling `clone-complete.json`, bound to operation, notebook,
+endpoint/account, baseline hash, tree bytes and object identities. Preparation
+validates a regular-file receipt identity, not a directory identity. Ordinary
+ZIP/folder imports still reject every nonempty `vx_sync`, including valid cursors
+and forged receipts inside input trees. Only the genuine native permit preserves
+a clean baseline through preparation and publication.
+
+Provisional vault scopes are journaled before download and rekeyed only against
+proved managed publication. Lost receipts stay incomplete; a complete imported
+notebook with failed credential settlement stays visible/recoverable, never deleted
+as an unpublished download. Discard drains owners and exact-generation secret
+cleanup before removing only its owned staging. Native admission accounts for
+runtime files created after a preliminary space snapshot, retains free-space
+headroom and bounds live/private/baseline/atomic-temp bytes before writes.
+Windows-host clone admission separately checks ordinary registration metadata
+paths; long private asset descendants remain supported and mobile limits do not
+inherit a Windows MAX_PATH ceiling. See ADR 0005 for transaction/trust details.
+
 ### Markdown/assets cohorts into an existing notebook
 
 Publish each incoming cohort as **one newly named child folder** at the user-selected destination, showing this grouping before acceptance. The browser selects File, ZIP or Folder and captures the notebook/parent UUIDs before leaving its catalog. Raw ZIP wrappers are retained, unlike bundled-notebook root selection. The future share receiver will use the same grouping; it does not authorize appending to a dirty editor.
@@ -328,7 +351,7 @@ References: [Apple document picker](https://developer.apple.com/documentation/ui
 
 ## Backup and privacy policy
 
-Working notebooks, durable drafts and the inbox use persistent sandbox storage, not OS caches. Persistent core app-data/local-data namespaces are separate and must not be globally relocated to a disposable cache. Only proven-derived search/metadata caches, rendered previews and reproducible web assets are disposable; classify files rather than deleting all core local data.
+Working notebooks, durable drafts and the inbox use persistent sandbox storage, not OS caches. Persistent core app-data/local-data namespaces are separate and must not be globally relocated to a disposable cache. Only proven-derived caches, rendered previews and reproducible web assets are disposable; core metadata.db also holds per-device last-success history, so transient owner retirement must not delete it. Classify files rather than deleting all core local data.
 
 Select **no automatic OS cloud backup or device-transfer inclusion of app-private notebook data in the first release**. Exclude managed notebooks, core configuration/local data, drafts, inbox, temporary exports, dedup ledger and credential ciphertext using the platform's actual backup/data-extraction controls; include App Group contents in the iOS audit. Explain at onboarding/settings that app removal/device loss may remove local data and that explicit notebook export/WebDAV are the available portable-copy mechanisms. WebDAV synchronization is not represented as immutable backup. Minimum-OS/vendor differences in exclusion must be tested and disclosed; an unverified platform rule is not a guarantee. User-created external exports are controlled by the destination provider and may be cloud-backed.
 

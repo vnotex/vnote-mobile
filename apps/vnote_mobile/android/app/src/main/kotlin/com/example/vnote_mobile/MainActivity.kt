@@ -47,6 +47,9 @@ class MainActivity : FlutterActivity() {
         if (!flutterEngine.plugins.has(WebSurfacePlugin::class.java)) {
             flutterEngine.plugins.add(WebSurfacePlugin())
         }
+        if (!flutterEngine.plugins.has(SyncPlatformPlugin::class.java)) {
+            flutterEngine.plugins.add(SyncPlatformPlugin())
+        }
     }
 }
 

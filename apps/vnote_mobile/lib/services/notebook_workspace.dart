@@ -9,6 +9,8 @@ import 'editor_session.dart';
 import 'editor_drafts.dart';
 import 'managed_notebook_storage.dart';
 import 'notebook_session.dart';
+import 'notebook_sync.dart';
+import 'sync_credentials.dart';
 
 typedef OpenCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
@@ -51,6 +53,8 @@ class NotebookWorkspaceState {
     this.searching = false,
     this.searchCancelled = false,
     this.searchError,
+    this.syncBusy = false,
+    this.syncRecoveryRequired = false,
   });
 
   final CoreDirectory? directory;
@@ -64,9 +68,11 @@ class NotebookWorkspaceState {
   final bool searching;
   final bool searchCancelled;
   final String? searchError;
+  final bool syncBusy;
+  final bool syncRecoveryRequired;
 
-  bool get canBrowse => !busy && !closed && session == null;
-  bool get canMutate => canBrowse && directory != null && !stale;
+  bool get canBrowse => !busy && !syncBusy && !closed && session == null;
+  bool get canMutate => canBrowse && directory != null && !stale && !syncRecoveryRequired;
 }
 
 /// Owns one selected notebook: catalog OR selected-note session.
@@ -87,6 +93,17 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   final OpenCatalog _openCatalog;
   final OpenNote _openNote;
   EditorDrafts? _drafts;
+  SyncCredentials? _syncCredentials;
+  NotebookSync? _sync;
+  SyncCore? _syncNative;
+  _WorkspaceSyncParticipant? _syncParticipant;
+  _WorkspaceSyncReservation? _syncReservation;
+  Future<void>? _syncAttaching;
+  Future<void>? _syncDetaching;
+  bool _syncRecoveryRequired = false;
+  bool _externalTransferBusy = false;
+  bool _ownerTransition = false;
+  bool _foreground = true;
   CatalogCore? _catalog;
   NotebookSession? _session;
   String? _previewFragment;
@@ -120,6 +137,98 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       throw StateError('Attach private draft storage before opening the workspace.');
     }
     _drafts = drafts;
+  }
+
+  NotebookSync get synchronization {
+    final existing = _sync;
+    if (existing != null) return existing;
+    final created = NotebookSync(notebookId: _notebookId, credentials: _syncCredentials);
+    _sync = created;
+    created.addListener(_syncChanged);
+    created.setForeground(_foreground);
+    return created;
+  }
+
+  void attachSyncCredentials(SyncCredentials credentials) {
+    if (_initialization != null || _sync != null) {
+      throw StateError('Attach synchronization credentials before opening the workspace.');
+    }
+    _syncCredentials = credentials;
+  }
+
+  void setForeground(bool foreground) {
+    _foreground = foreground;
+    _sync?.setForeground(foreground);
+    _session?.setForeground(foreground);
+  }
+
+  void setExternalTransferBusy(bool busy) {
+    if (_externalTransferBusy == busy) return;
+    _externalTransferBusy = busy;
+    _publish();
+  }
+
+  void _syncChanged() {
+    final state = _sync?.value;
+    _session?.setSyncActivity(busy: state?.busy ?? false,
+      allowsLocalWrites: state?.allowsLocalWrites ?? true);
+    _publish();
+  }
+
+  void _sessionChanged() {
+    // The editor listens to its own session. Publishing every source change here
+    // can rebuild an ancestor while its editor surface is being initialized.
+    if (!_ownerTransition && _active == null) unawaited(_attachCurrentSyncOwner());
+  }
+
+  Future<void> _attachCurrentSyncOwner() {
+    if (_shuttingDown || _ownerTransition || _active != null) return Future.value();
+    final note = _session;
+    if (note != null && (note.value.editor?.value.ready != true || note.value.closed)) return Future.value();
+    final core = note?.synchronizationCore ?? _catalog;
+    if (core == null || identical(_syncNative, core)) return _syncAttaching ?? Future.value();
+    final current = _syncAttaching;
+    if (current != null) return current;
+    final settled = Completer<void>();
+    _syncAttaching = settled.future;
+    _syncNative = core;
+    final participant = _WorkspaceSyncParticipant(this, core, note);
+    _syncParticipant = participant;
+    _publish();
+    unawaited(() async {
+      try { await synchronization.attach(core: core, participant: participant); }
+      on Object {
+        _syncRecoveryRequired = true;
+        _error = 'Synchronization readiness could not be established. Use Sync recovery before changing this notebook.';
+      } finally {
+        _syncAttaching = null;
+        settled.complete();
+        _syncChanged();
+      }
+    }());
+    return settled.future;
+  }
+
+  Future<void> _detachSync() {
+    final pending = _syncDetaching;
+    if (pending != null) return pending;
+    final settled = Completer<void>();
+    _syncDetaching = settled.future;
+    unawaited(() async {
+      try {
+        await _sync?.detach();
+        await _syncAttaching;
+        _syncNative = null; _syncParticipant = null;
+      } on Object {
+        _syncRecoveryRequired = true;
+        _error = 'Synchronization retirement needs recovery. Native close still drains its work.';
+      } finally {
+        _syncDetaching = null;
+        settled.complete();
+        _syncChanged();
+      }
+    }());
+    return settled.future;
   }
 
   Future<bool> openRecovered(String nodeId, Map<String, Object?> checkpoint) =>
@@ -156,6 +265,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       _browserError(error);
     } finally {
       _retire();
+      await _attachCurrentSyncOwner();
     }
   }
 
@@ -404,23 +514,38 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
         throw StateError('Private draft recovery must finish before opening a note.');
       }
       // Never relinquish the owner reference until its asynchronous join ends.
+      _ownerTransition = true;
+      await _detachSync();
       await _catalog!.close();
       _catalog = null;
       if (_shuttingDown) return false;
       _previewFragment = previewFragment;
       final session = NotebookSession(
-        openCore: () => _openNote(_paths, _notebookId, nodeId),
+        openCore: () async {
+          final core = await _openNote(_paths, _notebookId, nodeId);
+          if (_shuttingDown) {
+            await core.close();
+            throw StateError('The workspace closed while the note was opening.');
+          }
+          return core;
+        },
         drafts: drafts,
         notebookRelative: p.basename(_paths.notebook),
         restored: restored,
+        beforeCoreClose: _detachSync,
+        onCoreChanged: _sessionChanged,
+        onLocalSaved: () => _sync?.localSaved(),
       );
       _session = session;
+      session.addListener(_sessionChanged);
+      session.setForeground(_foreground);
       await session.initialize();
       if (_shuttingDown) return false;
       if (session.value.editor == null) {
         final openError =
             session.value.error ?? 'The selected note could not open.';
         await session.shutdown();
+        session.removeListener(_sessionChanged);
         _session = null;
         session.dispose();
         try {
@@ -437,7 +562,9 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       _browserError(error);
       return false;
     } finally {
+      _ownerTransition = false;
       _retire();
+      await _attachCurrentSyncOwner();
     }
   }
 
@@ -448,7 +575,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   ) async {
     if (!identical(_session, session) ||
         disposition == NotebookDisposition.cancel ||
-        !_admit()) {
+        !_admit(ownerTransition: true)) {
       return false;
     }
     try {
@@ -456,6 +583,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
         return false;
       }
       await session.shutdown();
+      session.removeListener(_sessionChanged);
       _session = null;
       session.dispose();
       if (_shuttingDown) return false;
@@ -468,7 +596,9 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       // browser retains its truthful stale snapshot and offers Refresh / Root.
       return true;
     } finally {
+      _ownerTransition = false;
       _retire();
+      await _attachCurrentSyncOwner();
     }
   }
 
@@ -579,8 +709,11 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     _stale = true;
   }
 
-  bool _admit() {
-    if (_shuttingDown || _active != null) return false;
+  bool _admit({bool ownerTransition = false}) {
+    if (_shuttingDown || _active != null || _ownerTransition ||
+        (!ownerTransition && (_syncReservation != null || _syncAttaching != null ||
+            (_sync?.value.busy ?? false)))) { return false; }
+    _ownerTransition = ownerTransition;
     _active = Completer<void>();
     _error = null;
     _mutation = null;
@@ -601,13 +734,16 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       directory: _directory,
       session: _session,
       busy: _active != null,
-      stale: _stale || _transferBlock != null,
+      stale: _stale || _transferBlock != null || _syncRecoveryRequired ||
+          (_sync?.value.facts?.refreshRequired ?? false),
       error: _transferBlock ?? _error,
       mutation: _mutation,
       search: _search,
       searching: _searching,
       searchCancelled: _searchCancelled,
       searchError: _searchError,
+      syncBusy: _syncAttaching != null || (_sync?.value.busy ?? false),
+      syncRecoveryRequired: _syncRecoveryRequired || (_sync?.value.facts?.refreshRequired ?? false),
     );
   }
 
@@ -626,14 +762,19 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     }
     // Stop pending editor barriers before waiting for a workspace transition
     // that may itself be waiting on one. Native writes still drain normally.
+    await _sync?.close();
+    await _syncAttaching;
     await _session?.shutdown();
     await _initialization;
     await _active?.future;
     await _session?.shutdown();
+    _session?.removeListener(_sessionChanged);
     _session?.dispose();
     _session = null;
     await _catalog?.close();
     _catalog = null;
+    _sync?.removeListener(_syncChanged);
+    _sync?.dispose();
   }
 
   @override
@@ -671,4 +812,151 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     notebookId: notebookId,
     nodeId: nodeId,
   );
+}
+
+
+class _WorkspaceSyncParticipant implements NotebookSyncParticipant {
+  _WorkspaceSyncParticipant(this.workspace, this.core, this.session);
+  final NotebookWorkspace workspace;
+  final SyncCore core;
+  final NotebookSession? session;
+  bool get current => identical(workspace._syncParticipant, this) &&
+      identical(workspace._syncNative, core) && identical(workspace._session, session);
+
+  @override
+  NotebookSyncReservation installSyncReservation(SyncReservationRequest request) {
+    if (!current || workspace._shuttingDown || workspace._ownerTransition ||
+        workspace._syncReservation != null || workspace._transferBlock != null ||
+        workspace._externalTransferBusy) {
+      throw StateError('Finish the current notebook/transfer ownership before synchronization.');
+    }
+    final reservation = _WorkspaceSyncReservation(this, request, workspace._active?.future);
+    workspace._syncReservation = reservation;
+    try { reservation.noteReservation = session?.installSyncReservation(request); }
+    on Object { workspace._syncReservation = null; rethrow; }
+    workspace._publish();
+    return reservation;
+  }
+
+  @override
+  Future<bool> recoverSyncSources() async {
+    if (!current) return false;
+    if (session != null) {
+      final safe = await session!.recoverSyncSources();
+      if (safe && current) { workspace._syncRecoveryRequired = false; workspace._publish(); }
+      return safe;
+    }
+    try {
+      final catalog = workspace._catalog;
+      if (catalog == null || !identical(catalog, core)) return false;
+      final directory = await catalog.list();
+      if (!current) return false;
+      workspace._accept(directory);
+      workspace._syncRecoveryRequired = false;
+      workspace._publish();
+      return true;
+    } on Object { return false; }
+  }
+}
+
+class _WorkspaceSyncReservation implements NotebookSyncReservation {
+  _WorkspaceSyncReservation(this.participant, this.request, this.previousWriter);
+  final _WorkspaceSyncParticipant participant;
+  final SyncReservationRequest request;
+  final Future<void>? previousWriter;
+  NotebookSyncReservation? noteReservation;
+  bool _retired = false;
+  bool _cancelled = false;
+  Future<bool>? _aborting;
+  NotebookWorkspace get workspace => participant.workspace;
+  bool get _owns => !_retired && participant.current && identical(workspace._syncReservation, this);
+  void _check() {
+    if (!_owns || _cancelled) throw StateError('The synchronization owner changed.');
+  }
+
+  @override
+  Future<void> drainWriters() async {
+    _check();
+    await previousWriter;
+    await noteReservation?.drainWriters();
+    _check();
+  }
+
+  @override
+  Future<SyncProtection> quiesceAndDrainDrafts() async {
+    await drainWriters();
+    final source = await noteReservation?.quiesceAndDrainDrafts();
+    _check();
+    final ids = <String>{...?source?.dirtyNodeIds};
+    var known = source?.ownershipKnown ?? true;
+    final drafts = workspace._drafts;
+    if (drafts != null) {
+      await drafts.scan(); _check();
+      for (final entry in drafts.value.entries.where((entry) => !entry.resolved)) {
+        if (entry.notebookId == null) { known = false; continue; }
+        if (entry.notebookId != workspace.notebookId) continue;
+        final id = entry.nodeId;
+        if (entry.quarantined || id == null) { known = false; }
+        else { ids.add(id); }
+      }
+    }
+    return SyncProtection(dirtyNodeIds: ids.toList(), ownershipKnown: known);
+  }
+
+  void _release() {
+    if (!identical(workspace._syncReservation, this)) return;
+    workspace._syncReservation = null; _retired = true;
+    workspace._publish();
+  }
+
+  @override
+  Future<SyncSettlement> settle(SyncRefreshReport? report) async {
+    try {
+      _check();
+      final note = noteReservation;
+      if (note != null) {
+        final result = await note.settle(report);
+        if (!result.safe) { retainRecovery('Source synchronization recovery remains required.'); return result; }
+      } else if (report != null) {
+        if (!report.metadataRefreshed || report.changedPaths == null) {
+          retainRecovery('Synchronization metadata needs an explicit refresh.');
+          return const SyncSettlement(safe: false, recoveryRequired: true);
+        }
+        final catalog = workspace._catalog;
+        if (catalog == null || !identical(catalog, participant.core)) throw StateError('Catalog retired.');
+        CoreDirectory actual;
+        try { actual = await catalog.list(workspace._folderId); }
+        on CoreException { actual = await catalog.list(); }
+        _check();
+        workspace._accept(actual); workspace._invalidateSnapshots();
+      }
+      _release();
+      return const SyncSettlement(safe: true);
+    } on Object {
+      retainRecovery('Synchronization refresh could not establish current notebook state.');
+      return const SyncSettlement(safe: false, recoveryRequired: true);
+    }
+  }
+
+  @override
+  Future<bool> abort() => _aborting ??= _abort();
+  Future<bool> _abort() async {
+    if (!_owns) return _retired;
+    _cancelled = true;
+    var safe = true;
+    try { safe = await noteReservation?.abort() ?? true; } on Object { safe = false; }
+    try { await previousWriter; } on Object { safe = false; }
+    if (!_owns) return _retired;
+    if (safe) { _release(); } else { retainRecovery('Synchronization cancellation needs source recovery.'); }
+    return safe;
+  }
+
+  @override
+  void retainRecovery(String code) {
+    if (!_owns) return;
+    noteReservation?.retainRecovery(code);
+    workspace._syncRecoveryRequired = true;
+    workspace._syncReservation = null; _retired = true;
+    workspace._publish();
+  }
 }

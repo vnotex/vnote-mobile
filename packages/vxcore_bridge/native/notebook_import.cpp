@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "notebook_import.h"
 #include "vxcore_host.h"
+#include "notebook_sync.h"
+#include <vxcore/vxcore.h>
 
 #include <algorithm>
 #include <array>
@@ -168,9 +170,9 @@ struct Identity {
     return object(other) && size == other.size && links == other.links && seconds == other.seconds && nanos == other.nanos;
   }
   Json journal() const { return {{"device", device}, {"low", low}, {"high", high}}; }
-  bool matches(const Json &value) const {
+  bool matches(const Json &value, bool expected_directory = true) const {
     keys(value, {"device", "low", "high"});
-    return directory && device == number(value.at("device"), UINT64_MAX) &&
+    return directory == expected_directory && device == number(value.at("device"), UINT64_MAX) &&
         low == number(value.at("low"), UINT64_MAX) && high == number(value.at("high"), UINT64_MAX);
   }
 };
@@ -582,8 +584,14 @@ void exact_child(const fs::path &parent, const std::string &name, const VxmImpor
   }
   throw Failure{VXCORE_ERR_FILE_CHANGED_OUTSIDE};
 }
+Json clone_permit(const fs::path &transaction, const fs::path &root, const VxmImportCancel *cancel);
+Json clone_committed_receipt(const fs::path &transaction, const Json &publication);
+Json clone_settlement(const fs::path &transaction, const Json &receipt, const Json &publication);
+std::string clone_receipt_hash(const fs::path &transaction);
+Json sync_storage(const fs::path &root, const std::string &notebook);
 vxm_import::Inspection inspect_metadata(const fs::path &root, bool incoming, const VxmImportCancel *cancel,
-                                       const InventoryResult *physical = nullptr, bool pending_import = false) {
+                                       const InventoryResult *physical = nullptr, bool pending_import = false,
+                                       const Json *clone_receipt = nullptr) {
   absolute(root.u8string());
   require(identity(root).directory, VXCORE_ERR_UNSUPPORTED);
   confined(root, "vx_notebook/config.json");
@@ -650,6 +658,14 @@ vxm_import::Inspection inspect_metadata(const fs::path &root, bool incoming, con
     if (!present(path)) continue;
     require(identity(path).directory, VXCORE_ERR_UNSUPPORTED);
     if (pending_import && std::string(runtime) == "vx_import") continue;
+    if (std::string(runtime) == "vx_sync" && (!incoming || clone_receipt)) {
+      const auto facts = sync_storage(root, result.notebook_id);
+      if (incoming) require(facts.at("cleanCloneBaseline") == true &&
+          facts.at("baselineSha256") == clone_receipt->at("baselineHash") &&
+          facts.at("remoteUrl") == clone_receipt->at("endpoint") &&
+          facts.at("usernameHash") == clone_receipt->at("accountHash"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+      continue;
+    }
     for (const auto &entry : fs::directory_iterator(path)) {
       require(std::string(runtime) == "vx_transfer" && entry.path().filename() == "encryption" &&
               identity(entry.path()).directory && fs::is_empty(entry.path()), VXCORE_ERR_UNSUPPORTED);
@@ -803,14 +819,22 @@ struct Store {
   }
   void validate_marker(const std::string &name, const Json &value, const std::string &kind) const {
     require(number(value.at("version"), 1) == 1 && text(value.at("id"), 32) == id && text(value.at("kind")) == kind, VXCORE_ERR_JSON_PARSE);
-    if (name == "request") keys(value, {"version", "id", "kind"});
+    if (name == "request") {
+      if (value.contains("origin")) {
+        keys(value, {"version", "id", "kind", "origin", "operationId"});
+        require(kind == "folder" && value.at("origin") == "webdavClone" &&
+                vxm_sync::Uuid(text(value.at("operationId"))), VXCORE_ERR_JSON_PARSE);
+      } else keys(value, {"version", "id", "kind"});
+    }
     else if (name == "captured") {
       keys(value, {"version", "id", "kind", "sourceName", "bytes", "entries"});
       text(value.at("sourceName"), 1024);
       number(value.at("bytes"), kind == "zip" ? kTree / 2 : kTree);
       number(value.at("entries"), kEntries);
     } else if (name == "prepared") {
-      keys(value, {"version", "id", "kind", "treeRelative", "inventoryHash", "bytes", "entries"});
+      if (value.contains("cloneReceiptIdentity"))
+        keys(value, {"version", "id", "kind", "treeRelative", "inventoryHash", "bytes", "entries", "cloneReceiptIdentity", "cloneReceiptHash"});
+      else keys(value, {"version", "id", "kind", "treeRelative", "inventoryHash", "bytes", "entries"});
       tree_relative(text(value.at("treeRelative"), 1024));
       require(hex(text(value.at("inventoryHash"), 64), 64), VXCORE_ERR_JSON_PARSE);
       number(value.at("bytes"), kTree);
@@ -829,6 +853,11 @@ struct Store {
     Json result = {{"id", id}, {"kind", kind}, {"phase", "staged"}, {"captured", false}, {"prepared", false},
                    {"treeRelative", nullptr}, {"inventoryHash", nullptr}, {"notebookId", nullptr},
                    {"notebookName", nullptr}, {"destination", nullptr}, {"bytes", 0}, {"entries", 0}};
+    if (request.contains("origin")) {
+      result["origin"] = request.at("origin"); result["operationId"] = request.at("operationId");
+      result["cloneComplete"] = false;
+      result["credentialsSettled"] = false;
+    }
     if (present(transaction / "captured.json")) {
       const auto captured = marker("captured", kind);
       validate_marker("captured", captured, kind);
@@ -846,6 +875,12 @@ struct Store {
     }
     if (!present(transaction / "publication.json")) {
       require(!present(transaction / "committed.json"), VXCORE_ERR_INVALID_STATE);
+      if (request.contains("origin") && present(transaction / "clone-complete.json")) {
+        const auto receipt = clone_permit(transaction, transaction / "unpacked", cancel);
+        require(!receipt.is_null(), VXCORE_ERR_INVALID_STATE);
+        result["cloneComplete"] = true; result["cloneReceipt"] = receipt;
+        result["endpoint"] = receipt.at("endpoint"); result["autoSyncEnabled"] = receipt.at("autoSyncEnabled");
+      }
       return result;
     }
     require(result.at("prepared").get<bool>(), VXCORE_ERR_INVALID_STATE);
@@ -869,6 +904,16 @@ struct Store {
       const auto committed = marker("committed", kind);
       require(committed == publication, VXCORE_ERR_JSON_PARSE);
       result["phase"] = "committed";
+      if (request.contains("origin")) {
+        const auto receipt = clone_committed_receipt(transaction, publication);
+        result["cloneComplete"] = true; result["cloneReceipt"] = receipt;
+        result["endpoint"] = receipt.at("endpoint"); result["autoSyncEnabled"] = receipt.at("autoSyncEnabled");
+        if (present(transaction / "clone-credentials-settled.json")) {
+          require(read_json(transaction / "clone-credentials-settled.json") == clone_settlement(transaction, receipt, publication),
+              VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+          result["credentialsSettled"] = true;
+        }
+      }
       if (committed_cleanup) return result;
       confined(notebooks, "nb-" + id);
       require(present(destination) && identity(destination).matches(source_identity), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
@@ -883,10 +928,17 @@ struct Store {
     const auto actual = source_exists ? staged : destination;
     require(identity(actual).matches(source_identity), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
     result["phase"] = source_exists ? "staged" : "published";
+    if (request.contains("origin")) {
+      const auto receipt = clone_permit(transaction, actual, cancel);
+      require(!receipt.is_null(), VXCORE_ERR_INVALID_STATE);
+      result["cloneComplete"] = true; result["cloneReceipt"] = receipt;
+      result["endpoint"] = receipt.at("endpoint"); result["autoSyncEnabled"] = receipt.at("autoSyncEnabled");
+    }
     if (verify) {
       const auto totals = inventory(transaction, actual, tree, text(result.at("inventoryHash"), 64), cancel, false);
       require(totals.bytes == number(result.at("bytes"), kTree) && totals.entries == number(result.at("entries"), kEntries), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
-      const auto inspected = inspect_metadata(actual, true, cancel, &totals);
+      const auto permit = clone_permit(transaction, actual, cancel);
+      const auto inspected = inspect_metadata(actual, true, cancel, &totals, false, permit.is_null() ? nullptr : &permit);
       require(inspected.notebook_id == result.at("notebookId") && inspected.notebook_name == result.at("notebookName"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
     }
     return result;
@@ -913,7 +965,8 @@ struct Store {
     const auto root = candidate(request);
     const auto totals = inventory(transaction, root, text(request.at("treeRelative")), text(request.at("inventoryHash")), cancel, false);
     require(totals.bytes == number(current.at("bytes"), kTree) && totals.entries == number(current.at("entries"), kEntries), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
-    const auto result = inspect_metadata(root, true, cancel, &totals);
+    const auto permit = clone_permit(transaction, root, cancel);
+    const auto result = inspect_metadata(root, true, cancel, &totals, false, permit.is_null() ? nullptr : &permit);
     return {{"notebookId", result.notebook_id}, {"notebookName", result.notebook_name}, {"nodeIds", result.node_ids}};
   }
   Json publish(const Json &request) const {
@@ -956,9 +1009,15 @@ struct Store {
   Json write_marker(const Json &request) const {
     owned();
     const auto name = text(request.at("marker"));
-    const auto &value = request.at("data");
+    auto value = request.at("data");
     const auto kind = text(value.at("kind"));
     require(kind == "zip" || kind == "folder");
+    if (name == "prepared" && marker("request").value("origin", "") == "webdavClone") {
+      const auto permit = clone_permit(transaction, candidate(value), cancel);
+      require(!permit.is_null(), VXCORE_ERR_INVALID_STATE);
+      value["cloneReceiptIdentity"] = identity(transaction / "clone-complete.json").journal();
+      value["cloneReceiptHash"] = clone_receipt_hash(transaction);
+    }
     validate_marker(name, value, kind);
     if (name != "request") {
       auto previous = state(false);
@@ -968,6 +1027,8 @@ struct Store {
         const auto root = candidate(value);
         const auto totals = inventory(transaction, root, text(value.at("treeRelative")), text(value.at("inventoryHash")), cancel, false);
         require(totals.bytes == number(value.at("bytes"), kTree) && totals.entries == number(value.at("entries"), kEntries), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+        const auto permit = clone_permit(transaction, root, cancel);
+        if (!permit.is_null()) inspect_metadata(root, true, cancel, &totals, false, &permit);
       }
     } else if (!present(transaction / "request.json")) {
       for (const auto &entry : fs::directory_iterator(transaction)) require(entry.path().filename() == "request.json.tmp", VXCORE_ERR_INVALID_STATE);
@@ -1002,6 +1063,8 @@ struct Store {
   }
   Json discard(bool allow_published) const {
     auto current = state(false, true);
+    if (current.at("phase") == "committed" && current.value("origin", "") == "webdavClone")
+      require(current.at("credentialsSettled") == true, VXCORE_ERR_INVALID_STATE);
     if (current.at("phase") == "published") {
       require(allow_published, VXCORE_ERR_INVALID_STATE);
       const auto publication = marker("publication", text(current.at("kind")));
@@ -1133,9 +1196,152 @@ Json snapshot_tree(const fs::path &root, const VxmImportCancel *cancel,
   if (copy_to) directory_flush(*copy_to);
   return {{"bytes", bytes}, {"entries", paths.size()}, {"sha256", digest.finish()}};
 }
+Json sync_storage(const fs::path &root, const std::string &notebook) {
+  char *raw = nullptr;
+  const auto code = vxcore_sync_inspect_storage(root.u8string().c_str(), notebook.c_str(), &raw);
+  struct Release { char *value; ~Release() { vxcore_string_free(value); } } release{raw};
+  require(code == VXCORE_OK, code);
+  require(raw != nullptr, VXCORE_ERR_JSON_PARSE);
+  size_t size = 0; while (size <= kResponse && raw[size]) ++size;
+  require(size <= kResponse, VXCORE_ERR_UNSUPPORTED);
+  return parse(std::string_view(raw, size), kResponse);
+}
+Json clone_tree_identity(const fs::path &root, const VxmImportCancel *cancel) {
+  std::map<std::string, Json> rows;
+  for (const auto &entry : fs::recursive_directory_iterator(root)) {
+    cancelled(cancel);
+    const auto path = entry.path().lexically_relative(root).generic_u8string();
+    relative(path); confined(root, path);
+    require(rows.size() < kEntries, VXCORE_ERR_UNSUPPORTED);
+    rows.emplace(path, identity(entry.path()).journal());
+  }
+  Hash hash;
+  for (const auto &row : rows) {
+    const auto encoded = Json{{"path", row.first}, {"identity", row.second}}.dump() + "\n";
+    hash.add(reinterpret_cast<const uint8_t *>(encoded.data()), encoded.size());
+  }
+  return hash.finish();
+}
+std::string clone_receipt_hash(const fs::path &transaction) {
+  const auto path = transaction / "clone-complete.json";
+  return hash_file(path, identity(path).size, nullptr, false, kRequest);
+}
+Json clone_receipt(const fs::path &transaction) {
+  const auto request = read_json(transaction / "request.json");
+  if (!request.contains("origin")) return nullptr;
+  keys(request, {"version", "id", "kind", "origin", "operationId"});
+  require(request.at("version") == 1 && request.at("kind") == "folder" && request.at("origin") == "webdavClone" &&
+      request.at("id") == transaction.filename().u8string() && vxm_sync::Uuid(text(request.at("operationId"))), VXCORE_ERR_INVALID_STATE);
+  const auto receipt = read_json(transaction / "clone-complete.json");
+  keys(receipt, {"version", "origin", "importId", "operationId", "notebookId", "endpoint", "accountHash", "baselineHash", "treeHash",
+      "wrapperIdentity", "treeIdentity", "entriesIdentity", "autoSyncEnabled"});
+  require(receipt.at("version") == 1 && receipt.at("origin") == "webdavClone" &&
+      receipt.at("importId") == request.at("id") && receipt.at("operationId") == request.at("operationId") &&
+      receipt.at("autoSyncEnabled").is_boolean() && identity(transaction).matches(receipt.at("wrapperIdentity")),
+      VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  for (const auto *key : {"accountHash", "baselineHash", "treeHash", "entriesIdentity"})
+    require(hex(text(receipt.at(key), 64), 64), VXCORE_ERR_JSON_PARSE);
+  text(receipt.at("notebookId"), 127); text(receipt.at("endpoint"), 8192);
+  if (present(transaction / "prepared.json")) {
+    const auto prepared = read_json(transaction / "prepared.json");
+    require(prepared.contains("cloneReceiptIdentity") && prepared.contains("cloneReceiptHash") &&
+        // The sibling receipt is a regular file, unlike journaled source roots.
+        identity(transaction / "clone-complete.json").matches(prepared.at("cloneReceiptIdentity"), false) &&
+        clone_receipt_hash(transaction) == prepared.at("cloneReceiptHash"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  }
+  return receipt;
+}
+Json clone_permit(const fs::path &transaction, const fs::path &root, const VxmImportCancel *cancel) {
+  const auto receipt = clone_receipt(transaction);
+  if (receipt.is_null()) return nullptr;
+  require(identity(root).matches(receipt.at("treeIdentity")), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  const auto facts = sync_storage(root, text(receipt.at("notebookId"), 127));
+  require(facts.at("cleanCloneBaseline") == true && facts.at("notebookId") == receipt.at("notebookId") &&
+      facts.at("remoteUrl") == receipt.at("endpoint") && facts.at("usernameHash") == receipt.at("accountHash") &&
+      facts.at("baselineSha256") == receipt.at("baselineHash"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  require(snapshot_tree(root, cancel).at("sha256") == receipt.at("treeHash") &&
+      clone_tree_identity(root, cancel) == receipt.at("entriesIdentity"), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  return receipt;
+}
+Json clone_committed_receipt(const fs::path &transaction, const Json &publication) {
+  const auto receipt = clone_receipt(transaction);
+  require(!receipt.is_null(), VXCORE_ERR_INVALID_STATE);
+  const auto prepared = read_json(transaction / "prepared.json");
+  require(prepared.at("id") == receipt.at("importId") && prepared.at("treeRelative") == "unpacked" &&
+      prepared.at("inventoryHash") == receipt.at("treeHash") && publication.at("inventoryHash") == prepared.at("inventoryHash") &&
+      publication.at("notebookId") == receipt.at("notebookId") && publication.at("sourceIdentity") == receipt.at("treeIdentity") &&
+      read_json(transaction / "committed.json") == publication, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+  return receipt;
+}
+Json clone_settlement(const fs::path &transaction, const Json &receipt, const Json &publication) {
+  return {{"version", 1}, {"origin", "webdavClone"}, {"importId", receipt.at("importId")},
+      {"operationId", receipt.at("operationId")}, {"notebookId", receipt.at("notebookId")},
+      {"endpoint", receipt.at("endpoint")}, {"accountHash", receipt.at("accountHash")},
+      {"baselineHash", receipt.at("baselineHash")}, {"treeHash", receipt.at("treeHash")},
+      {"autoSyncEnabled", receipt.at("autoSyncEnabled")}, {"publication", publication},
+      {"cloneReceiptHash", clone_receipt_hash(transaction)}};
+}
+Json finish_clone_credentials(Store &store, const std::string &operation) {
+  const auto current = store.state();
+  require(current.at("phase") == "committed" && current.value("origin", "") == "webdavClone" &&
+      current.at("operationId") == operation, VXCORE_ERR_INVALID_STATE);
+  const auto publication = store.marker("publication", "folder");
+  const auto receipt = clone_committed_receipt(store.transaction, publication);
+  durable_json(store.transaction, "clone-credentials-settled.json", clone_settlement(store.transaction, receipt, publication));
+  return store.state();
+}
+Json prepare_clone(Store &store, const std::string &operation) {
+  store.owned();
+  const auto root = store.transaction / "unpacked";
+  const auto receipt = clone_permit(store.transaction, root, store.cancel);
+  require(!receipt.is_null() && receipt.at("operationId") == operation, VXCORE_ERR_INVALID_STATE);
+  auto state = store.state(false);
+  if (state.at("prepared") == true) return state;
+  require(state.at("phase") == "staged", VXCORE_ERR_INVALID_STATE);
+  std::map<std::string, bool> paths;
+  for (const auto &entry : fs::recursive_directory_iterator(root)) {
+    const auto path = entry.path().lexically_relative(root).generic_u8string();
+    relative(path); confined(root, path); require(paths.size() < kEntries, VXCORE_ERR_UNSUPPORTED);
+    paths.emplace(path, identity(entry.path()).directory);
+  }
+  const auto temporary = store.transaction / "inventory.jsonl.tmp";
+  if (present(temporary)) Store::remove_private(temporary);
+  uint64_t bytes = 0; std::string digest;
+  {
+  File output(temporary, true); Hash hash;
+  for (const auto &entry : paths) {
+    cancelled(store.cancel);
+    Json row{{"path", entry.first}, {"type", entry.second ? "directory" : "file"}, {"size", 0}, {"sha256", ""}};
+    if (!entry.second) {
+      const auto item = snapshot_file(root / fs::u8path(entry.first), kFile, store.cancel);
+      row["size"] = item.at("bytes"); row["sha256"] = item.at("sha256");
+      const auto size = number(item.at("bytes"), kFile); require(size <= kTree - bytes, VXCORE_ERR_UNSUPPORTED); bytes += size;
+    }
+    const auto encoded = row.dump() + "\n"; output.write(encoded);
+    hash.add(reinterpret_cast<const uint8_t *>(encoded.data()), encoded.size());
+  }
+  output.flush();
+  digest = hash.finish();
+  } // Close before rename on Windows as well as POSIX.
+  if (present(store.transaction / "inventory.jsonl")) {
+    require(hash_file(store.transaction / "inventory.jsonl", identity(store.transaction / "inventory.jsonl").size,
+        store.cancel, false, uint64_t(kEntries) * kLine) == digest, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    Store::remove_private(temporary);
+  } else rename_new(temporary, store.transaction / "inventory.jsonl");
+  const auto totals = inventory(store.transaction, root, "unpacked", digest, store.cancel, true);
+  const auto verified = clone_permit(store.transaction, root, store.cancel);
+  inspect_metadata(root, true, store.cancel, &totals, false, &verified);
+  durable_json(store.transaction, "captured.json", {{"version", 1}, {"id", store.id}, {"kind", "folder"},
+      {"sourceName", "WebDAV notebook"}, {"bytes", bytes}, {"entries", paths.size()}});
+  durable_json(store.transaction, "prepared.json", {{"version", 1}, {"id", store.id}, {"kind", "folder"},
+      {"treeRelative", "unpacked"}, {"inventoryHash", digest}, {"bytes", bytes}, {"entries", paths.size()},
+      {"cloneReceiptIdentity", identity(store.transaction / "clone-complete.json").journal()},
+      {"cloneReceiptHash", clone_receipt_hash(store.transaction)}});
+  return store.state();
+}
+constexpr uint64_t kStagingHeadroom = 64ULL * 1024 * 1024;
 Json quota(const fs::path &base, uint64_t required, const VxmImportCancel *cancel) {
   constexpr uint64_t maximum = 4ULL * 1024 * 1024 * 1024;
-  constexpr uint64_t headroom = 64ULL * 1024 * 1024;
   absolute(base.u8string());
   uint64_t bytes = 0;
   size_t entries = 0;
@@ -1218,7 +1424,7 @@ Json quota(const fs::path &base, uint64_t required, const VxmImportCancel *cance
   }
   require(required <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
   const auto available = fs::space(base).available;
-  require(required <= UINT64_MAX - headroom && available >= required + headroom, VXCORE_ERR_IO);
+  require(required <= UINT64_MAX - kStagingHeadroom && available >= required + kStagingHeadroom, VXCORE_ERR_IO);
   return {{"availableBytes", available}, {"stagedBytes", bytes}, {"remainingBytes", maximum - bytes}};
 }
 Json check_space(const Store &store, uint64_t required) {
@@ -1725,7 +1931,8 @@ Json run(const Json &request, VxmImportCancel *cancel) {
   const auto op = text(request.at("op"));
   const std::set<std::string> base{"op", "importsRoot", "notebooksRoot", "id"};
   std::set<std::string> allowed = base;
-  if (op == "inspect") allowed.insert({"treeRelative", "inventoryHash"});
+  if (op == "inspectClone" || op == "prepareClone" || op == "finishCloneCredentials") allowed.insert("operationId");
+  else if (op == "inspect") allowed.insert({"treeRelative", "inventoryHash"});
   else if (op == "inspectManaged") allowed.insert({"location", "expectedNotebookId"});
   else if (op == "publish") allowed.insert({"treeRelative", "inventoryHash", "notebookId", "notebookName"});
   else if (op == "writeMarker") allowed.insert({"marker", "data"});
@@ -1737,6 +1944,16 @@ Json run(const Json &request, VxmImportCancel *cancel) {
   if (op == "commit") return store.commit();
   cancelled(cancel);
   if (op == "checkSpace") return check_space(store, number(request.at("requiredBytes"), 4ULL * 1024 * 1024 * 1024));
+  if (op == "prepareClone") return prepare_clone(store, text(request.at("operationId")));
+  if (op == "finishCloneCredentials") return finish_clone_credentials(store, text(request.at("operationId")));
+  if (op == "inspectClone") {
+    store.owned();
+    const auto state = store.state(false);
+    const auto root = state.at("phase") == "staged" ? store.transaction / "unpacked" : store.notebooks / ("nb-" + store.id);
+    const auto receipt = state.at("phase") == "committed" ? state.at("cloneReceipt") : clone_permit(store.transaction, root, cancel);
+    require(!receipt.is_null() && receipt.at("operationId") == request.at("operationId"), VXCORE_ERR_INVALID_STATE);
+    return receipt;
+  }
   if (op == "inspectManaged") {
     const auto root = absolute(text(request.at("location")));
     require(root.parent_path() == store.notebooks);
@@ -1763,6 +1980,92 @@ int32_t import_exception_code() noexcept {
 }  // namespace
 
 namespace vxm_import {
+int32_t PreflightClone(const std::string &transaction_root, Json &options) noexcept {
+  try {
+    const auto root = storage::Absolute(transaction_root);
+    Store store({{"importsRoot", root.parent_path().u8string()},
+        {"notebooksRoot", (root.parent_path().parent_path() / "notebooks").u8string()},
+        {"id", root.filename().u8string()}}, nullptr);
+    store.owned(); const auto request = store.marker("request");
+    store.validate_marker("request", request, "folder");
+    require(request.value("origin", "") == "webdavClone", VXCORE_ERR_INVALID_STATE);
+    for (const auto &entry : fs::directory_iterator(root)) require(entry.path().filename() == "request.json", VXCORE_ERR_INVALID_STATE);
+    require(fs::create_directory(root / "unpacked") && fs::create_directory(root / "runtime") &&
+        fs::create_directory(root / "runtime/app") && fs::create_directory(root / "runtime/local"), VXCORE_ERR_IO);
+    durable_json(root, "clone-started.json", {{"version", 1}, {"request", request},
+        {"wrapperIdentity", identity(root).journal()}, {"treeIdentity", identity(root / "unpacked").journal()}});
+    options = {{"notebookPath", (root / "unpacked").u8string()}, {"appDataPath", (root / "runtime/app").u8string()},
+        {"localDataPath", (root / "runtime/local").u8string()}};
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+int32_t CheckClone(const std::string &transaction_root, const std::string &operation_id, uint64_t &budget) noexcept {
+  try {
+    const auto root = storage::Absolute(transaction_root);
+    Store store({{"importsRoot", root.parent_path().u8string()},
+        {"notebooksRoot", (root.parent_path().parent_path() / "notebooks").u8string()},
+        {"id", root.filename().u8string()}}, nullptr);
+    store.owned();
+    const auto request = store.marker("request");
+    store.validate_marker("request", request, "folder");
+    const auto started = read_json(root / "clone-started.json");
+    require(request.value("origin", "") == "webdavClone" && request.at("operationId") == operation_id &&
+        started.at("request") == request && identity(root).matches(started.at("wrapperIdentity")) &&
+        identity(root / "unpacked").matches(started.at("treeIdentity")) && fs::is_empty(root / "unpacked"), VXCORE_ERR_INVALID_STATE);
+    // The earlier UI snapshot is an upper bound, not an exact reservation:
+    // creating this private context has already consumed quota and disk blocks.
+    const auto space = check_space(store, 0);
+    budget = std::min({budget, space.at("remainingBytes").get<uint64_t>(),
+        space.at("availableBytes").get<uint64_t>() - kStagingHeadroom});
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+int32_t SealClone(const std::string &transaction_root, const std::string &operation_id,
+                  const std::string &notebook_id, bool auto_sync_enabled) noexcept {
+  try {
+    const auto root = storage::Absolute(transaction_root);
+    const auto started = read_json(root / "clone-started.json");
+    const auto request = read_json(root / "request.json");
+    require(started.at("request") == request && request.at("operationId") == operation_id &&
+        request.at("origin") == "webdavClone" && identity(root).matches(started.at("wrapperIdentity")) &&
+        identity(root / "unpacked").matches(started.at("treeIdentity")), VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    const auto tree = root / "unpacked";
+    const auto facts = sync_storage(tree, notebook_id);
+    require(facts.at("cleanCloneBaseline") == true, VXCORE_ERR_INVALID_STATE);
+    Json receipt{{"version", 1}, {"origin", "webdavClone"}, {"importId", root.filename().u8string()},
+        {"operationId", operation_id}, {"notebookId", notebook_id}, {"endpoint", facts.at("remoteUrl")}, {"autoSyncEnabled", auto_sync_enabled},
+        {"accountHash", facts.at("usernameHash")}, {"baselineHash", facts.at("baselineSha256")},
+        {"treeHash", snapshot_tree(tree, nullptr).at("sha256")}, {"wrapperIdentity", identity(root).journal()},
+        {"treeIdentity", identity(tree).journal()}, {"entriesIdentity", clone_tree_identity(tree, nullptr)}};
+    inspect_metadata(tree, true, nullptr, nullptr, false, &receipt);
+    durable_json(root, "clone-complete.json", receipt);
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+int32_t CommittedCloneConfiguration(const std::string &notebook_root, const std::string &notebook_id,
+                                    const std::string &import_id, const std::string &operation_id,
+                                    Json &configuration) noexcept {
+  try {
+    const auto root = storage::Absolute(notebook_root);
+    require(hex(import_id, 32) && root.filename() == "nb-" + import_id &&
+        root.parent_path().filename() == "notebooks", VXCORE_ERR_INVALID_STATE);
+    Store store({{"importsRoot", (root.parent_path().parent_path() / "imports").u8string()},
+        {"notebooksRoot", root.parent_path().u8string()}, {"id", import_id}}, nullptr);
+    // Reuse the native journal, receipt hash and wrapper/destination identity
+    // checks; a clean baseline alone cannot authorize routing.
+    const auto current = store.state();
+    require(current.at("phase") == "committed" && current.value("origin", "") == "webdavClone" &&
+        current.at("id") == import_id && current.at("operationId") == operation_id &&
+        current.at("notebookId") == notebook_id && current.at("credentialsSettled") == false,
+        VXCORE_ERR_INVALID_STATE);
+    const auto &receipt = current.at("cloneReceipt");
+    require(receipt.at("importId") == import_id && receipt.at("operationId") == operation_id &&
+        receipt.at("notebookId") == notebook_id, VXCORE_ERR_FILE_CHANGED_OUTSIDE);
+    configuration = {{"enabled", true}, {"endpoint", receipt.at("endpoint")},
+        {"autoSyncEnabled", receipt.at("autoSyncEnabled")}};
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
 int32_t inspect_managed(const fs::path &root, const std::string &expected_id, Inspection &out) noexcept {
   try {
     auto result = inspect_metadata(root, false, nullptr);

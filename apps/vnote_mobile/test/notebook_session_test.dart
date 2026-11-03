@@ -8,6 +8,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:vnote_mobile/services/editor_drafts.dart';
 import 'package:vnote_mobile/services/editor_session.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
+import 'package:vnote_mobile/services/notebook_sync.dart';
 import 'package:vnote_mobile/features/resources/resource_panel.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
@@ -133,6 +134,16 @@ class ControlledCore implements NotebookCore {
   @override
   String get nativeNotices => 'Native license fixture';
   @override
+  Future<CoreSyncFacts> inspectSync() async => CoreSyncFacts(notebookId: nextRead.notebookId, autoSyncEnabled: false);
+  @override
+  Future<CoreSyncResult> sync(CoreSyncCommand command, {CoreSyncCredentials? credentials}) async {
+    if (command.action != CoreSyncAction.unregister) throw StateError('This offline fixture has no sync backend.');
+    return CoreSyncResult(operationId: command.operationId, action: command.action, code: 0, executed: true);
+  }
+  @override
+  void cancelSync(String operationId) {}
+
+  @override
   Future<CoreNote> read() async { reads++; if (readError != null) throw readError!; return nextRead; }
   @override
   Future<CoreWriteResult> write(String text, {required int revision, required String baseHash}) =>
@@ -159,7 +170,13 @@ class ControlledCore implements NotebookCore {
   Future<CoreDraftInspection> reconcileDraft({required String draftsRoot,
     required String documentKey, required String token}) async {
     if (reconciliationError != null) throw reconciliationError!;
-    final record = _stores[draftsRoot]!.records[token]!;
+    final store = _stores[draftsRoot]!;
+    final record = store.records[token]!;
+    if (record['revision'] == 0 && record['savedRevision'] == null && record['candidateId'] == null &&
+        store.sources[token] == nextRead.text) {
+      record.addAll({'savedRevision': 0, 'savedSourceHash': record['sourceHash'],
+        'savedDiskHash': nextRead.baseHash, 'status': 'saved'});
+    }
     return CoreDraftInspection.fromJson({...record,
       'outcome': record['savedRevision'] == null ? 'base' : 'saved',
       'canRetry': record['candidateId'] != null,
@@ -409,6 +426,132 @@ void main() {
     expect(await session.close(NotebookDisposition.cancel, (_) => fail('No barrier')), isFalse);
     expect(core.closes, 0); expect(session.value.dirty, isTrue);
   });
+  SyncReservationRequest reservation(int number, SyncReservationKind kind) => SyncReservationRequest(
+    operationId: '12345678-0000-4000-8000-${number.toString().padLeft(12, '0')}',
+    ownerGeneration: 1, kind: kind);
+
+  test('stage drains admitted writes but does not force a queued dirty save', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    void send(Map<String, Object?> value) => answer(editor, value);
+    session.bindTransport(send); session.setForeground(false);
+    insert(editor, 'staged later');
+    final held = session.installSyncReservation(reservation(1, SyncReservationKind.stage));
+    final saving = session.write(send);
+    await held.drainWriters(); await turn();
+    expect(core.writes, isEmpty);
+    expect(editor.value.text, '${note().text}staged later');
+    expect((await held.settle(null)).safe, isTrue);
+    await turn();
+    expect(core.writes.single.text, '${note().text}staged later');
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    expect(await saving, isTrue);
+    expect(session.value.onDiskRevision, 1);
+  });
+
+  test('apply classifies the newer durable prefix after an older writer drains', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    void send(Map<String, Object?> value) => answer(editor, value);
+    session.bindTransport(send); session.setForeground(false);
+    insert(editor, 'one'); final saving = session.write(send); await turn();
+    final held = session.installSyncReservation(reservation(2, SyncReservationKind.apply));
+    final draining = held.drainWriters();
+    insert(editor, 'two');
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    await saving; await draining;
+    final protection = await held.quiesceAndDrainDrafts();
+    expect(protection.dirtyNodeIds, [note().nodeId]);
+    expect(session.value.draftRevision, 2);
+    expect(session.value.onDiskRevision, 1);
+    expect(editor.value.quiesced, isTrue);
+    expect((await held.settle(SyncRefreshReport(metadataRefreshed: true,
+      operationSucceeded: true, changedPaths: const ['Other.md']))).safe, isTrue);
+    expect(session.value.editor, same(editor));
+    expect(editor.value.text, '${note().text}onetwo');
+    expect(editor.value.quiesced, isFalse);
+    expect(core.writes, hasLength(1));
+  });
+
+  test('a clean affected source installs current disk in a fresh saved epoch', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    session.bindTransport((value) => answer(editor, value)); session.setForeground(false);
+    final held = session.installSyncReservation(reservation(3, SyncReservationKind.apply));
+    expect((await held.quiesceAndDrainDrafts()).dirtyNodeIds, isEmpty);
+    core.nextRead = note(text: 'remote\n', hash: secondHash);
+    final result = await held.settle(SyncRefreshReport(metadataRefreshed: true,
+      operationSucceeded: true, changedPaths: [note().path]));
+    expect(result.safe, isTrue);
+    expect(session.value.editor!.generation, isNot(editor.generation));
+    expect(session.value.editor!.value.text, 'remote\n');
+    expect(session.value.onDiskRevision, 0);
+    expect(session.value.dirty, isFalse);
+    expect(core.writes, isEmpty);
+  });
+
+  test('missing changed paths retains clean source and recovery joins the new token', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    session.bindTransport((value) => answer(editor, value)); session.setForeground(false);
+    final first = session.installSyncReservation(reservation(4, SyncReservationKind.apply));
+    await first.quiesceAndDrainDrafts();
+    final result = await first.settle(SyncRefreshReport(metadataRefreshed: true,
+      operationSucceeded: false, changedPaths: null));
+    expect(result.recoveryRequired, isTrue);
+    expect(session.value.syncRecoveryRequired, isTrue);
+    expect(editor.value.quiesced, isTrue);
+    expect(core.reads, 1);
+    final recovery = session.installSyncReservation(reservation(5, SyncReservationKind.lifecycle));
+    await recovery.quiesceAndDrainDrafts();
+    core.nextRead = note(text: 'verified remote', hash: secondHash);
+    expect(await session.recoverSyncSources(), isTrue);
+    expect(session.value.syncReserved, isTrue);
+    expect(session.value.editor!.value.text, 'verified remote');
+    expect((await recovery.settle(null)).safe, isTrue);
+    expect(session.value.syncReserved, isFalse);
+    expect(session.value.syncRecoveryRequired, isFalse);
+  });
+
+  test('a retired abort cannot unfreeze a successor source reservation', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    session.bindTransport((value) => answer(editor, value)); session.setForeground(false);
+    final old = session.installSyncReservation(reservation(6, SyncReservationKind.apply));
+    await old.quiesceAndDrainDrafts();
+    await old.settle(SyncRefreshReport(metadataRefreshed: true,
+      operationSucceeded: true, changedPaths: const []));
+    final current = session.installSyncReservation(reservation(7, SyncReservationKind.apply));
+    await current.quiesceAndDrainDrafts();
+    expect(await old.abort(), isTrue);
+    expect(editor.value.quiesced, isTrue);
+    expect(session.value.syncReserved, isTrue);
+    expect(await current.abort(), isTrue);
+    expect(editor.value.quiesced, isFalse);
+    expect(session.value.syncReserved, isFalse);
+    expect(editor.value.text, note().text);
+  });
+
+  test('Keep draft after unavailable sync refresh preserves a visible unsaved capture', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    void send(Map<String, Object?> value) => answer(editor, value);
+    session.bindTransport(send); session.setForeground(false);
+    final held = session.installSyncReservation(reservation(8, SyncReservationKind.apply));
+    await held.quiesceAndDrainDrafts();
+    core.nextRead = note(text: 'different remote', hash: secondHash);
+    await held.settle(SyncRefreshReport(metadataRefreshed: false,
+      operationSucceeded: false, changedPaths: null));
+    expect(await session.close(NotebookDisposition.retain, send), isTrue);
+    await session.drafts.scan();
+    final entry = session.drafts.value.entries.where((entry) => !entry.resolved).single;
+    expect(entry.token, isNot(editor.generation));
+    expect(entry.record['savedRevision'], isNull);
+    expect((await session.drafts.readSource(entry))['source'], note().text);
+    expect(core.nextRead.text, 'different remote');
+    expect(core.writes, isEmpty);
+  });
+
   test('resource links remain escaped and confined', () {
     expect(resourceMarkdownLink(name: '[x]', relativeUrl: 'files/a%20(b).bin'),
       r'[\[x\]](files/a%2520%28b%29.bin)');

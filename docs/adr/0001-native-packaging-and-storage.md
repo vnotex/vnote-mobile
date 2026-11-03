@@ -1,6 +1,6 @@
 # ADR 0001: Native packaging and persistent core roots
 
-Status: native build hook and explicit-root ABI implemented; Android arm64/x86_64 builds and x86_64 device-surface checks are recorded in verification. iOS, physical-device and TLS trust gates remain open; this does not complete Phase 1.
+Status: native build hook and explicit-root ABI implemented; Android arm64/x86_64 builds and x86_64 device-surface checks are recorded in verification. Android platform-trust fixture checks are recorded separately; iOS, physical-device and release trust-store gates remain open, so this does not complete Phase 1.
 
 ## Evidence and dependency audit
 
@@ -34,9 +34,9 @@ Requested target set: Android arm64-v8a device plus x86_64 emulator; iOS arm64 d
 
 ### Transport gates
 
-Android enters `UNIX AND NOT APPLE`: top-level `find_package(OpenSSL REQUIRED)`, libgit2 `USE_HTTPS=OpenSSL`, curl `CURL_USE_OPENSSL=ON`. OpenSSL 3.5.9 is source-built with the pinned NDK for both selected ABIs and supplied through target-only CMake paths. TLS trust-store integration and hostname/certificate rejection still require device verification. NDK presence does not supply OpenSSL. Curl uses HTTP-only protocol selection with TLS, threaded resolver, basic/digest auth; no automatic plaintext downgrade or certificate bypass is allowed.
+Android enters `UNIX AND NOT APPLE`: top-level `find_package(OpenSSL REQUIRED)`, libgit2 `USE_HTTPS=OpenSSL`, curl `CURL_USE_OPENSSL=ON`. OpenSSL 3.5.9 is source-built with the pinned NDK for both selected ABIs and supplied through target-only CMake paths. The native runtime verifier delegates to the platform trust manager while retaining peer/hostname checks; actual certificate/hostname device evidence is recorded separately in verification. NDK presence does not supply OpenSSL. Curl uses HTTP-only protocol selection with TLS, threaded resolver, basic/digest auth; no automatic plaintext downgrade or certificate bypass is allowed.
 
-The desktop Apple branch retains SDK libcurl/SecureTransport. The iOS branch now selects bundled curl and the pinned OpenSSL cross-build instead of assuming iPhoneOS supplies libcurl. Verify iPhoneOS and simulator SDK headers, symbols, availability and permitted linkage separately. Missing iOS SDK libcurl is a stop gate: upstream an explicit pinned iOS curl/TLS build option using the same WebDAV implementation before proceeding; do not substitute a Dart uploader or silently link a macOS library. Verify Iconv, filesystem/process compilation and unused external-rg code as well. No mobile support is claimed from these branches.
+The desktop Apple branch retains SDK libcurl/SecureTransport. The iOS branch now selects bundled curl and the pinned OpenSSL cross-build instead of assuming iPhoneOS supplies libcurl. Verify iPhoneOS and simulator SDK headers, symbols, availability and permitted linkage separately. The source-build option retains the same WebDAV implementation and SecTrust adapter; missing target SDK/build prerequisites remain a stop gate, never permission to substitute a Dart uploader or macOS library. Verify Iconv, filesystem/process compilation and unused external-rg code as well. No mobile support is claimed from these branches.
 
 ## Persistent roots decision
 
