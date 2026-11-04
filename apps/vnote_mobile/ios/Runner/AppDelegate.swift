@@ -24,11 +24,14 @@ import UniformTypeIdentifiers
     if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "SyncPlatformPlugin") {
       SyncPlatformPlugin.register(with: registrar)
     }
+    if let registrar = engineBridge.pluginRegistry.registrar(forPlugin: "ShareInboxPlugin") {
+      ShareInboxPlugin.register(with: registrar)
+    }
   }
 }
 
 /// Owns transfer leases only; provider URLs never become notebook storage.
-private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
+final class DocumentTransferPlugin: NSObject, FlutterPlugin,
   FlutterSceneLifeCycleDelegate, UIDocumentPickerDelegate, UIAdaptivePresentationControllerDelegate
 {
   private enum ExportError: Error { case unavailable }
@@ -759,7 +762,7 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     else { throw ImportError.unavailable }
   }
 
-  private func prepareStorage() throws -> URL {
+  func prepareStorage() throws -> URL {
     let manager = FileManager.default
     guard let libraryURL = manager.urls(for: .libraryDirectory, in: .userDomainMask).first,
           let supportURL = manager.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
@@ -773,6 +776,13 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
           supportURL.deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL.path
             == library.path else { throw ExportError.unavailable }
     try prepareExcludedDirectory(root)
+    // path_provider may have created this existing directory with its default
+    // mode. The shared native inbox/quota ABI requires private ownership even
+    // when upgrading an existing installation; never replace the directory.
+    try manager.setAttributes([.posixPermissions: 0o700], ofItemAtPath: root.path)
+    let ownership = try requireDirectory(root)
+    guard ownership.st_uid == geteuid(), ownership.st_mode & 0o777 == 0o700
+    else { throw ExportError.unavailable }
     for name in ["core", "notebooks", "exports", "imports", "cohorts", "resources"] {
       try prepareExcludedDirectory(root.appendingPathComponent(name, isDirectory: true))
     }
@@ -845,7 +855,7 @@ private final class DocumentTransferPlugin: NSObject, FlutterPlugin,
     else { throw ExportError.unavailable }
   }
 
-  private func openSource(root: URL, id: String, scope: String, name: String, path: String) throws -> (URL, Int32) {
+  func openSource(root: URL, id: String, scope: String, name: String, path: String) throws -> (URL, Int32) {
     guard path.utf8.count <= 16384, !path.utf8.contains(0), scope == "notebook" || scope == "resource"
     else { throw ExportError.unavailable }
     try requireDirectory(root)

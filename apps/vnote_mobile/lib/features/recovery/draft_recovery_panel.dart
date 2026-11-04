@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import 'package:flutter/material.dart';
 
+import '../../l10n/app_strings.dart';
 import '../../services/editor_drafts.dart';
 import '../../services/notebook_library.dart';
 
@@ -12,26 +13,30 @@ class DraftRecoveryPanel extends StatelessWidget {
 
   Future<bool> _confirm(BuildContext context, String title, String detail,
       String action) async => await showDialog<bool>(context: context,
-    builder: (context) => AlertDialog(title: Text(title), content: Text(detail),
+    builder: (context) => AlertDialog(scrollable: true, title: Text(title), content: Text(AppStrings.of(context).message(detail)),
       actions: [TextButton(onPressed: () => Navigator.pop(context, false),
-        child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(action))])) ?? false;
+        child: Text(AppStrings.of(context).text('Cancel'))),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(AppStrings.of(context).text(action)))])) ?? false;
+
+  static String _label(BuildContext context, DraftRecoveryEntry entry) =>
+      entry.descriptor?['pathHint'] as String? ??
+      AppStrings.of(context).text('Quarantined private draft');
 
   Future<void> _inspect(BuildContext context, DraftRecoveryEntry entry) async {
     final inspection = await library.inspectDraft(entry);
     if (!context.mounted || inspection == null) return;
     await showDialog<void>(context: context, builder: (context) =>
-      DefaultTabController(length: 3, child: AlertDialog(
-        title: Text(entry.label),
+      DefaultTabController(length: 3, child: AlertDialog(scrollable: true, 
+        title: Text(_label(context, entry)),
         content: SizedBox(width: 720, height: 480, child: Column(children: [
-          const TabBar(tabs: [Tab(text: 'Status'), Tab(text: 'Draft'), Tab(text: 'Base')]),
+          TabBar(tabs: [Tab(text: AppStrings.of(context).text('Status')), Tab(text: AppStrings.of(context).text('Draft')), Tab(text: AppStrings.of(context).text('Base'))]),
           Expanded(child: TabBarView(children: [
-            SingleChildScrollView(child: SelectableText(_status(inspection))),
-            _source(inspection.source, 'No valid source can be reconstructed. Export the raw journal archive.'),
-            _source(inspection.baseSource, 'The opening checkpoint is unavailable or quarantined.'),
+            SingleChildScrollView(child: SelectableText(_status(context, inspection))),
+            _source(inspection.source, AppStrings.of(context).text('No valid source can be reconstructed. Export the raw journal archive.')),
+            _source(inspection.baseSource, AppStrings.of(context).text('The opening checkpoint is unavailable or quarantined.')),
           ])),
         ])),
-        actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Close'))],
+        actions: [TextButton(onPressed: () => Navigator.pop(context), child: Text(AppStrings.of(context).text('Close')))],
       )));
   }
 
@@ -40,19 +45,19 @@ class DraftRecoveryPanel extends StatelessWidget {
     child: SelectableText(text ?? unavailable,
       style: text == null ? null : const TextStyle(fontFamily: 'monospace')));
 
-  static String _status(DraftRecoveryInspection value) => [
+  static String _status(BuildContext context, DraftRecoveryInspection value) => [
     switch (value.outcome) {
-      'saved' => 'The exact saved disk prefix was established. Any later acknowledged edits remain recoverable in the original source representation.',
-      'base' => 'The current disk matches the expected base. Restore opens the private source as a new, dirty capture; it does not overwrite disk.',
-      'conflict' => 'Current disk, identity, or policy differs. Disk and private source are preserved separately. Export or explicitly keep disk; automatic overwrite is forbidden.',
-      'quarantined' => 'Acknowledged journal data is invalid. No recovered text is fabricated. The owned raw archive remains exportable.',
-      _ => 'The current disk outcome cannot be established. Private recovery data is retained.',
+      'saved' => AppStrings.of(context).text('The exact saved disk prefix was established. Any later acknowledged edits remain recoverable in the original source representation.'),
+      'base' => AppStrings.of(context).text('The current disk matches the expected base. Restore opens the private source as a new, dirty capture; it does not overwrite disk.'),
+      'conflict' => AppStrings.of(context).text('Current disk, identity, or policy differs. Disk and private source are preserved separately. Export or explicitly keep disk; automatic overwrite is forbidden.'),
+      'quarantined' => AppStrings.of(context).text('Acknowledged journal data is invalid. No recovered text is fabricated. The owned raw archive remains exportable.'),
+      _ => AppStrings.of(context).text('The current disk outcome cannot be established. Private recovery data is retained.'),
     },
-    'Acknowledged draft revision: ${value.entry.revision}',
-    if (value.savedRevision != null) 'Established saved prefix: ${value.savedRevision}',
-    if (value.diskHash != null) 'Observed disk SHA-256: ${value.diskHash}',
-    if (value.error != null) value.error!,
-    'Unreceived or provisional input is outside the durability guarantee.',
+    AppStrings.of(context).text('Acknowledged draft revision: {revision}', {'revision': (value.entry.revision).toString()}),
+    if (value.savedRevision != null) AppStrings.of(context).text('Established saved prefix: {savedRevision}', {'savedRevision': (value.savedRevision).toString()}),
+    if (value.diskHash != null) AppStrings.of(context).text('Observed disk SHA-256: {diskHash}', {'diskHash': (value.diskHash).toString()}),
+    if (value.error != null) AppStrings.of(context).message(value.error!),
+    AppStrings.of(context).text('Unreceived or provisional input is outside the durability guarantee.'),
   ].join('\n\n');
 
   @override
@@ -65,35 +70,35 @@ class DraftRecoveryPanel extends StatelessWidget {
       final busy = state.busy || drafts.busy || state.workspace != null;
       return Card(child: Padding(padding: const EdgeInsets.all(16), child: Column(
         crossAxisAlignment: CrossAxisAlignment.start, children: [
-          Text('Private draft recovery', style: Theme.of(context).textTheme.titleLarge),
+          Text(AppStrings.of(context).text('Private draft recovery'), style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 8),
-          const Text('Only acknowledged durable prefixes are listed. Restoring opens a new capture without overwriting current disk. Unreceived or composing input may not survive a view or process loss.'),
+          Text(AppStrings.of(context).text('Only acknowledged durable prefixes are listed. Restoring opens a new capture without overwriting current disk. Unreceived or composing input may not survive a view or process loss.')),
           if (drafts.error != null) Padding(padding: const EdgeInsets.only(top: 8),
-            child: Semantics(liveRegion: true, child: Text(drafts.error!))),
+            child: Semantics(liveRegion: true, child: Text(AppStrings.of(context).message(drafts.error!)))),
           for (final entry in entries) Padding(padding: const EdgeInsets.only(top: 16),
             child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              Text(entry.label, style: Theme.of(context).textTheme.titleMedium),
-              Text(entry.quarantined ? 'Quarantined journal; raw export remains available.'
-                : 'Acknowledged revision ${entry.revision}; disk must be revalidated.'),
+              Text(_label(context, entry), style: Theme.of(context).textTheme.titleMedium),
+              Text(entry.quarantined ? AppStrings.of(context).text('Quarantined journal; raw export remains available.')
+                : AppStrings.of(context).text('Acknowledged revision {revision}; disk must be revalidated.', {'revision': (entry.revision).toString()})),
               Wrap(spacing: 8, runSpacing: 4, children: [
                 OutlinedButton(onPressed: busy ? null : () => _inspect(context, entry),
-                  child: const Text('Inspect base / draft / disk')),
+                  child: Text(AppStrings.of(context).text('Inspect base / draft / disk'))),
                 FilledButton(onPressed: busy || entry.quarantined ? null : () async {
-                  if (await _confirm(context, 'Restore private draft?',
-                    'Current disk will be checked again. Only a matching base or established saved prefix can be restored. Later acknowledged source opens as dirty until a new saved receipt is durable.', 'Restore')) {
+                  if (await _confirm(context, AppStrings.of(context).text('Restore private draft?'),
+                    AppStrings.of(context).text('Current disk will be checked again. Only a matching base or established saved prefix can be restored. Later acknowledged source opens as dirty until a new saved receipt is durable.'), AppStrings.of(context).text('Restore'))) {
                     await library.restoreDraft(entry);
                   }
-                }, child: const Text('Restore as new capture')),
+                }, child: Text(AppStrings.of(context).text('Restore as new capture'))),
                 OutlinedButton(onPressed: busy || state.transferReserved || entry.quarantined ? null
-                  : () => library.exportDraft(entry), child: const Text('Export draft text')),
+                  : () => library.exportDraft(entry), child: Text(AppStrings.of(context).text('Export draft text'))),
                 OutlinedButton(onPressed: busy || state.transferReserved ? null
-                  : () => library.exportDraft(entry, raw: true), child: const Text('Export raw journal')),
+                  : () => library.exportDraft(entry, raw: true), child: Text(AppStrings.of(context).text('Export raw journal'))),
                 TextButton(onPressed: busy ? null : () async {
-                  if (await _confirm(context, 'Keep disk and discard private draft?',
-                    'This permanently discards this private recovery capture. The current notebook file is unchanged. Export first if you need to keep private edits or evidence of corruption. An unfinished export may prevent discard.', 'Discard private draft')) {
+                  if (await _confirm(context, AppStrings.of(context).text('Keep disk and discard private draft?'),
+                    AppStrings.of(context).text('This permanently discards this private recovery capture. The current notebook file is unchanged. Export first if you need to keep private edits or evidence of corruption. An unfinished export may prevent discard.'), AppStrings.of(context).text('Discard private draft'))) {
                     await library.discardDraft(entry);
                   }
-                }, child: const Text('Keep disk / discard draft')),
+                }, child: Text(AppStrings.of(context).text('Keep disk / discard draft'))),
               ]),
             ])),
         ])));

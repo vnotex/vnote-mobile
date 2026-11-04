@@ -29,6 +29,9 @@ coverage/
 **/key.properties
 *.p12
 *.mobileprovision
+/apps/vnote_mobile/ios/Flutter/Owner.xcconfig
+/apps/vnote_mobile/ios/Flutter/Owner-App.entitlements
+/apps/vnote_mobile/ios/Flutter/Owner-Extension.entitlements
 
 # Platform-generated files are covered by the app's platform .gitignore files.
 # Commit dependency lockfiles; do not add a blanket *.lock rule.

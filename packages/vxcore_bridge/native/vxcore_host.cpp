@@ -173,7 +173,7 @@ void safe_tree(const fs::path &path, const std::atomic<bool> *cancelled = nullpt
 }
 
 constexpr uint64_t kExportSource = 1024ULL * 1024 * 1024;
-constexpr uint64_t kExportStaging = 4ULL * 1024 * 1024 * 1024 - 128 * 1024;
+constexpr uint64_t kExportStaging = vxm_import::kAdmissionBytes - 128 * 1024;
 constexpr uint64_t kExportHeadroom = 64ULL * 1024 * 1024;
 constexpr size_t kExportSummary = 1024;
 constexpr size_t kExportEntries = 100000;
@@ -1709,6 +1709,7 @@ struct VxmHost {
     }
   }
   void export_catalog(Request &request) {
+    std::lock_guard<std::recursive_mutex> admission(vxm_import::AdmissionMutex());
     require(mode == VXM_MODE_CATALOG, VXCORE_ERR_INVALID_STATE);
     check_read_cancelled();
     const auto source = fs::u8path(notebook_path);
@@ -1819,6 +1820,12 @@ struct VxmHost {
     check_sync(); // Required before omitting the exact reserved runtime tree.
     export_require(bytes + archive_limit <= request.staging_budget,
                    "Export snapshot and ZIP exceed the staging budget");
+    // Managed notebooks share the support-root ledger; standalone desktop
+    // catalogs use their staging parent. Hold the gate through the whole copy.
+    const auto support = source.parent_path().filename() == "notebooks" ?
+        source.parent_path().parent_path() : destination.parent_path();
+    const auto admission_code = vxm_import::CheckAdmission(support, bytes + archive_limit);
+    require(admission_code == VXCORE_OK, admission_code);
     std::array<uint8_t, kExportChunk> buffer;
     if (content) export_content_metadata(source, entries, resources, notebook_id, &read_cancelled);
     export_confined(source, config_relative);
@@ -2381,6 +2388,8 @@ struct VxmHost {
       try {
         require(completing_sync || !request->cancelled, VXCORE_ERR_CANCELLED);
         std::lock_guard<std::mutex> core_lock(core_owner_gate);
+        std::unique_lock<std::recursive_mutex> admission(vxm_import::AdmissionMutex(), std::defer_lock);
+        if (opening_event(event.kind) || event.kind == VXM_EVENT_SYNC || transfer_event(event.kind)) admission.lock();
         if (completing_sync) {
           const auto output = sync.Complete(*sync_work);
           const auto encoded = output.dump();

@@ -156,7 +156,7 @@ VXM_API int32_t vxm_host_catalog_tag(VxmHost *host, uint64_t request_id,
 // Limit: 1 GiB selected bytes, 100000 entries, depth 32, component 255/path 1024
 // UTF-8 bytes. Content format charges excluded entries to the inspection cap too.
 // staging_budget_bytes reserves snapshot + conservative ZIP bound, at most
-// 4 GiB - 128 KiB marker allowance; 64 MiB free-space headroom is separate.
+// 3 GiB - 128 KiB marker allowance; 64 MiB free-space headroom is separate.
 // EXPORT data is <=1024 bytes: {format,bytes,files,directories,archiveLimit}; format
 // is "notebook" or "filesAndAssets". Empty content snapshots are valid. Notebook
 // identity/name use event metadata. Caller owns any private partial destination and

@@ -1326,3 +1326,226 @@ and seven owned reverse mappings were removed; no ADB mappings remained. Owned T
 keys, credentials, desktop copies, probe scripts/binaries and extracted ELF checks
 under the temporary fixture directory were removed. The AVD and final application
 remained running; personal notebooks were neither reset nor replaced.
+
+
+## Phase 5: sharing, adaptive editing and packaging
+
+Core prerequisite: `3828e7a07a51a55dd24e38b3146c61db639bd62d`, independently
+reviewed and committed before the parent gitlink/toolchain pin. No changes were
+pushed and no package was published. Owner signing/store/App Group identities,
+Mac access and physical-device execution were explicitly deferred by the owner;
+this record does not turn those gates into passes.
+
+### Durable Android transfer workflows
+
+Executed on the existing API37 x86_64, 16 KiB-page AVD with the application data
+retained. An owned SDK-only sender/provider/recipient exercised actual platform
+intents, URI grants and delayed descriptor reads, not mocked method-channel echoes.
+
+- With Flutter stopped, exact UTF-8 text/URL content (71 bytes), a 68-byte PNG and
+  a six-byte opaque file were durably received. Killing provider/receiver after
+  acknowledgement did not lose the payloads.
+- Duplicate and concurrent deliveries retained the original receipt and at most
+  one bounded candidate, without starting another automatic import. Revoked or
+  missing grants, failure of the second stream, 65 files and a dishonest stream
+  exceeding the 64 MiB per-file limit refused the whole delivery. Existing
+  receipts were unchanged and no incoming reservation remained.
+- A core commit followed by failed native consumption was reconciled after
+  restart using the same cohort ID and committed proof. Notebook hashes did not
+  change during reconciliation; the cohort was not replayed. The proof validator
+  now accepts the transaction's real owned `recovery/` directory without allowing
+  arbitrary unexplained files.
+- Cancelling explicit another-copy created nothing. Confirmation created a fresh
+  pending delivery; explicit import produced a distinct cohort. Forgetting settled
+  history and dismissing a duplicate candidate did not discard pending work.
+- Cancelling system Save As retained the prepared notebook ZIP. A real recipient
+  read the exact 3,834-byte system-shared ZIP after chooser handoff. Removing the
+  original export did not invalidate its separate retained share snapshot.
+  Cleanup refused an active reader; after that reader closed, cleanup succeeded.
+  Chooser selection means system handoff, not recipient persistence.
+
+Production integration checks also covered canonical URI-derived storage roots,
+owner-only Android directory permissions, real app cohort allocation and recovery,
+and the 1 GiB inbox/3 GiB other-staging partition. Historical larger staging is
+inspected and retained rather than silently deleted to satisfy a new limit.
+
+### Adaptive, localized and accessible surfaces
+
+English/Simplified Chinese selection was exercised through the actual application
+menu and persisted across process restart. Notebook names, source and URLs stayed
+unchanged. A live Android CodeMirror element survived locale changes, phone/tablet
+resizing and doubled system font scaling. An IME candidate and directed selection
+survived the resize; commit and retained undo were exercised. The owned note was
+restored to its exact original 71 bytes.
+
+The tablet context pane is read-only; it does not create another notebook/catalog
+owner. A device screenshot exposed its initially unpainted lower area. Its Material
+surface and safe insets now cover the complete sidebar scroll viewport.
+
+Real Gboard display and hardware-key input were exercised. Landscape rotation
+left only 35 CSS pixels for the source WebView. The former web header/minimum-height
+layout hid the caret. The compact stylesheet now gives CodeMirror its own bounded
+scroller, hides the redundant visual header and keeps healthy status in the
+accessibility tree. Error/recovery content and security policy are not suppressed.
+The corrected rule visibly exposed the caret above Gboard; no source reload was
+used to change layout.
+
+Separate real-browser checks exercised high contrast, reduced motion, doubled
+text, English/Chinese and width changes. The same editor/load epoch and directed
+selection were retained; undo restored exact BOM/CRLF/Unicode source. Widget
+regressions cover fixed source/preview slots and reachable large-text controls.
+A 10,000-record receipt-history scenario reached both ends with bounded rendering;
+it is not a physical accessibility or performance certification.
+
+### Scale, cache atomicity and save scheduling
+
+An owned notebook generated through desktop vxcore contained 10,000 notes, 128
+managed binary attachments, a 1 MiB multiline Markdown note and a 1 MiB single line.
+The app opened it and returned the unique `Group-099/Note-099.md` search hit for
+`benchmark-needle-09995`. The multiline note accepted actual hardware input and
+saved it; undo restored its exact 1,048,576-byte SHA-256. The single-line source was
+visible and remained byte-exact after leaving through the save/close workflow.
+The actual resource panel reached `asset-000.bin` and `asset-127.bin`.
+
+Lazy core cache publication now uses one database-only rollback guard per folder:
+folder watermark, file rows and tags commit together before child recursion.
+Failures stop further writes; rollback does not invalidate the caller's cached
+FolderConfig. A real SQLite abort trigger reproduced partial publication before
+the fix and passed afterward, including retry, descendant exclusion and retained
+last-success/source state. No SQLite durability setting or notebook JSON format
+was changed. Existing partial cache watermarks from the old path are not repaired
+merely by clearing the in-memory config cache.
+
+An Android edit exposed a second unnecessary autosave barrier after the durable
+write had already made the source clean. Clean state now cancels stale timers;
+an already-satisfied automatic target is skipped at dispatch. Explicit saves still
+request a fresh barrier. Deterministic regressions cover both redundant-save paths
+and nonresponsive/composing sources retaining their drafts. On the corrected APK,
+a real hardware edit saved exact bytes and remained clean across four fresh UI
+snapshots spanning 15 seconds, beyond the autosave and watchdog windows. Retained
+undo restored the original bytes. No timeout was increased.
+
+The ordinary note rendered through the native isolated preview pipeline and showed
+`Read-only preview · source revision 0`; the isolated renderer was absent after
+publication. This successful run followed app-only ART compilation with host
+builds idle. Earlier cold attempts exceeded the existing watchdog. Neither the
+successful retry nor ART compilation proves a speedup or a cold-start budget pass.
+The speculative lazy main-process WebView initialization was reverted completely.
+Original initialization, positive offline proofs and renderer retirement remain.
+
+### Executed checks and measurement limits
+
+The pinned `node scripts/verify.mjs verify` gate passed after the core pin change.
+The later autosave and terminal-close corrections passed the complete Flutter
+normal suite and analyzer again. The real-HTTPS suites were also rerun. The compact stylesheet was proved on the actual short Android viewport;
+asset regeneration/check and packaging use the final source inputs.
+
+| Check | Observed result |
+| --- | --- |
+| JavaScript editor/rendering suite | 105 passed |
+| TypeScript and native-bridge analyzer | Clean |
+| Native bridge normal suite | 168 passed, 1 skipped |
+| Flutter normal suite after terminal-close correction | 528 passed, 2 skipped |
+| Flutter analyzer after terminal-close correction | Clean |
+| Real-HTTPS bridge/app suites | 19 / 9 passed |
+| Core folder/search/metadata-store/folder-manager suites | All four passed |
+| Native retained-transfer focused suite | 21 passed |
+| Original notebook preservation checkpoint | All 82 original file hashes matched |
+
+Skips remain explicit platform/privilege cases, not passes. No physical
+TalkBack/VoiceOver, OEM backup, true power-loss, iOS compilation/runtime or
+owner-signed installation is asserted. Four iOS plists and the shared scheme were
+structurally parsed; that does not prove Swift compilation, App Group entitlement
+authorization or extension execution. Existing iOS offline-WebView capability
+restrictions remain fail-closed.
+
+No valid before/after startup, discovery, search or input latency comparison was
+obtained. Host load, System UI ANR/reboot, observer delay and stale accessibility
+dumps confounded those observations. The final observer requires a completed fresh
+UI dump rather than accepting a previous XML file after an unsuccessful dump.
+Profile-build functional observations are not p95 timings, a cache speedup ratio,
+or a physical/iOS budget pass. Readiness at 10,000 notes does not certify responsive
+performance on supported hardware.
+
+Unsigned Android APK/AAB packaging exercised the official SDK analyzer, locked
+Maven resolution, deterministic dependency inventory/CycloneDX SBOM/notices and
+16 KiB native/ZIP alignment checks. SDK command-line tools19.0, build13114758, were
+installed with owner approval and verified against official archive metadata.
+Missing owner inputs failed the Android/iOS release gates before packaging. A
+successful unsigned package is not a signed or distributable owner release;
+legal/store clearance and publication remain separate.
+
+
+### Terminal-close recovery and final device preservation
+
+Actual Save and close exposed a final-acknowledgement ambiguity: JavaScript had
+closed but Dart attempted abort/resync after a timeout, so the old recovery action
+could not restore that view. The additional plan received an independent review;
+its discard, journal read-back, native-retirement and UI blockers were resolved
+before implementation.
+
+The correction retains the exact quiesced capture through terminal delivery and
+native close. An ambiguous terminal result before native retirement can recover a
+fresh epoch only after matching capture/snapshot and journal read-back proof. Once
+native close starts, the old owner is not borrowed again. Failure requires restart,
+keeps received source copyable and overrides unrelated error banners. Real widget
+checks in both languages prove the unsafe controls are absent and Copy remains
+functional. Tests model native handle retirement and memoized close failure; they
+also cover no-send failed-view discard, late replies, rejected unquiesced proof,
+discard cleanup failure and reopen ordering.
+
+On the corrected profile APK, a source-free debugger hook withheld exactly one
+real `close/closed` acknowledgement (`host-11`, revision0). The application showed
+the unchanged timeout while the actual web status said the editor had closed.
+After restoring/removing the hook, **Recover editor view** produced a fresh epoch
+with the original 71-byte source. A real hardware edit saved the exact 72-byte
+result; retained undo restored the original71 bytes. A subsequent normal Save and
+close joined the owner and returned through folders to the library. No closed
+view was made writable again and no deadline or offline proof was weakened.
+
+The final compact stylesheet was also checked after packaging/reinstallation,
+without injected CSS: source remained visible above real landscape Gboard. The
+final tablet surface painted the complete context pane and retained source under
+2x system text. Original display, density, rotation, font, keyboard and power
+settings were restored to their recorded values. All82 original notebook file
+hashes matched after the final recovery/close scenario.
+
+A later profile cold launch still reported38,669ms on this AVD. This is an OS launch
+observation, not a controlled comparison or an accepted performance budget. The
+10,000-note generated benchmark notebook and its UUID-bound cache were removed
+only after the app process retired; the sharing demo and all original notebooks
+were retained. The temporary sender/provider/recipient app and owned debugger
+forwards were removed. Pre-existing core `tests/__pycache__` was not touched.
+
+
+### Final certified package artifacts
+
+The final `node scripts/release.mjs android unsigned-validation` invocation completed
+APK/AAB validation on the terminal-close source with the reviewed cleanup disclosure.
+Its final directory rename returned Windows `EPERM`; retrying only that unchanged,
+validated-directory rename completed promotion. Certification covers the final
+copied files, not differently named build-directory originals. A manifest-consumer
+smoke resolved both relative names and independently matched their lengths/SHA-256.
+The certified directory also contains `DEPENDENCIES.txt`, `dependency-inventory.json`
+and `sbom.cdx.json`.
+
+Directory: `.tools/release/android/unsigned-validation/`.
+
+| Artifact | SHA-256 |
+| --- | --- |
+| unsigned-validation.apk | `fd9ed246c5489c855d18e87bbbb573907c607d103b4c9144e75058b9ac056cf4` |
+| unsigned-validation.aab | `2db1ba565e3af214cd57b57b8e8fc9f668da8f53fe283d41e0de44044179f5ac` |
+
+Both packages are unsigned; all checked ELF/ZIP alignments are16 KiB. No upload,
+store submission or owner-release signing occurred. The final installed development
+profile APK, including the reviewed cleanup disclosure, has SHA-256
+`2dcb383bfe9a061a1cf71eb69e89c5828b052b2316f1cbbea196e7da7a5620c6`.
+
+The implementation review had no blockers. Its cleanup-consent concern was corrected:
+the common dialog now distinguishes Android reader guarding from iOS URL-copy
+revocation. Both English and Chinese dialogs were inspected on the installed AVD
+build and cancelled; the app language was restored to system-following. The narrow
+follow-up review approved the correction. Sharing checks completed11 tests; after
+an initial paired localization process ended without completing its four cases,
+an isolated localization run passed all4 without changing production or test code.
+These dialog checks are not an iOS execution claim.

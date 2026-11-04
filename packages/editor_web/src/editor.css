@@ -4,22 +4,33 @@
 :root[data-contrast="high"] { background: #fff; color: #000; }
 :root[data-contrast="high"][data-theme="dark"] { background: #000; color: #fff; }
 * { box-sizing: border-box; }
-body { margin: 0; min-height: 100dvh; display: flex; flex-direction: column; }
+body { margin: 0; min-height: 100dvh; display: flex; flex-direction: column; overflow-wrap: anywhere; }
 header { padding: .6rem 1rem; border-bottom: 1px solid #87919d; }
 h1, h2 { margin: 0; font-size: 1rem; }
 header p { margin: .2rem 0 0; font-size: .85rem; }
-#status { margin: 0; padding: .55rem 1rem; min-height: 2.6rem; border-bottom: 1px solid #87919d; }
+#status { margin: 0; padding: .55rem 1rem; min-height: 48px; border-bottom: 1px solid #87919d; }
 #status[data-error="true"] { border-inline-start: .35rem solid #c14128; font-weight: 600; }
 #editor { flex: 1; display: flex; min-height: 15rem; }
 .cm-editor { flex: 1; min-width: 0; }
 .cm-scroller { overflow: auto; font: .9375rem/1.6 ui-monospace, monospace; }
 .cm-content { padding: .75rem .5rem; min-height: 15rem; }
 .cm-editor.cm-focused { outline: 2px solid #2874bd; outline-offset: -2px; }
-button { margin: .5rem 1rem; padding: .65rem .8rem; min-height: 44px; font: inherit; cursor: pointer; }
+button { margin: .5rem 1rem; padding: .65rem .8rem; min-width: 48px; min-height: 48px; font: inherit; white-space: normal; cursor: pointer; }
 button:focus-visible, textarea:focus-visible { outline: 3px solid #2874bd; outline-offset: 2px; }
 #refusal { padding: 1rem; border-top: 2px solid #c14128; }
 #candidate { display: block; width: 100%; min-height: 8rem; font: .875rem/1.5 ui-monospace, monospace; }
 [hidden] { display: none !important; }
 :root[data-contrast="high"] #status, :root[data-contrast="high"] header { border-color: currentColor; }
+:root[data-contrast="high"] button:focus-visible, :root[data-contrast="high"] textarea:focus-visible, :root[data-contrast="high"] .cm-editor.cm-focused { outline-color: currentColor; }
 :root[data-motion="reduced"] * { animation: none !important; transition: none !important; scroll-behavior: auto !important; }
 @media (prefers-reduced-motion: reduce) { * { scroll-behavior: auto !important; } }
+
+/* Keep the caret visible above a landscape IME; healthy status stays in the accessibility tree. */
+@media (max-height: 320px) {
+  body { height: 100dvh; min-height: 0; }
+  header { display: none; }
+  #status:not([data-error="true"]) { position: absolute; width: 1px; height: 1px; min-height: 0; margin: -1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+  #editor, .cm-content { min-height: 0; }
+  .cm-editor { height: 100%; min-height: 0; }
+  .cm-content { padding-block: 0; }
+}

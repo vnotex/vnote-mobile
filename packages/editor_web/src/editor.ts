@@ -8,9 +8,10 @@ import {
   assertCredits, assertDurableCredits, encodeMessage, insertionTransaction, LIMITS, preferredLineEnding, prepareHistoryPrune, ProtocolError,
   RequestCache, requireThat, utf8Length, validBoundary, validateChanges, validateHostMessage,
   validateSelection, validateSession, validateSource,
-  type Change, type Envelope, type HostMessage, type Selection,
+  type Change, type EditorLocale, type Envelope, type HostMessage, type Selection,
 } from './protocol';
 import { formattingTransaction } from './formatting';
+import { editorPresentation, editorText } from './localization';
 
 declare global {
   interface Window {
@@ -23,6 +24,10 @@ const retry = document.getElementById('retry') as HTMLButtonElement;
 const refusal = document.getElementById('refusal')!;
 const candidate = document.getElementById('candidate') as HTMLTextAreaElement;
 const theme = new Compartment();
+const presentation = new Compartment();
+let locale: EditorLocale = 'en';
+let statusMessage = 'Waiting for the host. Editing is disabled.';
+let statusValues: Readonly<Record<string, string | number>> = {};
 const nonce = new Compartment();
 const scriptNonce = document.querySelector<HTMLMetaElement>('meta[name="vnote-csp-nonce"]')?.content
   ?? (document.currentScript as HTMLScriptElement | null)?.nonce ?? '';
@@ -67,9 +72,34 @@ const inFlight = new Map<string, InFlight>();
 const undurable = new Map<string, { revision: number; bytes: number }>();
 const controls: HostMessage[] = [];
 
-function show(message: string, error = false): void {
-  status.textContent = message;
+function renderStatus(): void {
+  const values = typeof statusValues.error === 'string'
+    ? { ...statusValues, error: editorText(locale, statusValues.error) } : statusValues;
+  status.textContent = editorText(locale, statusMessage, values);
+}
+function show(message: string, error = false, values: Readonly<Record<string, string | number>> = {}): void {
+  statusMessage = message;
+  statusValues = values;
+  renderStatus();
   status.dataset.error = String(error);
+}
+function renderLabels(): void {
+  document.documentElement.lang = locale === 'zh' ? 'zh-CN' : 'en';
+  document.title = editorText(locale, 'VNote source editor');
+  document.getElementById('source-title')!.textContent = editorText(locale,
+    editorLanguage === 'markdown' ? 'Markdown source' : 'Plain text source');
+  document.getElementById('editor')!.setAttribute('aria-label', editorText(locale,
+    editorLanguage === 'markdown' ? 'Markdown source editor' : 'Plain text source editor'));
+  for (const [id, message] of [
+    ['receipt-description', 'Received input is held in memory. Draft saved confirms private recovery storage; Saved locally confirms the notebook write.'],
+    ['history-notice', 'Older undo history reached its limit and was removed. Current text and recent undo steps are retained.'],
+    ['retry', 'Retry sending unreceived edits'],
+    ['refusal-title', 'Composition was not committed'],
+    ['refusal-description', 'The previous document is retained. This is the last in-limit provisional candidate, for copying only.'],
+    ['dismiss', 'Dismiss candidate'],
+  ]) document.getElementById(id!)!.textContent = editorText(locale, message!);
+  candidate.setAttribute('aria-label', editorText(locale, 'Uncommitted composition candidate'));
+  renderStatus();
 }
 function errorText(error: unknown): string {
   return (error instanceof Error ? error.message : 'Editor protocol operation refused.').slice(0, 1024);
@@ -80,9 +110,9 @@ function memoryStatus(): void {
   else if (quiesced) show('Editing paused while the host retains the final source.');
   else if (composing) show('Composition is provisional. Finish composing before Write.');
   else if (pending || inFlight.size) show('Input pending receipt. Text remains in this editor.');
-  else if (undurable.size) show(`Received revision ${receivedRevision}; waiting for durable draft storage.`);
-  else if (savedRevision === revision) show(`Saved locally at revision ${revision}.`);
-  else show(`Draft durable through revision ${durableRevision}. Notebook write status is shown above.`);
+  else if (undurable.size) show('Received revision {revision}; waiting for durable draft storage.', false, { revision: receivedRevision });
+  else if (savedRevision === revision) show('Saved locally at revision {revision}.', false, { revision });
+  else show('Draft durable through revision {revision}. Notebook write status is shown above.', false, { revision: durableRevision });
 }
 function header(type: string, requestId: string, at = revision): Envelope {
   requireThat(generation !== null && documentId !== null, 'Waiting for a host session.');
@@ -251,7 +281,7 @@ function applyTransaction(transaction: Transaction): boolean {
       view.update([transaction]);
     } catch (error) {
       composing.failed = errorText(error);
-      show(`${composing.failed} Finish composing to retain the previous document.`, true);
+      show('{error} Finish composing to retain the previous document.', true, { error: composing.failed });
     }
     return composing.failed === null;
   }
@@ -332,7 +362,7 @@ function finishComposition(): void {
     if (failure) {
       candidate.value = provisionalText.toString();
       refusal.hidden = false;
-      show(`${failure} Composition was refused; the previous document is retained.`, true);
+      show('{error} Composition was refused; the previous document is retained.', true, { error: failure });
     }
     else { try { flush(); } catch (error) { show(errorText(error), true); } }
     sendActivity();
@@ -373,10 +403,9 @@ function createState(source: string, selection: Selection, language: 'markdown' 
       nonce.of(EditorView.cspNonce.of(scriptNonce)),
       writable.of([EditorState.readOnly.of(true), EditorView.editable.of(false)]), theme.of(editorTheme(false)),
       undoHistory.of(history({ minDepth: LIMITS.historyGroups })),
+      presentation.of(editorPresentation(locale, language)),
       language === 'markdown' ? markdown({ addKeymap: false }) : [],
       syntaxHighlighting(defaultHighlightStyle), lineNumbers(), EditorView.lineWrapping,
-      EditorView.contentAttributes.of({ 'aria-label': language === 'markdown' ? 'Markdown source editor' : 'Plain text source editor',
-        'aria-describedby': 'status', spellcheck: 'false', autocapitalize: 'off', autocorrect: 'off' }),
       EditorState.transactionExtender.of(transaction => !transaction.docChanged || composing
         ? { annotations: Transaction.addToHistory.of(false) } : null),
       EditorState.transactionFilter.of(transaction => {
@@ -425,7 +454,7 @@ function receiveAck(message: Extract<HostMessage, { type: 'ack' }>): void {
     requireThat(inFlight.has(message.requestId) || message.requestId === readyRequest
       || message.requestId === snapshot?.requestId, 'Rejected acknowledgement has no matching request.');
     frozen = true;
-    show(`Host rejected editor data: ${message.error}`, true);
+    show('Host rejected editor data: {error}', true, { error: message.error! });
     return;
   }
   if (message.stage === 'draftDurable' || message.stage === 'saved') {
@@ -472,12 +501,10 @@ function handle(message: HostMessage): void {
     requireThat(generation === null, 'A load cannot replace existing text. Explicitly discard the session first.');
     requireThat(window.VNoteEditor && typeof window.VNoteEditor.postMessage === 'function', 'Waiting for the native host channel.');
     const state = createState(message.text, message.selection, message.language);
-    const title = message.language === 'markdown' ? 'Markdown source' : 'Plain text source';
-    document.getElementById('source-title')!.textContent = title;
-    document.getElementById('editor')!.setAttribute('aria-label', `${title} editor`);
     documentBytes = validateSource(message.text);
     lineEnding = preferredLineEnding(state.doc);
     editorLanguage = message.language;
+    renderLabels();
     documentId = message.documentId;
     generation = message.generation;
     readyRequest = message.requestId;
@@ -553,7 +580,12 @@ function handle(message: HostMessage): void {
       document.documentElement.dataset.contrast = message.highContrast ? 'high' : 'normal';
       document.documentElement.dataset.motion = message.reducedMotion ? 'reduced' : 'normal';
       document.documentElement.style.fontSize = `${16 * message.fontScale}px`;
-      view.dispatch({ effects: theme.reconfigure(editorTheme(message.dark, message.highContrast, message.fontScale, message.reducedMotion)) });
+      locale = message.locale;
+      view.dispatch({ effects: [
+        theme.reconfigure(editorTheme(message.dark, message.highContrast, message.fontScale, message.reducedMotion)),
+        presentation.reconfigure(editorPresentation(locale, editorLanguage)),
+      ] });
+      renderLabels();
       break;
     case 'flush':
       requireThat(!frozen && refusal.hidden, 'Resolve retained or provisional source before writing.');
@@ -621,5 +653,9 @@ retry.addEventListener('click', () => {
   try { for (const entry of inFlight.values()) post(entry.encoded); armTransportTimeout(); }
   catch (error) { show(errorText(error), true); }
 });
-document.getElementById('dismiss')!.addEventListener('click', () => { candidate.value = ''; refusal.hidden = true; });
+document.getElementById('dismiss')!.addEventListener('click', () => {
+  candidate.value = '';
+  refusal.hidden = true;
+  view.focus();
+});
 window.vnoteEditor = Object.freeze({ receive });

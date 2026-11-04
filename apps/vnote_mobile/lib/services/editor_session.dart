@@ -123,12 +123,13 @@ class EditorSession extends ValueNotifier<EditorSessionState> {
     return _canControl ? _request('command', {'command': command}) : null;
   }
 
-  Map<String, Object?>? preferences({required bool dark, bool highContrast = false,
+  Map<String, Object?>? preferences({required bool dark, required String locale, bool highContrast = false,
     double fontScale = 1, bool reducedMotion = false}) {
     if (!fontScale.isFinite || fontScale < 0.5 || fontScale > 3) throw ArgumentError.value(fontScale, 'fontScale');
+    if (locale != 'en' && locale != 'zh') throw ArgumentError.value(locale, 'locale');
     if (_disposed || !value.ready || value.closed) return null;
     return _request('preferences', {'dark': dark, 'highContrast': highContrast,
-      'fontScale': fontScale, 'reducedMotion': reducedMotion});
+      'fontScale': fontScale, 'reducedMotion': reducedMotion, 'locale': locale});
   }
 
   Map<String, Object?>? acknowledgeDraftDurable(EditorCapture captured) {

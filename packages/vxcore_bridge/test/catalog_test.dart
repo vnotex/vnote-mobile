@@ -128,7 +128,7 @@ final class _Fixture {
   }
 }
 
-const _exportBudget = 4 * 1024 * 1024 * 1024 - 128 * 1024;
+const _exportBudget = 3 * 1024 * 1024 * 1024 - 128 * 1024;
 
 Matcher get _failure =>
     isA<CoreException>().having((e) => e.code, 'core error', isNot(0));
@@ -557,6 +557,16 @@ void main() {
       }
     },
   );
+
+  test('upgraded export rejects the old positive 4 GiB budget before creating staging', () async {
+    final seed = await fixture.catalog(); await seed.close();
+    final catalog = await fixture.exportCatalog();
+    await expectLater(catalog.exportSnapshot(fixture.path('legacy-budget'),
+      stagingBudgetBytes: 4 * 1024 * 1024 * 1024 - 128 * 1024,
+      format: CoreExportFormat.notebook), throwsA(_failure));
+    expect(await Directory(fixture.path('legacy-budget')).exists(), false);
+    await catalog.close();
+  });
 
   test(
     'export refuses junctions or symlinks and retains their external target',

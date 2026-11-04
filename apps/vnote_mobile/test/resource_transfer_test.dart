@@ -7,6 +7,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/resource_transfer.dart';
+import 'package:vnote_mobile/services/share_inbox.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 class _Provider implements DocumentTransferPlatform {
@@ -88,6 +89,18 @@ class _Provider implements DocumentTransferPlatform {
             externalMayBeIncomplete: false,
           )
         : saved!.future;
+  }
+}
+
+class _OutgoingShare extends ShareInbox {
+  final entered = Completer<void>();
+  final result = Completer<ShareExportStatus>();
+  @override
+  Future<ShareExportStatus> shareExport({required String operationId,
+      required DocumentTransferScope scope, required String path, required String suggestedName}) async {
+    expect(scope, DocumentTransferScope.resource);
+    entered.complete();
+    return result.future;
   }
 }
 
@@ -422,6 +435,31 @@ void main() {
     expect(transfer.value.hasStaging, isFalse);
     expect(await File(path).readAsBytes(), [9, 8, 7]);
     expect(provider.picks, 1);
+  });
+
+  test('system sharing preserves an earlier ambiguous Save As and immutable bytes', () async {
+    await add();
+    await discard();
+    final request = await transfer.start(target: target,
+      operation: ResourceOperation.export, name: 'chosen.bin',
+      origin: ResourceExportOrigin.asset, binding: const {'name': 'chosen.bin'});
+    final snapshotBytes = await transfer.prepareExport(request!, snapshot);
+    provider.saved = Completer<DocumentExportResult>()..complete(const DocumentExportResult(
+      status: DocumentExportStatus.failed, externalMayBeIncomplete: true));
+    await transfer.save(transfer.value.current!);
+    expect(transfer.value.externalMayBeIncomplete, isTrue);
+    final outgoing = _OutgoingShare();
+    addTearDown(outgoing.dispose);
+    final retained = transfer.value.current!;
+    final sharing = transfer.share(retained, outgoing);
+    await outgoing.entered.future;
+    expect(() => transfer.discard(retained, recover: apply), throwsStateError);
+    outgoing.result.complete(ShareExportStatus.shared);
+    expect(await sharing, ShareExportStatus.shared);
+    expect(transfer.value.externalMayBeIncomplete, isTrue);
+    expect(transfer.value.current!.stage, TransferStage.exportReady);
+    expect(await File(snapshotBytes!.path).readAsBytes(), provider.bytes);
+    expect(provider.saves, 1);
   });
 
   test('export owner releases before provider IO; shutdown joins and restart retains ambiguity', () async {

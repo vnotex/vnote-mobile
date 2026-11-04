@@ -2,6 +2,8 @@
 import 'package:flutter/material.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
+import '../../l10n/app_strings.dart';
+import '../../l10n/locale_settings.dart';
 import '../../services/notebook_library.dart';
 import '../../services/notebook_export.dart';
 import '../../services/notebook_import.dart';
@@ -9,6 +11,7 @@ import '../../services/document_transfer_platform.dart';
 import '../../services/cohort_import.dart';
 import '../../services/resource_transfer.dart';
 import '../recovery/draft_recovery_panel.dart';
+import '../share/share_inbox_panel.dart';
 import '../sync/notebook_sync_panel.dart';
 
 class NotebookLibraryScreen extends StatefulWidget {
@@ -68,8 +71,8 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
     final format = await showDialog<CoreExportFormat>(
       context: context,
       builder: (context) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: Text('Export “${entry.name}”?'),
+        builder: (context, setDialogState) => AlertDialog(scrollable: true, 
+          title: Text(AppStrings.of(context).text('Export “{name}”?', {'name': (entry.name).toString()})),
           content: SingleChildScrollView(
             child: Column(
               mainAxisSize: MainAxisSize.min,
@@ -78,14 +81,14 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                 DropdownButton<CoreExportFormat>(
                   value: selected,
                   isExpanded: true,
-                  items: const [
+                  items: [
                     DropdownMenuItem(
                       value: CoreExportFormat.notebook,
-                      child: Text('Notebook backup'),
+                      child: Text(AppStrings.of(context).text('Notebook backup')),
                     ),
                     DropdownMenuItem(
                       value: CoreExportFormat.filesAndAssets,
-                      child: Text('Files and assets'),
+                      child: Text(AppStrings.of(context).text('Files and assets')),
                     ),
                   ],
                   onChanged: (value) {
@@ -97,12 +100,12 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                 const SizedBox(height: 12),
                 Text(
                   selected == CoreExportFormat.notebook
-                      ? 'Save a ZIP copy of the saved notebook, including attachments and recycle content. Local sync history/state is excluded.'
-                      : 'Save raw files and assets with their original hierarchy and unchanged bytes. Unsupported files stay opaque. The entire vx_notebook directory, including unknown files stored there, and configured recycle data are omitted. Notebook identity, tags and configuration are not backed up. This is not a notebook backup. Protected content requires Notebook backup; nothing is decrypted or converted. Links are not rewritten; references to omitted or external data and VNote IDs may not work.',
+                      ? AppStrings.of(context).text('Save a ZIP copy of the saved notebook, including attachments and recycle content. Local sync history/state is excluded.')
+                      : AppStrings.of(context).text('Save raw files and assets with their original hierarchy and unchanged bytes. Unsupported files stay opaque. The entire vx_notebook directory, including unknown files stored there, and configured recycle data are omitted. Notebook identity, tags and configuration are not backed up. This is not a notebook backup. Protected content requires Notebook backup; nothing is decrypted or converted. Links are not rewritten; references to omitted or external data and VNote IDs may not work.'),
                 ),
                 const SizedBox(height: 12),
-                const Text(
-                  'Only saved content is exported. The ZIP itself is not encrypted. The notebook is not changed.',
+                Text(
+                  AppStrings.of(context).text('Only saved content is exported. The ZIP itself is not encrypted. The notebook is not changed.'),
                 ),
               ],
             ),
@@ -110,11 +113,11 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: Text(AppStrings.of(context).text('Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, selected),
-              child: const Text('Export ZIP'),
+              child: Text(AppStrings.of(context).text('Export ZIP')),
             ),
           ],
         ),
@@ -135,18 +138,19 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
       final idle = !state.busy && !state.closed && state.workspace == null;
       final available = idle && !state.stale;
       final messages = <String>[
-        'Local notebooks need your own exported copies. OS backup exclusion is requested, not guaranteed; app removal or device loss may remove local data.',
+        AppStrings.of(context).text('Local notebooks need your own exported copies. OS backup exclusion is requested, not guaranteed; app removal or device loss may remove local data.'),
         if (state.error != null) state.error!,
-        if (state.closed) 'The notebook library is closed.',
+        if (state.closed) AppStrings.of(context).text('The notebook library is closed.'),
         if (state.stale && !state.closed && !state.busy)
-          'Refresh the library before creating or opening a notebook.',
+          AppStrings.of(context).text('Refresh the library before creating or opening a notebook.'),
       ];
       return Scaffold(
         appBar: AppBar(
-          title: const Text('Notebooks'),
+          title: Text(AppStrings.of(context).text('Notebooks')),
           actions: [
+            const LanguageMenu(),
             IconButton(
-              tooltip: widget.dark ? 'Use light theme' : 'Use dark theme',
+              tooltip: widget.dark ? AppStrings.of(context).text('Use light theme') : AppStrings.of(context).text('Use dark theme'),
               onPressed: () => widget.onThemeChanged(!widget.dark),
               icon: Icon(
                 widget.dark
@@ -157,30 +161,32 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
           ],
         ),
         body: SafeArea(
-          child: Column(
+          child: LayoutBuilder(builder: (context, constraints) => Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight * 0.45),
+                child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               if (state.busy) const LinearProgressIndicator(),
               Wrap(
                 crossAxisAlignment: WrapCrossAlignment.center,
                 children: [
                   IconButton(
-                    tooltip: 'Refresh',
+                    tooltip: AppStrings.of(context).text('Refresh'),
                     onPressed: idle ? library.refresh : null,
                     icon: const Icon(Icons.refresh),
                   ),
                   TextButton.icon(
                     onPressed: available ? () => _create(library, state) : null,
                     icon: const Icon(Icons.add),
-                    label: const Text('New notebook'),
+                    label: Text(AppStrings.of(context).text('New notebook')),
                   ),
                   TextButton.icon(
                     onPressed: available && !state.transferReserved ? () => _connect(library, state) : null,
                     icon: const Icon(Icons.cloud_download_outlined),
-                    label: const Text('Connect WebDAV'),
+                    label: Text(AppStrings.of(context).text('Connect WebDAV')),
                   ),
                   PopupMenuButton<DocumentImportKind>(
-                    tooltip: 'Import notebook',
+                    tooltip: AppStrings.of(context).text('Import notebook'),
                     icon: const Icon(Icons.file_download_outlined),
                     enabled: available && !state.transferReserved,
                     onSelected: (kind) async {
@@ -188,14 +194,14 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                         await library.prepareImport(kind);
                       }
                     },
-                    itemBuilder: (_) => const [
+                    itemBuilder: (_) => [
                       PopupMenuItem(
                         value: DocumentImportKind.zip,
-                        child: Text('Import ZIP'),
+                        child: Text(AppStrings.of(context).text('Import ZIP')),
                       ),
                       PopupMenuItem(
                         value: DocumentImportKind.folder,
-                        child: Text('Import folder'),
+                        child: Text(AppStrings.of(context).text('Import folder')),
                       ),
                     ],
                   ),
@@ -206,9 +212,10 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                   constraints: const BoxConstraints(maxHeight: 180),
                   child: SingleChildScrollView(
                     padding: const EdgeInsets.all(12),
-                    child: SelectableText(messages.join('\n')),
+                    child: SelectableText(messages.map(AppStrings.of(context).message).join('\n')),
                   ),
                 ),
+              ]))),
               Expanded(
                 child: ListView.builder(
                   itemCount:
@@ -217,6 +224,7 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                     if (index == 0) {
                       return Column(
                         children: [
+                          ShareInboxPanel(library: library, showOperationErrors: false),
                           DraftRecoveryPanel(library: library),
                           _ImportPanel(
                             library: library,
@@ -249,12 +257,12 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                         padding: const EdgeInsets.all(24),
                         child: Text(
                           state.busy
-                              ? 'Loading notebooks…'
+                              ? AppStrings.of(context).text('Loading notebooks…')
                               : state.closed
-                              ? 'Library closed.'
+                              ? AppStrings.of(context).text('Library closed.')
                               : state.stale
-                              ? 'The notebook library is unavailable.'
-                              : 'No notebooks yet. Choose New notebook to create one.',
+                              ? AppStrings.of(context).text('The notebook library is unavailable.')
+                              : AppStrings.of(context).text('No notebooks yet. Choose New notebook to create one.'),
                         ),
                       );
                     }
@@ -270,10 +278,10 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                       subtitle: entry.canOpen
                           ? null
                           : Text(
-                              'Unavailable: ${entry.error ?? 'The notebook could not be opened.'}',
+                              AppStrings.of(context).text('Unavailable: {value}', {'value': (entry.error ?? AppStrings.of(context).text('The notebook could not be opened.')).toString()}),
                             ),
                       trailing: IconButton(
-                        tooltip: 'Export ${entry.name}',
+                        tooltip: AppStrings.of(context).text('Export {name}', {'name': (entry.name).toString()}),
                         icon: const Icon(Icons.ios_share),
                         onPressed:
                             available &&
@@ -297,7 +305,7 @@ class _NotebookLibraryScreenState extends State<NotebookLibraryScreen> {
                 ),
               ),
             ],
-          ),
+          )),
         ),
       );
     },
@@ -312,17 +320,17 @@ Future<bool> _confirmPrivateDiscard(
 }) async =>
     await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
+      builder: (context) => AlertDialog(scrollable: true, 
         title: Text(title),
-        content: Text(detail),
+        content: Text(AppStrings.of(context).message(detail)),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(context, false),
-            child: const Text('Cancel'),
+            child: Text(AppStrings.of(context).text('Cancel')),
           ),
           FilledButton(
             onPressed: () => Navigator.pop(context, true),
-            child: Text(action),
+            child: Text(AppStrings.of(context).text(action)),
           ),
         ],
       ),
@@ -357,20 +365,20 @@ class _CohortPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Standalone files and assets',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Text(
+              AppStrings.of(context).text('Standalone files and assets'),
+              style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             if (state.busy) ...[
               const LinearProgressIndicator(),
-              Text('Files: ${state.phase.name}…'),
+              Text(AppStrings.of(context).text('Files: {name}…', {'name': (AppStrings.of(context).text(state.phase.name)).toString()})),
               TextButton(
                 onPressed: closed ? null : library.cancelCohort,
-                child: const Text('Cancel files transfer'),
+                child: Text(AppStrings.of(context).text('Cancel files transfer')),
               ),
             ],
-            if (state.error != null) SelectableText(state.error!),
-            if (state.message != null) SelectableText(state.message!),
+            if (state.error != null) SelectableText(AppStrings.of(context).message(state.error!)),
+            if (state.message != null) SelectableText(AppStrings.of(context).message(state.message!)),
             for (final attempt in state.attempts)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 8),
@@ -378,22 +386,22 @@ class _CohortPanel extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '${attempt.sourceName ?? attempt.kind.name} → ${attempt.target.notebookRelative} / ${attempt.target.folderName}',
+                      '${attempt.sourceName ?? AppStrings.of(context).text(attempt.kind.name)} → ${attempt.target.notebookRelative} / ${attempt.target.folderName}',
                     ),
                     SelectableText(
-                      'Notebook ${attempt.target.notebookId}\nParent ${attempt.target.parentId}',
+                      AppStrings.of(context).text('Notebook {notebookId}\nParent {parentId}', {'notebookId': (attempt.target.notebookId).toString(), 'parentId': (attempt.target.parentId).toString()}),
                     ),
                     Text(
-                      '${attempt.entries} entries · ${attempt.bytes} bytes · ${attempt.stage.name}',
+                      AppStrings.of(context).text('{entries} entries · {bytes} bytes · {name}', {'entries': (attempt.entries).toString(), 'bytes': (attempt.bytes).toString(), 'name': (AppStrings.of(context).text(attempt.stage.name)).toString()}),
                     ),
                     if (attempt.cohortId != null)
                       SelectableText(
-                        'Stable imported root: ${attempt.cohortId}',
+                        AppStrings.of(context).text('Stable imported root: {cohortId}', {'cohortId': (attempt.cohortId).toString()}),
                       ),
                     if (attempt.stage == TransferStage.quarantined ||
                         attempt.stage == TransferStage.intent)
-                      const Text(
-                        'Target notebook unavailable until its actual outcome is reconciled. Other notebooks may remain usable.',
+                      Text(
+                        AppStrings.of(context).text('Target notebook unavailable until its actual outcome is reconciled. Other notebooks may remain usable.'),
                       ),
                     Wrap(
                       spacing: 8,
@@ -404,14 +412,14 @@ class _CohortPanel extends StatelessWidget {
                                 ? () => library.retryCohort(attempt)
                                 : null,
                             child: Text(switch (attempt.stage) {
-                              TransferStage.receiving => 'Reselect source',
+                              TransferStage.receiving => AppStrings.of(context).text('Reselect source'),
                               TransferStage.captured =>
-                                'Prepare captured source',
+                                AppStrings.of(context).text('Prepare captured source'),
                               TransferStage.source =>
-                                'Prepare immutable folder',
+                                AppStrings.of(context).text('Prepare immutable folder'),
                               TransferStage.prepared =>
-                                'Apply to target folder',
-                              _ => 'Retry recovery',
+                                AppStrings.of(context).text('Apply to target folder'),
+                              _ => AppStrings.of(context).text('Retry recovery'),
                             }),
                           ),
                         if (const [
@@ -439,17 +447,16 @@ class _CohortPanel extends StatelessWidget {
                                     }
                                   }
                                 : null,
-                            child: const Text('Change new folder name'),
+                            child: Text(AppStrings.of(context).text('Change new folder name')),
                           ),
                         TextButton(
                           onPressed: idle
                               ? () async {
                                   if (await _confirmPrivateDiscard(
                                         context,
-                                        title: 'Discard files staging?',
+                                        title: AppStrings.of(context).text('Discard files staging?'),
                                         detail:
-                                            'Recovery runs first if publication is unresolved. A committed folder is never deleted. '
-                                            'Only proven private staging can be removed; ambiguous ownership stays quarantined.',
+                                            AppStrings.of(context).text('Recovery runs first if publication is unresolved. A committed folder is never deleted. Only proven private staging can be removed; ambiguous ownership stays quarantined.'),
                                       ) &&
                                       library.value.cohortState.attempts.any(
                                         (item) => identical(item, attempt),
@@ -458,7 +465,7 @@ class _CohortPanel extends StatelessWidget {
                                   }
                                 }
                               : null,
-                          child: const Text('Discard staging'),
+                          child: Text(AppStrings.of(context).text('Discard staging')),
                         ),
                       ],
                     ),
@@ -467,15 +474,15 @@ class _CohortPanel extends StatelessWidget {
               ),
             for (final item in state.leftovers)
               ListTile(
-                title: Text(item.label),
-                subtitle: SelectableText('${item.reason}\n${item.location}'),
+                title: Text(AppStrings.of(context).message(item.label)),
+                subtitle: SelectableText('${AppStrings.of(context).message(item.reason)}\n${item.location}'),
                 trailing: item.canDiscard
                     ? TextButton(
                         onPressed: idle
                             ? () async {
                                 if (await _confirmPrivateDiscard(
                                   context,
-                                  title: 'Discard private residue?',
+                                  title: AppStrings.of(context).text('Discard private residue?'),
                                   detail: item.reason,
                                 )) {
                                   await library.discardOfflineLeftover(
@@ -485,7 +492,7 @@ class _CohortPanel extends StatelessWidget {
                                 }
                               }
                             : null,
-                        child: const Text('Discard'),
+                        child: Text(AppStrings.of(context).text('Discard')),
                       )
                     : null,
               ),
@@ -525,23 +532,23 @@ class _ResourceTransfersPanel extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Retained file transfers',
-              style: TextStyle(fontWeight: FontWeight.bold),
+            Text(
+              AppStrings.of(context).text('Retained file transfers'),
+              style: const TextStyle(fontWeight: FontWeight.bold),
             ),
             if (state.busy) ...[
               const LinearProgressIndicator(),
-              Text('Resources: ${state.phase.name}…'),
+              Text(AppStrings.of(context).text('Resources: {name}…', {'name': (AppStrings.of(context).text(state.phase.name)).toString()})),
               TextButton(
                 onPressed: closed ? null : library.cancelResource,
-                child: const Text('Cancel resource transfer'),
+                child: Text(AppStrings.of(context).text('Cancel resource transfer')),
               ),
             ],
-            if (state.error != null) SelectableText(state.error!),
-            if (state.message != null) SelectableText(state.message!),
+            if (state.error != null) SelectableText(AppStrings.of(context).message(state.error!)),
+            if (state.message != null) SelectableText(AppStrings.of(context).message(state.message!)),
             if (state.externalMayBeIncomplete)
-              const Text(
-                'A previous external Save As may already exist or be incomplete. Verify its destination before saving again.',
+              Text(
+                AppStrings.of(context).text('A previous external Save As may already exist or be incomplete. Verify its destination before saving again.'),
               ),
             for (final attempt in state.attempts)
               Padding(
@@ -550,33 +557,39 @@ class _ResourceTransfersPanel extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      '${attempt.operation.name}: ${attempt.name}${attempt.newName == null ? '' : ' → ${attempt.newName}'} · ${attempt.stage.name}',
+                      '${AppStrings.of(context).text(attempt.operation.name)}: ${attempt.name}${attempt.newName == null ? '' : ' → ${attempt.newName}'} · ${AppStrings.of(context).text(attempt.stage.name)}',
                     ),
                     SelectableText(
-                      'Notebook ${attempt.target.notebookId}\nNote ${attempt.target.nodeId}',
+                      AppStrings.of(context).text('Notebook {notebookId}\nNote {nodeId}', {'notebookId': (attempt.target.notebookId).toString(), 'nodeId': (attempt.target.nodeId).toString()}),
                     ),
                     if (attempt.stage == TransferStage.committed)
-                      const Text(
-                        'The file operation committed. No editor link is inserted by recovery. Open the note and explicitly insert a link; Write still controls source durability.',
+                      Text(
+                        AppStrings.of(context).text('The file operation committed. No editor link is inserted by recovery. Open the note and explicitly insert a link; Write still controls source durability.'),
                       ),
                     if (state.listing?.notebookId ==
                             attempt.target.notebookId &&
                         state.listing?.nodeId == attempt.target.nodeId)
                       for (final entry in state.listing!.entries)
                         Text(
-                          '${entry.name} · ${entry.tracked ? 'tracked' : 'unindexed'} · ${entry.exists ? '${entry.bytes} bytes' : 'missing'}',
+                          '${entry.name} · ${entry.tracked ? AppStrings.of(context).text('tracked') : AppStrings.of(context).text('unindexed')} · ${entry.exists ? AppStrings.of(context).text('{bytes} bytes', {'bytes': (entry.bytes).toString()}) : AppStrings.of(context).text('missing')}',
                         ),
                     Wrap(
                       spacing: 8,
                       children: [
+                        if (attempt.stage == TransferStage.exportReady)
+                          TextButton.icon(
+                            onPressed: privateIdle ? () => library.shareResource(attempt) : null,
+                            icon: const Icon(Icons.share_outlined),
+                            label: Text(AppStrings.of(context).text('Share retained copy')),
+                          ),
                         if (attempt.stage != TransferStage.exportUnavailable &&
                             (attempt.operation != ResourceOperation.export || attempt.origin == ResourceExportOrigin.asset))
                           TextButton(
                             onPressed: idle ? () => library.inspectResource(attempt) : null,
-                            child: const Text('Inspect actual resources'),
+                            child: Text(AppStrings.of(context).text('Inspect actual resources')),
                           ),
                         if (attempt.stage == TransferStage.exportUnavailable)
-                          const Text('The immutable export source is unavailable. Only explicit private discard is allowed.'),
+                          Text(AppStrings.of(context).text('The immutable export source is unavailable. Only explicit private discard is allowed.')),
                         if (attempt.stage != TransferStage.committed && attempt.stage != TransferStage.exportUnavailable)
                           FilledButton(
                             onPressed: (attempt.stage == TransferStage.exportReady ? privateIdle : idle)
@@ -584,8 +597,8 @@ class _ResourceTransfersPanel extends StatelessWidget {
                                 : null,
                             child: Text(
                               attempt.stage == TransferStage.exportReady
-                                  ? 'Save As again'
-                                  : 'Retry / recover',
+                                  ? AppStrings.of(context).text('Save As again')
+                                  : AppStrings.of(context).text('Retry / recover'),
                             ),
                           ),
                         TextButton(
@@ -593,10 +606,9 @@ class _ResourceTransfersPanel extends StatelessWidget {
                               ? () async {
                                   if (await _confirmPrivateDiscard(
                                         context,
-                                        title: 'Discard resource staging?',
+                                        title: AppStrings.of(context).text('Discard resource staging?'),
                                         detail:
-                                            'Only private staging is discarded. Committed attachments and images remain in the notebook. '
-                                            'An unresolved live outcome must be recovered or explicitly abandoned.',
+                                            AppStrings.of(context).text('Only private staging is discarded. Committed attachments and images remain in the notebook. An unresolved live outcome must be recovered or explicitly abandoned.'),
                                       ) &&
                                       library.value.resourceState.attempts.any(
                                         (item) => identical(item, attempt),
@@ -605,7 +617,7 @@ class _ResourceTransfersPanel extends StatelessWidget {
                                   }
                                 }
                               : null,
-                          child: const Text('Discard staging'),
+                          child: Text(AppStrings.of(context).text('Discard staging')),
                         ),
                         if (attempt.stage == TransferStage.intent ||
                             attempt.stage == TransferStage.quarantined)
@@ -614,12 +626,10 @@ class _ResourceTransfersPanel extends StatelessWidget {
                                 ? () async {
                                     if (await _confirmPrivateDiscard(
                                           context,
-                                          title: 'Abandon private recovery records?',
+                                          title: AppStrings.of(context).text('Abandon private recovery records?'),
                                           detail:
-                                              'Inspect the listed actual resources first. The live outcome is ambiguous. '
-                                              'Every live file, including an unexpected suffix copy, is preserved. '
-                                              'Only private staging and recovery records are abandoned. Nothing is recopied, deleted live, or linked into source.',
-                                          action: 'Abandon private staging',
+                                              AppStrings.of(context).text('Inspect the listed actual resources first. The live outcome is ambiguous. Every live file, including an unexpected suffix copy, is preserved. Only private staging and recovery records are abandoned. Nothing is recopied, deleted live, or linked into source.'),
+                                          action: AppStrings.of(context).text('Abandon private staging'),
                                         ) &&
                                         library.value.resourceState.attempts
                                             .any(
@@ -633,7 +643,7 @@ class _ResourceTransfersPanel extends StatelessWidget {
                                     }
                                   }
                                 : null,
-                            child: const Text('Abandon private staging'),
+                            child: Text(AppStrings.of(context).text('Abandon private staging')),
                           ),
                       ],
                     ),
@@ -642,15 +652,15 @@ class _ResourceTransfersPanel extends StatelessWidget {
               ),
             for (final item in state.leftovers)
               ListTile(
-                title: Text(item.label),
-                subtitle: SelectableText('${item.reason}\n${item.location}'),
+                title: Text(AppStrings.of(context).message(item.label)),
+                subtitle: SelectableText('${AppStrings.of(context).message(item.reason)}\n${item.location}'),
                 trailing: item.canDiscard
                     ? TextButton(
                         onPressed: idle
                             ? () async {
                                 if (await _confirmPrivateDiscard(
                                   context,
-                                  title: 'Discard private residue?',
+                                  title: AppStrings.of(context).text('Discard private residue?'),
                                   detail: item.reason,
                                 )) {
                                   await library.discardOfflineLeftover(
@@ -660,7 +670,7 @@ class _ResourceTransfersPanel extends StatelessWidget {
                                 }
                               }
                             : null,
-                        child: const Text('Discard'),
+                        child: Text(AppStrings.of(context).text('Discard')),
                       )
                     : null,
               ),
@@ -687,19 +697,19 @@ class _CohortNameDialogState extends State<_CohortNameDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('New child folder name'),
+  Widget build(BuildContext context) => AlertDialog(scrollable: true, 
+    title: Text(AppStrings.of(context).text('New child folder name')),
     content: TextField(controller: _name, autofocus: true, autocorrect: false),
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
+        child: Text(AppStrings.of(context).text('Cancel')),
       ),
       FilledButton(
         onPressed: () {
           if (_name.text.trim().isNotEmpty) Navigator.pop(context, _name.text);
         },
-        child: const Text('Save name'),
+        child: Text(AppStrings.of(context).text('Save name')),
       ),
     ],
   );
@@ -724,17 +734,17 @@ class _ImportPanel extends StatelessWidget {
   ) async =>
       await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
+        builder: (context) => AlertDialog(scrollable: true, 
           title: Text(title),
-          content: Text(detail),
+          content: Text(AppStrings.of(context).message(detail)),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
+              child: Text(AppStrings.of(context).text('Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text(action),
+              child: Text(AppStrings.of(context).text(action)),
             ),
           ],
         ),
@@ -767,36 +777,36 @@ class _ImportPanel extends StatelessWidget {
               const LinearProgressIndicator(),
               Text(switch (state.phase) {
                 NotebookImportPhase.receiving => current?.isWebDavClone == true
-                    ? 'Downloading the WebDAV notebook into private staging…'
-                    : 'Copying the selected source…',
+                    ? AppStrings.of(context).text('Downloading the WebDAV notebook into private staging…')
+                    : AppStrings.of(context).text('Copying the selected source…'),
                 NotebookImportPhase.validating =>
-                  'Validating notebook archive and paths…',
+                  AppStrings.of(context).text('Validating notebook archive and paths…'),
                 NotebookImportPhase.publishing =>
-                  'Validating identities and publishing notebook…',
-                NotebookImportPhase.finishing => 'Finishing published import…',
+                  AppStrings.of(context).text('Validating identities and publishing notebook…'),
+                NotebookImportPhase.finishing => AppStrings.of(context).text('Finishing published import…'),
                 NotebookImportPhase.reconciling =>
-                  'Reconciling private import storage…',
-                _ => 'Working on import…',
+                  AppStrings.of(context).text('Reconciling private import storage…'),
+                _ => AppStrings.of(context).text('Working on import…'),
               }),
             ],
             if (current != null) ...[
               Text(
-                'Import: ${current.notebookName ?? current.sourceName ?? 'Notebook source'}',
+                AppStrings.of(context).text('Import: {value}', {'value': (current.notebookName ?? current.sourceName ?? AppStrings.of(context).text('Notebook source')).toString()}),
               ),
-              Text('${current.entries} entries · ${current.bytes} bytes'),
+              Text(AppStrings.of(context).text('{entries} entries · {bytes} bytes', {'entries': (current.entries).toString(), 'bytes': (current.bytes).toString()})),
               if (current.isWebDavClone && !current.cloneComplete)
-                const Text('An incomplete WebDAV download cannot be resumed as a proved notebook. Discard its private staging before reconnecting.'),
+                Text(AppStrings.of(context).text('An incomplete WebDAV download cannot be resumed as a proved notebook. Discard its private staging before reconnecting.')),
               if (current.isWebDavClone && current.destination != null && !current.credentialsSettled)
-                const Text('The complete notebook is published and retained. Finish connection recovery before clearing its private publication receipt.'),
+                Text(AppStrings.of(context).text('The complete notebook is published and retained. Finish connection recovery before clearing its private publication receipt.')),
             ],
-            if (state.error != null) SelectableText(state.error!),
-            if (state.message != null) SelectableText(state.message!),
+            if (state.error != null) SelectableText(AppStrings.of(context).message(state.error!)),
+            if (state.message != null) SelectableText(AppStrings.of(context).message(state.message!)),
             if (state.busy &&
                 state.phase != NotebookImportPhase.finishing &&
                 state.phase != NotebookImportPhase.reconciling)
               TextButton(
                 onPressed: closed ? null : library.cancelImport,
-                child: const Text('Cancel import'),
+                child: Text(AppStrings.of(context).text('Cancel import')),
               ),
             if (current != null && !state.busy)
               Wrap(
@@ -806,11 +816,11 @@ class _ImportPanel extends StatelessWidget {
                       onPressed: () async {
                         if (await _confirm(
                               context,
-                              current.isWebDavClone && current.destination != null ? 'Finish connection recovery?' : 'Import this notebook?',
+                              current.isWebDavClone && current.destination != null ? AppStrings.of(context).text('Finish connection recovery?') : AppStrings.of(context).text('Import this notebook?'),
                               current.isWebDavClone && current.destination != null
-                                ? 'The already-published notebook is retained while its credential and routing transaction finishes. No new copy is created.'
-                                : 'The complete copy will be checked and registered with its original identities. Existing notebooks will not be overwritten or merged.',
-                              current.isWebDavClone && current.destination != null ? 'Finish connection' : 'Import notebook',
+                                ? AppStrings.of(context).text('The already-published notebook is retained while its credential and routing transaction finishes. No new copy is created.')
+                                : AppStrings.of(context).text('The complete copy will be checked and registered with its original identities. Existing notebooks will not be overwritten or merged.'),
+                              current.isWebDavClone && current.destination != null ? AppStrings.of(context).text('Finish connection') : AppStrings.of(context).text('Import notebook'),
                             ) &&
                             context.mounted &&
                             identical(
@@ -822,23 +832,23 @@ class _ImportPanel extends StatelessWidget {
                         }
                       },
                       child: Text(
-                        current.destination == null ? 'Validate and import'
-                            : current.isWebDavClone ? 'Finish connection' : 'Resume import',
+                        current.destination == null ? AppStrings.of(context).text('Validate and import')
+                            : current.isWebDavClone ? AppStrings.of(context).text('Finish connection') : AppStrings.of(context).text('Resume import'),
                       ),
                     ),
                   if (idle && current.treeRelative == null && (!current.isWebDavClone || current.cloneComplete))
                     TextButton(
                       onPressed: () => library.retryImport(current),
-                      child: const Text('Retry preparation'),
+                      child: Text(AppStrings.of(context).text('Retry preparation')),
                     ),
                   TextButton(
                     onPressed: idle && !(current.isWebDavClone && current.destination != null && !current.credentialsSettled)
                         ? () async {
                             if (await _confirm(
                                   context,
-                                  'Discard this import?',
-                                  'Remove this private staging and, only if ownership is proven, its unregistered published copy. Existing notebooks and the original source are not deleted.',
-                                  'Discard import',
+                                  AppStrings.of(context).text('Discard this import?'),
+                                  AppStrings.of(context).text('Remove this private staging and, only if ownership is proven, its unregistered published copy. Existing notebooks and the original source are not deleted.'),
+                                  AppStrings.of(context).text('Discard import'),
                                 ) &&
                                 context.mounted &&
                                 identical(
@@ -850,7 +860,7 @@ class _ImportPanel extends StatelessWidget {
                             }
                           }
                         : null,
-                    child: const Text('Discard import'),
+                    child: Text(AppStrings.of(context).text('Discard import')),
                   ),
                 ],
               ),
@@ -859,22 +869,22 @@ class _ImportPanel extends StatelessWidget {
                 onPressed: idle && available
                     ? library.openExistingImportNotebook
                     : null,
-                child: const Text('Open existing notebook'),
+                child: Text(AppStrings.of(context).text('Open existing notebook')),
               ),
             for (final item in state.leftovers)
               ListTile(
                 title: Text(item.label),
-                subtitle: Text(item.reason),
+                subtitle: Text(AppStrings.of(context).message(item.reason)),
                 trailing: IconButton(
-                  tooltip: 'Discard import data ${item.label}',
+                  tooltip: AppStrings.of(context).text('Discard import data {label}', {'label': (item.label).toString()}),
                   icon: const Icon(Icons.delete_outline),
                   onPressed: idle
                       ? () async {
                           if (await _confirm(
                                 context,
-                                'Discard “${item.label}”?',
-                                'Only this private staging item may be removed. Ambiguous published roots remain quarantined.',
-                                'Discard staging',
+                                AppStrings.of(context).text('Discard “{label}”?', {'label': (item.label).toString()}),
+                                AppStrings.of(context).text('Only this private staging item may be removed. Ambiguous published roots remain quarantined.'),
+                                AppStrings.of(context).text('Discard staging'),
                               ) &&
                               context.mounted &&
                               library.value.importState.leftovers.any(
@@ -907,19 +917,19 @@ class _ExportPanel extends StatelessWidget {
   Future<bool> _confirmDiscard(BuildContext context, String label) async =>
       await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
-          title: Text('Discard “$label”?'),
-          content: const Text(
-            'This removes only the selected app-private export copy or interrupted export data. It does not remove a notebook or a copy already saved to a provider.',
+        builder: (context) => AlertDialog(scrollable: true, 
+          title: Text(AppStrings.of(context).text('Discard “{label}”?', {'label': (label).toString()})),
+          content: Text(
+            AppStrings.of(context).text('This removes only the selected app-private export copy or interrupted export data. It does not remove a notebook or a copy already saved to a provider.'),
           ),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
+              child: Text(AppStrings.of(context).text('Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: const Text('Discard'),
+              child: Text(AppStrings.of(context).text('Discard')),
             ),
           ],
         ),
@@ -936,7 +946,7 @@ class _ExportPanel extends StatelessWidget {
         state.message == null) {
       return const SizedBox.shrink();
     }
-    final idle = !closed && !state.busy;
+    final idle = !closed && !state.busy && !library.value.busy && library.value.inboxReady;
     return Card(
       margin: const EdgeInsets.all(12),
       child: Padding(
@@ -948,41 +958,46 @@ class _ExportPanel extends StatelessWidget {
               const LinearProgressIndicator(),
               Text(switch (state.phase) {
                 NotebookExportPhase.reconciling =>
-                  'Updating private export storage…',
+                  AppStrings.of(context).text('Updating private export storage…'),
                 NotebookExportPhase.preparing =>
-                  'Preparing saved notebook snapshot…',
-                NotebookExportPhase.archiving => 'Creating ZIP copy…',
+                  AppStrings.of(context).text('Preparing saved notebook snapshot…'),
+                NotebookExportPhase.archiving => AppStrings.of(context).text('Creating ZIP copy…'),
                 NotebookExportPhase.saving =>
-                  'Saving to the selected provider…',
+                  AppStrings.of(context).text('Export in progress…'),
                 NotebookExportPhase.idle => '',
               }),
             ],
             if (prepared != null) ...[
               Text(
-                '${prepared.format == CoreExportFormat.notebook ? 'Notebook backup' : 'Files and assets'}: ${prepared.notebookName}',
+                '${prepared.format == CoreExportFormat.notebook ? AppStrings.of(context).text('Notebook backup') : AppStrings.of(context).text('Files and assets')}: ${prepared.notebookName}',
               ),
               if (prepared.format == CoreExportFormat.filesAndAssets)
-                const Text(
-                  'Not a notebook backup. The entire vx_notebook directory (including unknown files), notebook identity, tags, configuration and configured recycle data are omitted.',
+                Text(
+                  AppStrings.of(context).text('Not a notebook backup. The entire vx_notebook directory (including unknown files), notebook identity, tags, configuration and configured recycle data are omitted.'),
                 ),
               Text(
-                '${prepared.bytes} bytes · retained until saved or discarded',
+                AppStrings.of(context).text('{bytes} bytes · retained until saved or discarded', {'bytes': (prepared.bytes).toString()}),
               ),
             ],
-            if (state.error != null) SelectableText(state.error!),
-            if (state.message != null) SelectableText(state.message!),
+            if (state.error != null) SelectableText(AppStrings.of(context).message(state.error!)),
+            if (state.message != null) SelectableText(AppStrings.of(context).message(state.message!)),
             if (state.busy && state.phase != NotebookExportPhase.reconciling)
               TextButton(
                 onPressed: closed ? null : library.cancelExport,
-                child: const Text('Cancel export'),
+                child: Text(AppStrings.of(context).text('Cancel export')),
               ),
             if (prepared != null && !state.busy)
               Wrap(
                 children: [
                   TextButton.icon(
+                    onPressed: idle ? () => library.shareExport(prepared) : null,
+                    icon: const Icon(Icons.share_outlined),
+                    label: Text(AppStrings.of(context).text('Share')),
+                  ),
+                  TextButton.icon(
                     onPressed: idle ? () => library.saveExport(prepared) : null,
                     icon: const Icon(Icons.save_alt),
-                    label: const Text('Save export as…'),
+                    label: Text(AppStrings.of(context).text('Save export as…')),
                   ),
                   TextButton(
                     onPressed: idle
@@ -1002,16 +1017,16 @@ class _ExportPanel extends StatelessWidget {
                             }
                           }
                         : null,
-                    child: const Text('Discard export'),
+                    child: Text(AppStrings.of(context).text('Discard export')),
                   ),
                 ],
               ),
             for (final leftover in state.leftovers)
               ListTile(
                 title: Text(leftover.label),
-                subtitle: Text(leftover.reason),
+                subtitle: Text(AppStrings.of(context).message(leftover.reason)),
                 trailing: IconButton(
-                  tooltip: 'Discard export data ${leftover.label}',
+                  tooltip: AppStrings.of(context).text('Discard export data {label}', {'label': (leftover.label).toString()}),
                   icon: const Icon(Icons.delete_outline),
                   onPressed: idle
                       ? () async {
@@ -1059,26 +1074,26 @@ class _NewNotebookDialogState extends State<_NewNotebookDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('New notebook'),
+  Widget build(BuildContext context) => AlertDialog(scrollable: true, 
+    title: Text(AppStrings.of(context).text('New notebook')),
     content: Form(
       key: _form,
       child: TextFormField(
         controller: _controller,
         autofocus: true,
         autocorrect: false,
-        decoration: const InputDecoration(labelText: 'Name'),
+        decoration: InputDecoration(labelText: AppStrings.of(context).text('Name')),
         validator: (value) =>
-            value == null || value.trim().isEmpty ? 'Enter a name.' : null,
+            value == null || value.trim().isEmpty ? AppStrings.of(context).text('Enter a name.') : null,
         onFieldSubmitted: (_) => _submit(),
       ),
     ),
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
+        child: Text(AppStrings.of(context).text('Cancel')),
       ),
-      FilledButton(onPressed: _submit, child: const Text('Create')),
+      FilledButton(onPressed: _submit, child: Text(AppStrings.of(context).text('Create'))),
     ],
   );
 }

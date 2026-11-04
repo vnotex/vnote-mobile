@@ -60,6 +60,7 @@ const licenseMarkers = new Map([
   ['CC0-1.0', [/CC0 1\.0 Universal/i, /No Copyright|Waiver/i]],
   ['Unlicense', [/free and unencumbered software released into the public domain/i, /THE SOFTWARE IS PROVIDED/i]],
 ]);
+const runtimeInventory = new Map();
 async function runtimeNotices(metafile) {
   const bundled = new Set();
   for (const output of Object.values(metafile.outputs)) for (const [input, contribution] of Object.entries(output.inputs)) {
@@ -122,6 +123,14 @@ async function runtimeNotices(metafile) {
     const markers = licenseMarkers.get(license);
     const combined = texts.join('\n');
     if (!markers || markers.some(marker => !marker.test(combined))) throw new Error(`Unsupported or incomplete runtime license for ${name}: ${license}`);
+    const lockPath = portable(relative(packageDir, directory));
+    const locked = lock.packages[lockPath];
+    if (!locked || locked.version !== metadata.version || !locked.integrity || !locked.resolved) {
+      throw new Error(`Bundled package lacks exact locked source integrity: ${name}`);
+    }
+    runtimeInventory.set(name, { ecosystem: 'npm', name: metadata.name, version: metadata.version,
+      license, source: locked.resolved, integrity: locked.integrity,
+      evidence: texts.map((text, index) => ({ name: files[index] ?? 'README.md#License', sha256: sha256(Buffer.from(text)), text })) });
     notices.push(`\n===== ${name} (${license}) =====\n${combined}\n`);
   }
   if (babelHelpers) {
@@ -351,12 +360,20 @@ async function buildAssets(check) {
   outputs.set('apps/vnote_mobile/assets/preview/preview.css', styles.css);
   outputs.set('apps/vnote_mobile/assets/editor/NOTICE.txt', Buffer.from(await runtimeNotices(editor.metafile)));
   outputs.set('apps/vnote_mobile/assets/preview/NOTICE.txt', Buffer.from(await runtimeNotices(renderer.metafile) + styles.notice));
+  outputs.set('.tools/notices/npm-runtime.json', Buffer.from(JSON.stringify({ schema: 1,
+    lockSha256: sha256(await readFile(join(packageDir, 'package-lock.json'))),
+    producerSha256: sha256(await readFile(fileURLToPath(import.meta.url))),
+    components: [...runtimeInventory.values()].sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`, 'en')),
+    // Existing audited embedded helpers/font licenses remain in these exact bodies.
+    notices: ['editor', 'preview'].map(name => ({ name,
+      text: outputs.get(`apps/vnote_mobile/assets/${name}/NOTICE.txt`).toString('utf8') })),
+  }, null, 2) + '\n'));
   for (const name of ['COPYING', 'COPYING.LESSER']) outputs.set(`apps/vnote_mobile/assets/legal/${name}`, await readFile(join(root, name)));
   const sourcePaths = [
     '.node-version', 'toolchains.json', 'pubspec.yaml', 'pubspec.lock', 'COPYING', 'COPYING.LESSER',
     'apps/vnote_mobile/pubspec.yaml', 'packages/editor_web/package.json', 'packages/editor_web/package-lock.json',
     'packages/editor_web/tsconfig.json', 'packages/editor_web/build.mjs',
-    ...['protocol.ts', 'editor.ts', 'formatting.ts', 'render.ts', 'render_policy.ts', 'preview.ts', 'index.html', 'editor.css', 'render.html', 'preview.html', 'preview.css'].map(name => `packages/editor_web/src/${name}`),
+    ...['protocol.ts', 'editor.ts', 'localization.ts', 'formatting.ts', 'render.ts', 'render_policy.ts', 'preview.ts', 'index.html', 'editor.css', 'render.html', 'preview.html', 'preview.css'].map(name => `packages/editor_web/src/${name}`),
     ...['protocol.test.ts', 'formatting.test.ts', 'render.test.ts', 'render_policy.test.ts', 'fixtures/preview_cases.json'].map(name => `packages/editor_web/test/${name}`),
   ].sort();
   const sources = {};

@@ -12,7 +12,7 @@
 <body>
   <header>
     <h1 id="source-title">Source</h1>
-    <p>Received input is held in memory. Draft saved confirms private recovery storage; Saved locally confirms the notebook write.</p>
+    <p id="receipt-description">Received input is held in memory. Draft saved confirms private recovery storage; Saved locally confirms the notebook write.</p>
   </header>
   <p id="status" role="status" aria-live="polite" aria-atomic="true">Waiting for the host. Editing is disabled.</p>
   <p id="history-notice" role="status" hidden>Older undo history reached its limit and was removed. Current text and recent undo steps are retained.</p>
@@ -20,8 +20,8 @@
   <main id="editor" aria-label="Source editor"></main>
   <section id="refusal" hidden aria-labelledby="refusal-title">
     <h2 id="refusal-title">Composition was not committed</h2>
-    <p>The previous document is retained. This is the last in-limit provisional candidate, for copying only.</p>
-    <textarea id="candidate" readonly aria-label="Uncommitted composition candidate" spellcheck="false"></textarea>
+    <p id="refusal-description">The previous document is retained. This is the last in-limit provisional candidate, for copying only.</p>
+    <textarea id="candidate" readonly aria-label="Uncommitted composition candidate" aria-describedby="refusal-description" spellcheck="false"></textarea>
     <button id="dismiss" type="button">Dismiss candidate</button>
   </section>
   <script nonce="__VNOTE_NONCE__">__VNOTE_SCRIPT__</script>

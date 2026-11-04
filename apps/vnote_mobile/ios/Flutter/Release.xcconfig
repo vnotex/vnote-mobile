@@ -1,1 +1,3 @@
 #include "Generated.xcconfig"
+// Profile also uses this file. Owner.xcconfig is passed explicitly by the
+// owner release command only; never include owner IDs or entitlements here.

@@ -7,6 +7,9 @@ import 'package:flutter/services.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 import 'package:webview_flutter/webview_flutter.dart';
 
+import '../../l10n/app_strings.dart';
+import '../../l10n/locale_settings.dart';
+import '../../app/adaptive_workspace.dart';
 import '../../services/editor_session.dart';
 import '../../services/managed_notebook_storage.dart';
 import '../../services/notebook_session.dart';
@@ -41,7 +44,7 @@ class NotebookEditor extends StatefulWidget {
   State<NotebookEditor> createState() => _NotebookEditorState();
 }
 
-class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObserver {
+class _NotebookEditorState extends State<NotebookEditor> {
   late final NotebookSession _notebook;
   late final EditorSend _transport = _send;
   EditorSession? _boundEditor;
@@ -58,6 +61,7 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
   Future<void> _outbound = Future<void>.value();
   int _queuedMessages = 0;
   SurfacePreferences? _lastPreferences;
+  String? _lastLocale;
   PreviewSession? _preview;
   bool _showPreview = false;
   Timer? _previewTimer;
@@ -69,16 +73,8 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
   void initState() {
     super.initState();
     _notebook = widget.session;
-    WidgetsBinding.instance.addObserver(this);
-    _notebook.setForeground(WidgetsBinding.instance.lifecycleState == null ||
-        WidgetsBinding.instance.lifecycleState == AppLifecycleState.resumed);
     _notebook.addListener(_notebookChanged);
     _notebookChanged();
-  }
-
-  @override
-  void didChangeAppLifecycleState(AppLifecycleState state) {
-    _notebook.setForeground(state == AppLifecycleState.resumed);
   }
 
   SurfacePreferences _preferences() {
@@ -106,8 +102,10 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
   void _preferencesChanged() {
     if (_disposed) return;
     final next = _preferences();
-    if (_lastPreferences == next) return;
+    final locale = Localizations.localeOf(context).languageCode == 'zh' ? 'zh' : 'en';
+    if (_lastPreferences == next && _lastLocale == locale) return;
     _lastPreferences = next;
+    _lastLocale = locale;
     _sendPreferences();
     final preview = _preview;
     if (preview != null && _showPreview) {
@@ -121,6 +119,7 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     final preferences = _lastPreferences;
     if (editor == null || preferences == null) return;
     final message = editor.preferences(
+      locale: _lastLocale ?? 'en',
       dark: preferences.dark,
       highContrast: preferences.highContrast,
       fontScale: preferences.fontScale,
@@ -152,7 +151,7 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     if (previousSurface != null) {
       unawaited(widget.surfaces.disposeEditor(previousSurface).catchError((Object _) {}));
     }
-    if (editor != null) unawaited(_initializeWebView(editor, epoch));
+    if (editor != null && !_notebook.value.restartRequired) unawaited(_initializeWebView(editor, epoch));
   }
 
   bool _current(EditorSession editor, int epoch) =>
@@ -229,7 +228,7 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
   }
 
   Future<void> _recoverLostView(EditorSession editor, int epoch) async {
-    if (!_current(editor, epoch) || _recoveringView) return;
+    if (!_current(editor, epoch) || _recoveringView || _notebook.value.restartRequired) return;
     _recoveringView = true;
     _notebook.unbindTransport(_transport);
     try {
@@ -277,13 +276,13 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     if (action == 'link') {
       final controller = TextEditingController();
       try {
-        destination = await showDialog<String>(context: context, builder: (context) => AlertDialog(
-          title: const Text('Link destination'),
+        destination = await showDialog<String>(context: context, builder: (context) => AlertDialog(scrollable: true, 
+          title: Text(AppStrings.of(context).text('Link destination')),
           content: TextField(controller: controller, autofocus: true, autocorrect: false,
-            maxLength: 2048, decoration: const InputDecoration(hintText: 'Relative note, #heading, or HTTPS URL')),
+            maxLength: 2048, decoration: InputDecoration(hintText: AppStrings.of(context).text('Relative note, #heading, or HTTPS URL'))),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-            FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: const Text('Insert link')),
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(AppStrings.of(context).text('Cancel'))),
+            FilledButton(onPressed: () => Navigator.pop(context, controller.text), child: Text(AppStrings.of(context).text('Insert link'))),
           ],
         ));
       } finally { controller.dispose(); }
@@ -395,16 +394,16 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     final preview = _preview;
     if (preview == null || !preview.isCurrent(snapshot)) return;
     final detail = switch (target.kind) {
-      CorePreviewNavigationKind.external => '${target.insecure ? 'Unencrypted HTTP link. ' : ''}Open ${target.origin} in the system browser?',
-      CorePreviewNavigationKind.note => 'Open the linked note? Current input will be kept as a durable draft first.',
-      CorePreviewNavigationKind.export => 'Export a copy of this attachment? Another application or provider will receive its bytes.',
+      CorePreviewNavigationKind.external => AppStrings.of(context).text('{value}Open {origin} in the system browser?', {'value': (target.insecure ? AppStrings.of(context).text('Unencrypted HTTP link. ') : '').toString(), 'origin': (target.origin).toString()}),
+      CorePreviewNavigationKind.note => AppStrings.of(context).text('Open the linked note? Current input will be kept as a durable draft first.'),
+      CorePreviewNavigationKind.export => AppStrings.of(context).text('Export a copy of this attachment? Another application or provider will receive its bytes.'),
     };
-    final approved = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
-      title: const Text('Follow preview link?'),
-      content: Text(detail),
+    final approved = await showDialog<bool>(context: context, builder: (context) => AlertDialog(scrollable: true, 
+      title: Text(AppStrings.of(context).text('Follow preview link?')),
+      content: Text(AppStrings.of(context).message(detail)),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-        FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Continue')),
+        TextButton(onPressed: () => Navigator.pop(context, false), child: Text(AppStrings.of(context).text('Cancel'))),
+        FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(AppStrings.of(context).text('Continue'))),
       ],
     ));
     if (approved != true || _disposed || !identical(preview, _preview) || !preview.isCurrent(snapshot)) return;
@@ -433,8 +432,9 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     if (editor == null || _notebook.value.busy) return;
     await showModalBottomSheet<void>(context: context, isScrollControlled: true, useSafeArea: true,
       builder: (context) => FractionallySizedBox(heightFactor: 0.9,
-        child: ResourcePanel(library: widget.library, workspace: widget.workspace,
-          session: _notebook, editor: editor, send: _transport)));
+        child: Padding(padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+          child: ResourcePanel(library: widget.library, workspace: widget.workspace,
+            session: _notebook, editor: editor, send: _transport))));
   }
 
   Future<void> _copyReceivedText() async {
@@ -444,9 +444,9 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
 
   Future<void> _recoverView() async {
     final editor = _boundEditor;
-    if (editor == null || _recoveringView) return;
+    if (editor == null || _recoveringView || _notebook.value.restartRequired) return;
     try {
-      if (_loadSent) {
+      if (_loadSent && !_notebook.canRecoverQuiescedView) {
         final candidate = await editor.requestResync(_transport);
         if (_disposed || !mounted || !identical(editor, _boundEditor)) return;
         if (candidate.text == editor.value.text && candidate.revision == editor.value.revision) {
@@ -454,13 +454,13 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
           _notebook.bindTransport(_transport);
           return;
         }
-        final useView = await showDialog<bool>(context: context, builder: (context) => AlertDialog(
-          title: const Text('Two source versions are retained'),
-          content: const Text('The live editor differs from the received mirror. Choose which source to checkpoint into a new editor session; the other version remains recovery evidence.'),
+        final useView = await showDialog<bool>(context: context, builder: (context) => AlertDialog(scrollable: true, 
+          title: Text(AppStrings.of(context).text('Two source versions are retained')),
+          content: Text(AppStrings.of(context).text('The live editor differs from the received mirror. Choose which source to checkpoint into a new editor session; the other version remains recovery evidence.')),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-            TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Use received source')),
-            FilledButton(onPressed: () => Navigator.pop(context, true), child: const Text('Use editor source')),
+            TextButton(onPressed: () => Navigator.pop(context), child: Text(AppStrings.of(context).text('Cancel'))),
+            TextButton(onPressed: () => Navigator.pop(context, false), child: Text(AppStrings.of(context).text('Use received source'))),
+            FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(AppStrings.of(context).text('Use editor source'))),
           ],
         ));
         if (useView == null || _disposed || !identical(editor, _boundEditor)) return;
@@ -475,18 +475,18 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
 
   Future<void> _requestExit() => _requestBarrier(reopen: false);
   Future<void> _requestBarrier({required bool reopen}) async {
-    if (_showingExitDialog || _notebook.value.transitioning || widget.workspace.value.busy) return;
+    if (_showingExitDialog || _notebook.value.restartRequired || _notebook.value.transitioning || widget.workspace.value.busy) return;
     _showingExitDialog = true;
-    final disposition = await showDialog<NotebookDisposition>(context: context, builder: (context) => AlertDialog(
-      title: Text(reopen ? 'Reopen from disk?' : 'Return to notebook?'),
-      content: const Text('Finish composition and save the exact final revision, or keep it as a durable draft without writing the notebook. Explicit discard removes unwritten source only after confirmation.'),
+    final disposition = await showDialog<NotebookDisposition>(context: context, builder: (context) => AlertDialog(scrollable: true, 
+      title: Text(reopen ? AppStrings.of(context).text('Reopen from disk?') : AppStrings.of(context).text('Return to notebook?')),
+      content: Text(AppStrings.of(context).text('Finish composition and save the exact final revision, or keep it as a durable draft without writing the notebook. Explicit discard removes unwritten source only after confirmation.')),
       actions: [
-        TextButton(onPressed: () => Navigator.pop(context, NotebookDisposition.cancel), child: const Text('Cancel')),
-        TextButton(onPressed: () => Navigator.pop(context, NotebookDisposition.discard), child: const Text('Discard')),
+        TextButton(onPressed: () => Navigator.pop(context, NotebookDisposition.cancel), child: Text(AppStrings.of(context).text('Cancel'))),
+        TextButton(onPressed: () => Navigator.pop(context, NotebookDisposition.discard), child: Text(AppStrings.of(context).text('Discard'))),
         TextButton(onPressed: _boundEditor?.canFlushSource == true
-            ? () => Navigator.pop(context, NotebookDisposition.retain) : null, child: const Text('Keep draft')),
+            ? () => Navigator.pop(context, NotebookDisposition.retain) : null, child: Text(AppStrings.of(context).text('Keep draft'))),
         FilledButton(onPressed: _boundEditor?.canFlushSource == true
-            ? () => Navigator.pop(context, NotebookDisposition.write) : null, child: const Text('Save and close')),
+            ? () => Navigator.pop(context, NotebookDisposition.write) : null, child: Text(AppStrings.of(context).text('Save and close'))),
       ],
     ));
     _showingExitDialog = false;
@@ -499,10 +499,10 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
   }
 
   static String _describe(Object error) => error is StateError ? error.message.toString()
-      : error is CoreException ? error.message
-      : 'The operation could not complete. Source and durable drafts are retained.';
+      : error is CoreException ? 'Core error ${error.code}: ${error.message}'
+      : error.toString();
   void _showError(Object error) {
-    if (!_disposed && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_describe(error))));
+    if (!_disposed && mounted) ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(AppStrings.of(context).message(_describe(error)))));
   }
 
   @override
@@ -510,7 +510,6 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     _disposed = true;
     _webEpoch++;
     _previewTimer?.cancel();
-    WidgetsBinding.instance.removeObserver(this);
     _notebook.unbindTransport(_transport);
     _boundEditor?.removeListener(_sourceChanged);
     _notebook.removeListener(_notebookChanged);
@@ -527,91 +526,103 @@ class _NotebookEditorState extends State<NotebookEditor> with WidgetsBindingObse
     valueListenable: _notebook,
     builder: (context, state, _) {
       final editor = state.editor?.value;
-      final enabled = editor?.ready == true && editor?.closing != true && editor?.quiesced != true;
+      final enabled = !state.restartRequired && editor?.ready == true && editor?.closing != true && editor?.quiesced != true;
       final markdown = state.note?.editorType == CoreEditorType.markdown;
-      final error = state.syncError ?? state.durabilityError ?? state.error ?? editor?.error;
+      final error = state.restartRequired ? NotebookSession.ownerRestartRequiredMessage
+        : state.syncError ?? state.durabilityError ?? state.error ?? editor?.error;
       final saved = editor != null && !state.dirty && !state.recoveryRequired &&
           state.durabilityError == null && state.error == null && editor.locallySaved;
       return PopScope<Object?>(
         canPop: false,
-        onPopInvokedWithResult: (didPop, result) { if (!didPop) unawaited(_showPreview ? _closePreview() : _requestExit()); },
+        onPopInvokedWithResult: (didPop, result) { if (!didPop && !state.restartRequired) unawaited(_showPreview ? _closePreview() : _requestExit()); },
         child: Scaffold(
           resizeToAvoidBottomInset: true,
           appBar: AppBar(
-            title: Text(state.note == null ? 'Note' : '${state.note!.notebookName} / ${state.note!.path}'),
+            title: Text(state.note == null ? AppStrings.of(context).text('Note') : '${state.note!.notebookName} / ${state.note!.path}'),
             actions: [
-              IconButton(tooltip: 'Attachments and images', onPressed: state.note != null && !state.busy && !state.syncBusy ? _showResources : null, icon: const Icon(Icons.attach_file)),
-              IconButton(tooltip: 'WebDAV synchronization', icon: const Icon(Icons.sync), onPressed: () => showNotebookSyncPanel(context, widget.workspace.synchronization)),
-              IconButton(tooltip: 'Legal notices', icon: const Icon(Icons.info_outline), onPressed: () => showNotebookLicenses(context, _notebook.nativeNotices)),
-              IconButton(tooltip: 'Return to notebook', onPressed: state.transitioning ? null : _requestExit, icon: const Icon(Icons.close)),
+              const LanguageMenu(),
+              SizedBox(width: 144, child: SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+              IconButton(tooltip: AppStrings.of(context).text('Attachments and images'), onPressed: state.note != null && !state.busy && !state.syncBusy ? _showResources : null, icon: const Icon(Icons.attach_file)),
+              IconButton(tooltip: AppStrings.of(context).text('WebDAV synchronization'), icon: const Icon(Icons.sync), onPressed: state.restartRequired ? null : () => showNotebookSyncPanel(context, widget.workspace.synchronization)),
+              IconButton(tooltip: AppStrings.of(context).text('Legal notices'), icon: const Icon(Icons.info_outline), onPressed: () => showNotebookLicenses(context, _notebook.nativeNotices)),
+              ]))),
+              if (!state.restartRequired) IconButton(tooltip: AppStrings.of(context).text('Return to notebook'), onPressed: state.transitioning ? null : _requestExit, icon: const Icon(Icons.close)),
             ],
           ),
-          body: SafeArea(child: Center(child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: 1200), child: Column(
+          body: SafeArea(child: LayoutBuilder(builder: (context, constraints) => Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
+              ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight * 0.5),
+                child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
               if (state.busy) const LinearProgressIndicator(),
               ValueListenableBuilder<NotebookSyncState>(valueListenable: widget.workspace.synchronization,
                 builder: (context, sync, _) => TextButton.icon(
-                  onPressed: () => showNotebookSyncPanel(context, widget.workspace.synchronization),
-                  icon: const Icon(Icons.cloud_outlined), label: Text(notebookSyncStatus(sync)))),
+                  onPressed: state.restartRequired ? null : () => showNotebookSyncPanel(context, widget.workspace.synchronization),
+                  icon: const Icon(Icons.cloud_outlined), label: Text(notebookSyncStatus(context, sync)))),
               Padding(padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4), child: Semantics(liveRegion: true,
-                child: Text(editor == null ? 'Opening selected note…' : '${saved ? 'Saved locally' : 'Unwritten changes'} · Received ${state.receivedRevision} · Draft ${state.draftRevision} · Saved ${state.onDiskRevision ?? 'none'}'))),
-              Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text(
-                state.writing ? 'Saving revision ${state.inFlightRevision ?? 'captured'}; newer input remains editable.'
-                    : 'Foreground autosave is enabled. Only acknowledged durable prefixes survive supported process restart.',
+                child: Text(editor == null ? AppStrings.of(context).text('Opening selected note…') : AppStrings.of(context).text('{value} · Received {receivedRevision} · Draft {draftRevision} · Saved {value4}', {'value': (saved ? AppStrings.of(context).text('Saved locally') : AppStrings.of(context).text('Unwritten changes')).toString(), 'receivedRevision': (state.receivedRevision).toString(), 'draftRevision': (state.draftRevision).toString(), 'value4': (state.onDiskRevision ?? AppStrings.of(context).text('none')).toString()})))),
+              if (!state.restartRequired) Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text(
+                state.writing ? AppStrings.of(context).text('Saving revision {value}; newer input remains editable.', {'value': (state.inFlightRevision ?? AppStrings.of(context).text('captured')).toString()})
+                    : AppStrings.of(context).text('Foreground autosave is enabled. Only acknowledged durable prefixes survive supported process restart.'),
                 style: Theme.of(context).textTheme.bodySmall)),
               if (state.note != null && state.note!.lineEnding != 0)
-                Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text('Edited writes use ${switch(state.note!.lineEnding) {1 => 'LF', 2 => 'CRLF', 3 => 'CR', _ => 'core-specified'}} line endings; opening preserves exact source.')),
+                Padding(padding: const EdgeInsets.symmetric(horizontal: 12), child: Text(AppStrings.of(context).text('Edited writes use {value} line endings; opening preserves exact source.', {'value': (switch(state.note!.lineEnding) {1 => 'LF', 2 => 'CRLF', 3 => 'CR', _ => AppStrings.of(context).text('core-specified')}).toString()}))),
               Wrap(crossAxisAlignment: WrapCrossAlignment.center, children: [
-                IconButton(tooltip: 'Undo', icon: const Icon(Icons.undo), onPressed: enabled && !_showPreview ? () => _command('undo') : null),
-                IconButton(tooltip: 'Redo', icon: const Icon(Icons.redo), onPressed: enabled && !_showPreview ? () => _command('redo') : null),
-                PopupMenuButton<String>(tooltip: 'Format Markdown', icon: const Icon(Icons.text_format), enabled: enabled && markdown && !_showPreview,
-                  onSelected: (action) => unawaited(_format(action)), itemBuilder: (_) => const [
-                    PopupMenuItem(value: 'bold', child: Text('Bold')),
-                    PopupMenuItem(value: 'italic', child: Text('Italic')),
-                    PopupMenuItem(value: 'code', child: Text('Inline code')),
-                    PopupMenuItem(value: 'fence', child: Text('Code block')),
-                    PopupMenuItem(value: 'heading-1', child: Text('Heading 1')),
-                    PopupMenuItem(value: 'heading-2', child: Text('Heading 2')),
-                    PopupMenuItem(value: 'heading-3', child: Text('Heading 3')),
-                    PopupMenuItem(value: 'heading-4', child: Text('Heading 4')),
-                    PopupMenuItem(value: 'heading-5', child: Text('Heading 5')),
-                    PopupMenuItem(value: 'heading-6', child: Text('Heading 6')),
-                    PopupMenuItem(value: 'quote', child: Text('Block quote')),
-                    PopupMenuItem(value: 'bullet', child: Text('Bullet list')),
-                    PopupMenuItem(value: 'ordered', child: Text('Numbered list')),
-                    PopupMenuItem(value: 'task', child: Text('Task list')),
-                    PopupMenuItem(value: 'link', child: Text('Link')),
+                IconButton(tooltip: AppStrings.of(context).text('Undo'), icon: const Icon(Icons.undo), onPressed: enabled && (!_showPreview || constraints.maxWidth >= 1000) ? () => _command('undo') : null),
+                IconButton(tooltip: AppStrings.of(context).text('Redo'), icon: const Icon(Icons.redo), onPressed: enabled && (!_showPreview || constraints.maxWidth >= 1000) ? () => _command('redo') : null),
+                PopupMenuButton<String>(tooltip: AppStrings.of(context).text('Format Markdown'), icon: const Icon(Icons.text_format), enabled: enabled && markdown && (!_showPreview || constraints.maxWidth >= 1000),
+                  onSelected: (action) => unawaited(_format(action)), itemBuilder: (_) => [
+                    PopupMenuItem(value: 'bold', child: Text(AppStrings.of(context).text('Bold'))),
+                    PopupMenuItem(value: 'italic', child: Text(AppStrings.of(context).text('Italic'))),
+                    PopupMenuItem(value: 'code', child: Text(AppStrings.of(context).text('Inline code'))),
+                    PopupMenuItem(value: 'fence', child: Text(AppStrings.of(context).text('Code block'))),
+                    PopupMenuItem(value: 'heading-1', child: Text(AppStrings.of(context).text('Heading 1'))),
+                    PopupMenuItem(value: 'heading-2', child: Text(AppStrings.of(context).text('Heading 2'))),
+                    PopupMenuItem(value: 'heading-3', child: Text(AppStrings.of(context).text('Heading 3'))),
+                    PopupMenuItem(value: 'heading-4', child: Text(AppStrings.of(context).text('Heading 4'))),
+                    PopupMenuItem(value: 'heading-5', child: Text(AppStrings.of(context).text('Heading 5'))),
+                    PopupMenuItem(value: 'heading-6', child: Text(AppStrings.of(context).text('Heading 6'))),
+                    PopupMenuItem(value: 'quote', child: Text(AppStrings.of(context).text('Block quote'))),
+                    PopupMenuItem(value: 'bullet', child: Text(AppStrings.of(context).text('Bullet list'))),
+                    PopupMenuItem(value: 'ordered', child: Text(AppStrings.of(context).text('Numbered list'))),
+                    PopupMenuItem(value: 'task', child: Text(AppStrings.of(context).text('Task list'))),
+                    PopupMenuItem(value: 'link', child: Text(AppStrings.of(context).text('Link'))),
                   ]),
-                IconButton(tooltip: widget.dark ? 'Use light theme' : 'Use dark theme',
+                IconButton(tooltip: widget.dark ? AppStrings.of(context).text('Use light theme') : AppStrings.of(context).text('Use dark theme'),
                   icon: Icon(widget.dark ? Icons.light_mode_outlined : Icons.dark_mode_outlined),
                   onPressed: () => widget.onThemeChanged(!widget.dark)),
-                FilledButton(onPressed: !state.busy && state.editor?.canFlushSource == true ? () => _notebook.write(_transport) : null, child: const Text('Save now')),
-                TextButton(onPressed: !state.transitioning && state.editor != null ? () => _requestBarrier(reopen: true) : null, child: const Text('Reopen')),
+                if (!state.restartRequired) FilledButton(onPressed: !state.busy && state.editor?.canFlushSource == true ? () => _notebook.write(_transport) : null, child: Text(AppStrings.of(context).text('Save now'))),
+                if (!state.restartRequired) TextButton(onPressed: !state.transitioning && state.editor != null ? () => _requestBarrier(reopen: true) : null, child: Text(AppStrings.of(context).text('Reopen'))),
                 TextButton.icon(onPressed: _preview != null ? _closePreview : enabled && markdown ? _openPreview : null,
-                  icon: Icon(_preview != null ? Icons.code : Icons.preview_outlined), label: Text(_preview != null ? 'Source' : 'Preview')),
+                  icon: Icon(_preview != null ? Icons.code : Icons.preview_outlined), label: Text(_preview != null ? AppStrings.of(context).text('Source') : AppStrings.of(context).text('Preview'))),
               ]),
               if (error != null) ConstrainedBox(constraints: const BoxConstraints(maxHeight: 180), child: ColoredBox(
                 color: Theme.of(context).colorScheme.errorContainer,
                 child: SingleChildScrollView(padding: const EdgeInsets.all(8), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-                  SelectableText(error),
+                  SelectableText(AppStrings.of(context).message(error)),
                   if (editor != null) Wrap(children: [
-                    TextButton(onPressed: _copyReceivedText, child: const Text('Copy received source')),
-                    if (state.syncRecoveryRequired) TextButton(onPressed: () => widget.workspace.synchronization.recover(), child: const Text('Recover sync'))
-                    else TextButton(onPressed: state.transitioning ? null : _recoverView, child: const Text('Recover editor view')),
-                    TextButton(onPressed: !state.busy && state.editor?.canFlushSource == true ? () => _notebook.write(_transport) : null, child: const Text('Retry save / reconcile')),
-                  ]) else if (!state.busy) TextButton(onPressed: _notebook.retryOpen, child: const Text('Retry open')),
+                    TextButton(onPressed: _copyReceivedText, child: Text(AppStrings.of(context).text('Copy received source'))),
+                    if (!state.restartRequired) ...[
+                      if (state.syncRecoveryRequired) TextButton(onPressed: () => widget.workspace.synchronization.recover(), child: Text(AppStrings.of(context).text('Recover sync')))
+                      else TextButton(onPressed: state.transitioning ? null : _recoverView, child: Text(AppStrings.of(context).text('Recover editor view'))),
+                      TextButton(onPressed: !state.busy && state.editor?.canFlushSource == true ? () => _notebook.write(_transport) : null, child: Text(AppStrings.of(context).text('Retry save / reconcile'))),
+                    ],
+                  ]) else if (!state.busy) TextButton(onPressed: _notebook.retryOpen, child: Text(AppStrings.of(context).text('Retry open'))),
                 ])),
               )),
+              ]))),
               Expanded(child: Stack(children: [
-                Positioned.fill(child: Offstage(offstage: _showPreview, child: _webView == null
-                    ? Center(child: state.loading ? const CircularProgressIndicator() : const Text('Native source is retained while the secure editor is unavailable.'))
-                    : WebViewWidget(key: ValueKey(_webEpoch), controller: _webView!))),
-                if (_showPreview && _preview != null) Positioned.fill(child: NotebookPreview(session: _preview!, onSource: () => unawaited(_closePreview()), onRefresh: () => unawaited(_refreshPreview()))),
-                if (_preview != null && !_showPreview && !_preview!.retiring) const Align(alignment: Alignment.bottomCenter, child: LinearProgressIndicator(semanticsLabel: 'Capturing preview source')),
+                Positioned.fill(child: AdaptiveEditorPanes(
+                  showPreview: _showPreview,
+                  source: _webView == null
+                    ? Center(child: state.loading ? const CircularProgressIndicator() : Text(AppStrings.of(context).text('Native source is retained while the secure editor is unavailable.')))
+                    : WebViewWidget(key: ValueKey(_webEpoch), controller: _webView!),
+                  preview: _preview == null ? const SizedBox.shrink() : NotebookPreview(session: _preview!, onSource: () => unawaited(_closePreview()), onRefresh: () => unawaited(_refreshPreview())),
+                )),
+                if (_preview != null && !_showPreview && !_preview!.retiring) Align(alignment: Alignment.bottomCenter, child: LinearProgressIndicator(semanticsLabel: AppStrings.of(context).text('Capturing preview source'))),
               ])),
             ],
-          )))),
+          ))),
         ),
       );
     },

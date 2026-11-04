@@ -262,10 +262,10 @@ class ManagedNotebookStorage {
       current = parent;
     }
     final canonical = Directory(await current.resolveSymbolicLinks());
-    return Directory.fromUri(
+    return p.normalize(Directory.fromUri(
       canonical.uri.resolve(
         suffix.isEmpty ? '' : '${suffix.map(Uri.encodeComponent).join('/')}/',
       ),
-    ).path;
+    ).path);
   }
 }

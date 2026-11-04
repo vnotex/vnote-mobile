@@ -17,10 +17,27 @@
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
+		C5F500012F00000000000001 /* ShareInboxPlugin.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5F500012F00000000000011 /* ShareInboxPlugin.swift */; };
+		C5F500012F00000000000002 /* ShareInbox.swift in Runner Sources */ = {isa = PBXBuildFile; fileRef = C5F500012F00000000000012 /* ShareInbox.swift */; };
+		C5F500012F00000000000003 /* ShareInbox.swift in Extension Sources */ = {isa = PBXBuildFile; fileRef = C5F500012F00000000000012 /* ShareInbox.swift */; };
+		C5F500012F00000000000004 /* ShareViewController.swift in Sources */ = {isa = PBXBuildFile; fileRef = C5F500012F00000000000013 /* ShareViewController.swift */; };
+		C5F500012F00000000000005 /* ShareExtension.appex in Embed App Extensions */ = {isa = PBXBuildFile; fileRef = C5F500012F00000000000014 /* ShareExtension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
+/* Begin PBXContainerItemProxy section */
+		C5F500012F00000000000020 /* ShareExtension proxy */ = {isa = PBXContainerItemProxy; containerPortal = 97C146E61CF9000F007C117D /* Project object */; proxyType = 1; remoteGlobalIDString = C5F500012F00000000000030; remoteInfo = ShareExtension; };
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXCopyFilesBuildPhase section */
+		C5F500012F00000000000021 /* Embed App Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (C5F500012F00000000000005 /* ShareExtension.appex in Embed App Extensions */, );
+			name = "Embed App Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 		9705A1C41CF9048500538489 /* Embed Frameworks */ = {
 			isa = PBXCopyFilesBuildPhase;
 			buildActionMask = 2147483647;
@@ -51,6 +68,13 @@
 		97C146FD1CF9000F007C117D /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C5F500012F00000000000011 /* ShareInboxPlugin.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInboxPlugin.swift; sourceTree = "<group>"; };
+		C5F500012F00000000000012 /* ShareInbox.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareInbox.swift; sourceTree = "<group>"; };
+		C5F500012F00000000000013 /* ShareViewController.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShareViewController.swift; sourceTree = "<group>"; };
+		C5F500012F00000000000014 /* ShareExtension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = ShareExtension.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		C5F500012F00000000000015 /* Extension Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		C5F500012F00000000000016 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
+		C5F500012F00000000000017 /* ShareExtension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = ShareExtension.entitlements; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -62,9 +86,12 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C5F500012F00000000000022 /* Extension Frameworks */ = {isa = PBXFrameworksBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
+		C5F500012F00000000000018 /* Shared */ = {isa = PBXGroup; children = (C5F500012F00000000000012 /* ShareInbox.swift */, ); path = Shared; sourceTree = "<group>"; };
+		C5F500012F00000000000019 /* ShareExtension */ = {isa = PBXGroup; children = (C5F500012F00000000000013 /* ShareViewController.swift */, C5F500012F00000000000015 /* Extension Info.plist */, C5F500012F00000000000017 /* ShareExtension.entitlements */, ); path = ShareExtension; sourceTree = "<group>"; };
 		9740EEB11CF90186004384FC /* Flutter */ = {
 			isa = PBXGroup;
 			children = (
@@ -82,6 +109,8 @@
 			children = (
 				9740EEB11CF90186004384FC /* Flutter */,
 				97C146F01CF9000F007C117D /* Runner */,
+				C5F500012F00000000000018 /* Shared */,
+				C5F500012F00000000000019 /* ShareExtension */,
 				97C146EF1CF9000F007C117D /* Products */,
 			);
 			sourceTree = "<group>";
@@ -90,6 +119,7 @@
 			isa = PBXGroup;
 			children = (
 				97C146EE1CF9000F007C117D /* Runner.app */,
+				C5F500012F00000000000014 /* ShareExtension.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -106,6 +136,8 @@
 				74858FAE1ED2DC5600515810 /* AppDelegate.swift */,
 				C3F300012F00000000000002 /* WebSurfacePlugin.swift */,
 				C4F400012F00000000000002 /* SyncPlatformPlugin.swift */,
+				C5F500012F00000000000011 /* ShareInboxPlugin.swift */,
+				C5F500012F00000000000016 /* Runner.entitlements */,
 				7884E8672EC3CC0400C636F2 /* SceneDelegate.swift */,
 				74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */,
 			);
@@ -124,11 +156,13 @@
 				97C146EB1CF9000F007C117D /* Frameworks */,
 				97C146EC1CF9000F007C117D /* Resources */,
 				9705A1C41CF9048500538489 /* Embed Frameworks */,
+				C5F500012F00000000000021 /* Embed App Extensions */,
 				3B06AD1E1E4923F5004D2608 /* Thin Binary */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				C5F500012F00000000000025 /* ShareExtension dependency */,
 			);
 			name = Runner;
 			packageProductDependencies = (
@@ -137,6 +171,17 @@
 			productName = Runner;
 			productReference = 97C146EE1CF9000F007C117D /* Runner.app */;
 			productType = "com.apple.product-type.application";
+		};
+		C5F500012F00000000000030 /* ShareExtension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = C5F500012F00000000000031 /* Extension configurations */;
+			buildPhases = (C5F500012F00000000000023 /* Extension Sources */, C5F500012F00000000000022 /* Extension Frameworks */, C5F500012F00000000000024 /* Extension Resources */, );
+			buildRules = ();
+			dependencies = ();
+			name = ShareExtension;
+			productName = ShareExtension;
+			productReference = C5F500012F00000000000014 /* ShareExtension.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -148,6 +193,7 @@
 				LastUpgradeCheck = 1510;
 				ORGANIZATIONNAME = "";
 				TargetAttributes = {
+					C5F500012F00000000000030 = {CreatedOnToolsVersion = 15.0; LastSwiftMigration = 1500; };
 					97C146ED1CF9000F007C117D = {
 						CreatedOnToolsVersion = 7.3.1;
 						LastSwiftMigration = 1100;
@@ -171,6 +217,7 @@
 			projectRoot = "";
 			targets = (
 				97C146ED1CF9000F007C117D /* Runner */,
+				C5F500012F00000000000030 /* ShareExtension */,
 			);
 		};
 /* End PBXProject section */
@@ -187,6 +234,7 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C5F500012F00000000000024 /* Extension Resources */ = {isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = (); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXResourcesBuildPhase section */
 
 /* Begin PBXShellScriptBuildPhase section */
@@ -231,13 +279,19 @@
 				74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */,
 				C3F300012F00000000000001 /* WebSurfacePlugin.swift in Sources */,
 				C4F400012F00000000000001 /* SyncPlatformPlugin.swift in Sources */,
+				C5F500012F00000000000001 /* ShareInboxPlugin.swift in Sources */,
+				C5F500012F00000000000002 /* ShareInbox.swift in Runner Sources */,
 				1498D2341E8E89220040F4C2 /* GeneratedPluginRegistrant.m in Sources */,
 				7884E8682EC3CC0700C636F2 /* SceneDelegate.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		C5F500012F00000000000023 /* Extension Sources */ = {isa = PBXSourcesBuildPhase; buildActionMask = 2147483647; files = (C5F500012F00000000000003 /* ShareInbox.swift in Extension Sources */, C5F500012F00000000000004 /* ShareViewController.swift in Sources */, ); runOnlyForDeploymentPostprocessing = 0; };
 /* End PBXSourcesBuildPhase section */
 
+/* Begin PBXTargetDependency section */
+		C5F500012F00000000000025 /* ShareExtension dependency */ = {isa = PBXTargetDependency; target = C5F500012F00000000000030 /* ShareExtension */; targetProxy = C5F500012F00000000000020 /* ShareExtension proxy */; };
+/* End PBXTargetDependency section */
 
 /* Begin PBXVariantGroup section */
 		97C146FA1CF9000F007C117D /* Main.storyboard */ = {
@@ -318,6 +372,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = "";
+				VNOTE_APP_GROUP = "";
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -452,6 +508,8 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = "";
+				VNOTE_APP_GROUP = "";
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -474,6 +532,12 @@
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = "$(VNOTE_APP_ENTITLEMENTS)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(VNOTE_APP_PROFILE)";
+				VNOTE_APP_BUNDLE_ID = com.example.vnoteMobile;
+				VNOTE_APP_GROUP = "";
+				VNOTE_APP_ENTITLEMENTS = "";
+				VNOTE_APP_PROFILE = "";
 				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -481,13 +545,81 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				PRODUCT_BUNDLE_IDENTIFIER = com.example.vnoteMobile;
+				PRODUCT_BUNDLE_IDENTIFIER = "$(VNOTE_APP_BUNDLE_ID)";
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_OBJC_BRIDGING_HEADER = "Runner/Runner-Bridging-Header.h";
 				SWIFT_VERSION = 5.0;
 				VERSIONING_SYSTEM = "apple-generic";
 			};
 			name = Release;
+		};
+		C5F500012F00000000000032 /* Extension Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 9740EEB21CF90195004384FC /* Debug.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.vnoteMobile.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VNOTE_APP_GROUP = "";
+			};
+			name = Debug;
+		};
+		C5F500012F00000000000033 /* Extension Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = "$(VNOTE_EXTENSION_ENTITLEMENTS)";
+				PROVISIONING_PROFILE_SPECIFIER = "$(VNOTE_EXTENSION_PROFILE)";
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
+				PRODUCT_BUNDLE_IDENTIFIER = "$(VNOTE_EXTENSION_BUNDLE_ID)";
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VNOTE_EXTENSION_BUNDLE_ID = com.example.vnoteMobile.ShareExtension;
+				VNOTE_APP_GROUP = "";
+				VNOTE_EXTENSION_ENTITLEMENTS = "";
+				VNOTE_EXTENSION_PROFILE = "";
+			};
+			name = Release;
+		};
+		C5F500012F00000000000034 /* Extension Profile */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = 7AFA3C8E1D35360C0083082E /* Release.xcconfig */;
+			buildSettings = {
+				APPLICATION_EXTENSION_API_ONLY = YES;
+				CLANG_ENABLE_MODULES = YES;
+				CODE_SIGN_ENTITLEMENTS = "";
+				CURRENT_PROJECT_VERSION = "$(FLUTTER_BUILD_NUMBER)";
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = ShareExtension/Info.plist;
+				IPHONEOS_DEPLOYMENT_TARGET = 15.0;
+				LD_RUNPATH_SEARCH_PATHS = ("$(inherited)", "@executable_path/Frameworks", "@executable_path/../../Frameworks", );
+				PRODUCT_BUNDLE_IDENTIFIER = com.example.vnoteMobile.ShareExtension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+				VNOTE_APP_GROUP = "";
+			};
+			name = Profile;
 		};
 /* End XCBuildConfiguration section */
 
@@ -512,6 +644,7 @@
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;
 		};
+		C5F500012F00000000000031 /* Extension configurations */ = {isa = XCConfigurationList; buildConfigurations = (C5F500012F00000000000032 /* Extension Debug */, C5F500012F00000000000033 /* Extension Release */, C5F500012F00000000000034 /* Extension Profile */, ); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release; };
 /* End XCConfigurationList section */
 
 /* Begin XCLocalSwiftPackageReference section */

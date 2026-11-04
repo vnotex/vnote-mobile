@@ -15,6 +15,12 @@ Remote refs and recursive checkout were verified during initialization. Branch h
 
 Bundled notebook JSON/files remain authoritative. Notebook indexing in SQLite is derived, but per-device last-success history is retained across native owner retirement. A Flutter source mirror is volatile state, not notebook truth. Preserve stable notebook/node UUIDs, source bytes, tags, assets, unknown supported metadata and opaque/unsupported files. The app now creates/reopens a real managed bundled notebook and preserves its portable IDs across explicit writes and Android process restart. The navigator uses stable node IDs for open/rename/move/delete, preserving core-owned metadata rather than reserializing it in Dart. The versioned `packages/vxcore_bridge/test/fixtures/desktop_notebook.json` contains exact file bytes produced through the default Windows desktop-core C API, including Unicode, plain text, tags/custom metadata, a PNG asset and opaque bytes. That engine fixture is not a claim that the desktop Qt UI roundtrip has been executed.
 
+Lazy metadata-cache synchronization commits each folder watermark, file rows and
+tags atomically before descending into children. Failed publication rolls back
+only that folder transaction and stops further writes; authoritative JSON, source
+bytes and cached FolderConfig ownership are unchanged. This is not a repair for
+an already committed partial cache generation from the old autocommit path.
+
 Encrypted-note editing, raw notebook sync, desktop plugins and unsupported editor formats remain outside the first release. That never permits plaintext fallback, identity regeneration, silent mutation or dropping opaque data. Import/export uses managed copies and preflight; core owns notebook schema and migrations.
 
 Exact-source editor offsets are UTF-16; native bodies are UTF-8. Opening without editing must not normalize line endings, Unicode or Markdown. The committed preview fixtures cover a selected CommonMark/GFM subset, KaTeX and Mermaid flowchart/sequence diagrams, independently of CodeMirror highlighting. Desktop heading slug/duplicate behavior is preserved, but unsupported footnotes and custom application schemes remain literal/inert. The privileged editor has no preview renderer.

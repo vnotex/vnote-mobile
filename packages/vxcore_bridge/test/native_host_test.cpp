@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 #include "vxcore_host.h"
+#include "share_inbox_activation.h"
 
 #include <atomic>
 #include <chrono>
@@ -18,6 +19,7 @@
 #if defined(_WIN32)
 #define NOMINMAX
 #include <windows.h>
+#include <winioctl.h>
 #else
 #include <sys/stat.h>
 #endif
@@ -1297,7 +1299,7 @@ void catalog_tags_are_complete_or_error() {
 }
 
 
-constexpr uint64_t kSnapshotBudget = 4ULL * 1024 * 1024 * 1024 - 128 * 1024;
+constexpr uint64_t kSnapshotBudget = 3ULL * 1024 * 1024 * 1024 - 128 * 1024;
 int32_t capture(Host &host, uint64_t id, const fs::path &destination, uint64_t budget = kSnapshotBudget,
                 int32_t format = VXM_EXPORT_NOTEBOOK) {
   const auto path = destination.u8string();
@@ -1337,7 +1339,7 @@ void catalog_export_preserves_portable_tree() {
   const auto raw = config.dump(3) + "\n";
   external_write(config_path, raw);
   for (const auto *name : {".hidden/empty", "resources/assets/item", "custom/recycle/old",
-                           "nested/vx_sync", "vx_notebook/vx_sync/webdav/snapshots"})
+                           "nested/vx_sync", "vx_notebook/vx_sync/webdav/snapshots/11111111-1111-4111-8111-111111111111"})
     fs::create_directories(root / fs::u8path(name));
   const std::string opaque("\0\xff\xfe\r\n", 5);
   for (const auto *name : {".hidden/data.private", "resources/assets/item/blob", "custom/recycle/old/body",
@@ -1345,14 +1347,17 @@ void catalog_export_preserves_portable_tree() {
     external_write(root / fs::u8path(name), opaque);
   external_write(root / "vx_notebook" / "encryption.vne", opaque); // Opaque legacy bytes are not interpreted.
   const Json state = {{"version", 1}, {"notebookId", fixture.notebook_id},
-      {"remoteUrl", "https://example.invalid/notes"}, {"usernameHash", std::string(64, '0')},
+      {"remoteUrl", "https://example.invalid/notes/"}, {"usernameHash", std::string(64, '0')},
       {"entries", Json::object()}, {"conflicts", Json::object()}};
   external_write(root / "vx_notebook/vx_sync/webdav/state.json", state.dump());
-  external_write(root / "vx_notebook/vx_sync/webdav/snapshots/runtime", "never portable");
+  external_write(root / "vx_notebook/vx_sync/webdav/snapshots/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222", "never portable");
   const auto before_open = snapshot(root);
   Host host(fixture, ExportOnly{});
   auto opened = host.next();
-  CHECK(opened->code == VXCORE_OK);
+  if (opened->code != VXCORE_OK) {
+    throw std::runtime_error("Portable export open failed (" + std::to_string(opened->code) + "): " +
+                             std::string(opened->message ? opened->message : ""));
+  }
   const std::string root_id = opened->node_id;
   opened.reset();
   CHECK(snapshot(root) == before_open);
@@ -1741,10 +1746,16 @@ void catalog_export_refuses_credentials_and_recovery() {
   rejected("synchronization");
   fs::remove_all(root / "vx_notebook/vx_sync");
   fs::create_directories(root / "vx_notebook/vx_sync/webdav");
-  // CheckNotebookSyncReconfiguration inspects every conflict, not only keys.
+  // A valid local-edit/remote-delete conflict must block export, not just malformed JSON.
+  const std::string snapshot_name = "snapshots/11111111-1111-4111-8111-111111111111/22222222-2222-4222-8222-222222222222";
+  fs::create_directories(root / "vx_notebook/vx_sync/webdav/snapshots/11111111-1111-4111-8111-111111111111");
+  external_write(root / "vx_notebook/vx_sync/webdav" / snapshot_name, "local recovery version");
+  const Json record = {{"localSha256", "94ffd51e38b393869381b0e4694418394c29a99424dfa4e0a63b4384bb07b79a"}, {"remoteSha256", nullptr},
+      {"remoteEtag", nullptr}, {"localSnapshot", snapshot_name}, {"remoteSnapshot", nullptr},
+      {"isBinary", false}, {"canKeepBoth", true}, {"localModifiedUtc", 1}, {"remoteModifiedUtc", 0}};
   const Json conflict = {{"version", 1}, {"notebookId", fixture.notebook_id},
-      {"remoteUrl", "https://example.invalid/notes"}, {"usernameHash", std::string(64, '0')},
-      {"entries", Json::object()}, {"conflicts", Json{{"Welcome.md", Json::object()}}}};
+      {"remoteUrl", "https://example.invalid/notes/"}, {"usernameHash", std::string(64, '0')},
+      {"entries", Json::object()}, {"conflicts", Json{{"Welcome.md", record}}}};
   external_write(root / "vx_notebook/vx_sync/webdav/state.json", conflict.dump());
   const auto conflicted = snapshot(root);
   CHECK(capture(host, id++, fixture.root / "conflicted") == VXCORE_OK);
@@ -2315,10 +2326,103 @@ void sync_owner_facts_and_phase_admission() {
   CHECK(disk(fixture.note()) == "local source\n");
 }
 
+void inbox_activation_legacy_quota_and_root_guards() {
+  Fixture fixture;
+  const auto support = fixture.root, inbox = support / "inbox", exports = support / "outgoing-shares";
+  fs::permissions(support, fs::perms::owner_all, fs::perm_options::replace);
+  fs::create_directory(inbox); fs::permissions(inbox, fs::perms::owner_all, fs::perm_options::replace);
+  fs::create_directory(exports);
+  const auto retained = exports / "legacy.bin";
+  external_write(retained, "");
+#if defined(_WIN32)
+  HANDLE file = CreateFileW(retained.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+      OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+  CHECK(file != INVALID_HANDLE_VALUE);
+  DWORD returned = 0;
+  const bool sparse = DeviceIoControl(file, FSCTL_SET_SPARSE, nullptr, 0, nullptr, 0, &returned, nullptr) != 0;
+  CloseHandle(file); CHECK(sparse);
+#endif
+  constexpr uint64_t limit = 3ULL * 1024 * 1024 * 1024;
+  fs::resize_file(retained, limit + 1);
+  const auto root_string = support.u8string(), inbox_string = inbox.u8string();
+  CHECK(vxm_share_inbox_activate(nullptr, inbox_string.c_str()) == VXCORE_ERR_NULL_POINTER);
+  CHECK(vxm_share_inbox_activate(root_string.c_str(), inbox_string.c_str()) != VXCORE_OK);
+  CHECK(!fs::exists(inbox / "activation.json"));
+  CHECK(vxm_share_export_check(root_string.c_str(), 1) != VXCORE_OK);
+  CHECK(fs::file_size(retained) == limit + 1);
+  fs::resize_file(retained, 0);
+  CHECK(vxm_share_export_check(root_string.c_str(), 0) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(vxm_share_export_check(root_string.c_str(), limit + 1) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(vxm_share_export_check(root_string.c_str(), 1) == VXCORE_OK);
+  CHECK(vxm_share_inbox_activate(root_string.c_str(), inbox_string.c_str()) == VXCORE_OK);
+  CHECK(vxm_share_inbox_activate(root_string.c_str(), inbox_string.c_str()) == VXCORE_OK);
+  const Json expected{{"version", 1}, {"coreStagingBytes", limit}, {"inboxBytes", 1024ULL * 1024 * 1024}};
+  CHECK(Json::parse(disk(inbox / "activation.json")) == expected);
+  CHECK(!fs::exists(support / "notebooks")); // Activation never opens/creates a notebook.
+  external_write(inbox / "activation.json", "{\"version\":2}");
+  CHECK(vxm_share_inbox_activate(root_string.c_str(), inbox_string.c_str()) != VXCORE_OK);
+  CHECK(disk(inbox / "activation.json") == "{\"version\":2}");
+#if !defined(_WIN32)
+  fs::remove(inbox / "activation.json"); fs::remove(inbox);
+  fs::create_directory(support / "foreign");
+  fs::create_directory_symlink(support / "foreign", inbox);
+  CHECK(vxm_share_inbox_activate(root_string.c_str(), inbox_string.c_str()) != VXCORE_OK);
+  CHECK(!fs::exists(support / "foreign/activation.json"));
+#endif
+}
+
+void catalog_export_rejects_legacy_positive_budget() {
+  Fixture fixture; fixture.seed("unchanged");
+  Host host(fixture, ExportOnly{}); CHECK(host.next()->code == VXCORE_OK);
+  CHECK(capture(host, 2, fixture.root / "oversized-budget", 4ULL * 1024 * 1024 * 1024 - 128 * 1024) == VXCORE_ERR_INVALID_PARAM);
+  CHECK(!fs::exists(fixture.root / "oversized-budget"));
+  host.close(); CHECK(disk(fixture.note()) == "unchanged");
+}
+
+void inbox_allocation_serializes_and_keeps_ordinary_allocator_strict() {
+  Fixture fixture;
+  fs::permissions(fixture.root, fs::perms::owner_all, fs::perm_options::replace);
+  fs::create_directory(fixture.root / "cohorts"); fs::create_directory(fixture.root / "notebooks");
+  const std::string id(32, '1'), delivery(32, '2');
+  const Json target{{"version", 1}, {"id", id}, {"notebookId", "book"}, {"parentId", "parent"},
+      {"notebookRelative", "book"}, {"folderName", "Inbox"}};
+  Json request{{"scope", "cohort"}, {"root", (fixture.root / "cohorts").u8string()},
+      {"notebooksRoot", (fixture.root / "notebooks").u8string()}, {"id", id}, {"op", "allocateInbox"},
+      {"kind", "folder"}, {"inboxId", delivery}, {"target", target}};
+  const auto encoded = request.dump();
+  std::vector<int32_t> codes(2, VXCORE_ERR_UNKNOWN);
+  const auto allocate = [&](size_t index) {
+    char *result = nullptr; codes[index] = vxm_transfer_run(encoded.c_str(), nullptr, &result);
+    vxm_import_result_free(result);
+  };
+  std::thread first(allocate, 0), second(allocate, 1); first.join(); second.join();
+  CHECK(codes[0] == VXCORE_OK && codes[1] == VXCORE_OK);
+  const auto owner = fixture.root / "cohorts" / ("inbox-" + id + ".json");
+  const auto before = disk(owner);
+  request["op"] = "allocate"; request.erase("inboxId");
+  char *result = nullptr;
+  CHECK(vxm_transfer_run(request.dump().c_str(), nullptr, &result) == VXCORE_ERR_ALREADY_EXISTS && result == nullptr);
+  CHECK(disk(owner) == before);
+  auto claim_target = target; claim_target.erase("id"); claim_target.erase("version");
+  const Json claim{{"id", delivery}, {"operationId", id}, {"target", claim_target}};
+  const auto support = fixture.root.u8string();
+  CHECK(vxm_share_inbox_prove(support.c_str(), claim.dump().c_str(), "discard") == VXCORE_OK);
+  CHECK(vxm_share_inbox_prove(support.c_str(), claim.dump().c_str(), "consume") != VXCORE_OK);
+  request["op"] = "discard"; request.erase("kind"); request.erase("target"); request["inboxId"] = delivery;
+  for (int repeat = 0; repeat != 2; ++repeat) {
+    CHECK(vxm_transfer_run(request.dump().c_str(), nullptr, &result) == VXCORE_OK);
+    vxm_import_result_free(result); result = nullptr;
+  }
+  CHECK(!fs::exists(owner) && !fs::exists(fixture.root / "cohorts" / id));
+}
+
 }  // namespace
 
 int main() {
   try {
+    inbox_activation_legacy_quota_and_root_guards();
+    catalog_export_rejects_legacy_positive_budget();
+    inbox_allocation_serializes_and_keeps_ordinary_allocator_strict();
     sync_control_bypasses_full_operation_capacity();
     sync_owner_facts_and_phase_admission();
     round_trip_and_conflict();

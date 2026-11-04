@@ -10,6 +10,23 @@ The [handoff plan](mobile-client-plan.md) is the product contract. This document
 
 The document identity binds the real notebook and node IDs. `notebook_session.dart` coordinates one immutable in-flight native save and one newest pending target; `editor_drafts.dart` persists accepted deltas on joined filesystem workers. Received, draft-durable and saved watermarks remain separate; only the native committed prefix advances durability, never an editor reply or a timer. The core-classified Markdown/plain-text language is fixed by the load envelope; plain text installs no Markdown parser. Theme changes reconfigure the existing view. Explicit discard is distinct from successful save. Loading and editing untrusted Markdown as source never executes its HTML.
 
+Automatic-save timers are cancelled when the source becomes clean. A queued
+automatic target already satisfied by an earlier write is retired without another
+source barrier; explicit Save still requests a fresh barrier. A nonresponsive or
+composing editor retains its source/draft and the existing timeout failure.
+
+Notebook close/reopen treats final editor-close dispatch as irreversible for that
+epoch. A lost final reply never authorizes an abort back into a possibly closed
+page. The draft remains attached until native owner close joins. Before native
+close starts, recovery can checkpoint/rebase only the same non-retired capture
+whose journal read-back equals the acknowledged quiesced snapshot. Unknown live
+source still requires resynchronization. Native-close dispatch blocks further
+owner admission; failure exposes `restartRequired`, prioritizes the copy/restart
+instruction and removes unsafe save/reopen/recovery/close actions. Confirmed
+failed-view discard remains a no-send path, deleting its draft only after a
+successful native join. Sync-epoch replacement retains its separate reservation
+and recovery rules; this is not a general protocol retry or timeout change.
+
 Root `scripts/verify.mjs` is the supported asset/dependency/check/packaging entrypoint. The Node build emits deterministic bundled assets, dependency license notices, application licenses and a hash manifest. Outputs are ignored; the source and dependency locks are authoritative. Check mode fails on absent or changed output rather than silently repairing it. Native sources remain pinned through recursive gitlinks.
 
 ## Managed notebook navigator
@@ -43,7 +60,7 @@ are checked after core success. This is not a new transaction/rollback guarantee
 The offline application includes the managed library, search/tags, notebook and
 files/assets interchange, standalone cohorts, and ordinary-note resources.
 Durable drafts/autosave and isolated preview are implemented; the stopped-app
-share inbox and unverified platform/release gates remain separate; WebDAV execution is recorded independently.
+share inbox is integrated through the same cohort service. Platform/release evidence remains separate; WebDAV execution is recorded independently.
 
 ## Native ownership and storage
 
@@ -53,7 +70,38 @@ The host has one native owner OS thread for context/metadata/buffer lifetime and
 
 CMake selects the checked POSIX writer from `src/mobile/` only for Android/iOS; desktop saves use the original in-place implementation from `src/platform/buffer_file_save_desktop.cpp`. The Windows DACL/recovery path from the initial native slice has been removed. Shared callsites and the native owner-thread protocol are unchanged.
 
-No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires share-in and the documented platform/release evidence; WebDAV uses the same core rather than a replacement protocol engine.
+No second authoritative note database, mobile notebook-schema rewrite, credential store in JavaScript, generic WebDAV uploader or Qt interface is introduced. The complete product still requires the documented platform/release evidence; WebDAV uses the same core rather than a replacement protocol engine.
+
+## Mobile integration ownership
+
+Native receivers only capture immutable deliveries and transactional receipts;
+they never open a live notebook. Android has a separate receiver process and an
+exact-token read-only export provider. The SDK-only iOS extension shares the
+owner-configured App Group ledger with its main-app plugin. `ShareInbox` uses a
+separate validated method channel; system picker completion keeps its existing
+`DocumentTransferPlatform` contract.
+
+The library is the sole foreground authority. Resume installs a real joined
+session/workspace writer barrier, drains admitted saves and synchronization,
+reconciles importing claims, and only then releases the current lifecycle epoch.
+A retained cohort's immutable IDs and current native committed/rollback proofs,
+not timestamps or an expired lease, decide consumption/disposal. Private cohort
+cleanup follows durable inbox settlement. Removed committed destinations never
+turn into replay permission.
+
+Native admission reserves 1 GiB for inbox obligations and permits at most 3 GiB
+of positive ordinary-transfer/outgoing-share allocation. Historical 4 GiB records
+remain readable; zero-byte scans return actual charges and a clamped remainder.
+Inbox activation independently verifies native staging usage before committing
+its receiver admission marker. Outgoing snapshots have separate recipient leases;
+chooser return is not permission to delete a recipient's bytes.
+
+Flutter localization delegates and native private locale settings share
+system/English/Simplified-Chinese choices. Trusted editor presentation receives a
+closed `locale` preference, distinct from the fixed source `language`. Adaptive
+layouts retain fixed element slots, not a second catalog beside an open note.
+Android process-wide WebView denial remains initialized before any surface can
+load content; asynchronous network and document proofs remain fail-closed.
 
 ## WebDAV ownership
 

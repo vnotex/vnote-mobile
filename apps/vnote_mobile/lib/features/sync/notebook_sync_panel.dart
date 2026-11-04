@@ -2,23 +2,24 @@
 import 'package:flutter/material.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
+import '../../l10n/app_strings.dart';
 import '../../services/notebook_sync.dart';
 import '../../services/sync_credentials.dart';
 
-String notebookSyncStatus(NotebookSyncState state) {
-  if (state.facts == null && state.error == null && !state.busy) return 'Sync information is not ready';
-  if (state.busy) return 'Sync: ${state.phase.name}';
-  if (state.recoveryRequired) return 'Sync needs recovery';
-  if (state.queued) return 'Sync queued';
+String notebookSyncStatus(BuildContext context, NotebookSyncState state) {
+  if (state.facts == null && state.error == null && !state.busy) return AppStrings.of(context).text('Sync information is not ready');
+  if (state.busy) return AppStrings.of(context).text('Sync: {name}', {'name': (AppStrings.of(context).text(state.phase.name)).toString()});
+  if (state.recoveryRequired) return AppStrings.of(context).text('Sync needs recovery');
+  if (state.queued) return AppStrings.of(context).text('Sync queued');
   return switch (state.readiness) {
-    NotebookSyncReadiness.disabled => 'Sync off',
-    NotebookSyncReadiness.orphan => 'Sync credential cleanup pending',
-    NotebookSyncReadiness.unsupported => 'Unsupported sync backend',
-    NotebookSyncReadiness.invalidEndpoint => 'Sync needs an HTTPS endpoint',
-    NotebookSyncReadiness.missingCredentials => 'Sync needs credentials',
-    NotebookSyncReadiness.credentialsUnknown => 'Secure storage unavailable',
-    NotebookSyncReadiness.unregistered => 'Sync needs configuration recovery',
-    NotebookSyncReadiness.ready => 'WebDAV configured',
+    NotebookSyncReadiness.disabled => AppStrings.of(context).text('Sync off'),
+    NotebookSyncReadiness.orphan => AppStrings.of(context).text('Sync credential cleanup pending'),
+    NotebookSyncReadiness.unsupported => AppStrings.of(context).text('Unsupported sync backend'),
+    NotebookSyncReadiness.invalidEndpoint => AppStrings.of(context).text('Sync needs an HTTPS endpoint'),
+    NotebookSyncReadiness.missingCredentials => AppStrings.of(context).text('Sync needs credentials'),
+    NotebookSyncReadiness.credentialsUnknown => AppStrings.of(context).text('Secure storage unavailable'),
+    NotebookSyncReadiness.unregistered => AppStrings.of(context).text('Sync needs configuration recovery'),
+    NotebookSyncReadiness.ready => AppStrings.of(context).text('WebDAV configured'),
   };
 }
 
@@ -74,27 +75,26 @@ class _ConnectionDialogState extends State<_ConnectionDialog> {
     }
   }
   @override
-  Widget build(BuildContext context) => AlertDialog(
-    title: const Text('Connect existing WebDAV notebook'),
+  Widget build(BuildContext context) => AlertDialog(scrollable: true, 
+    title: Text(AppStrings.of(context).text('Connect existing WebDAV notebook')),
     content: SizedBox(width: 560, child: SingleChildScrollView(child: Column(
       mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.start, children: [
-        const Text('Download into private staging, then validate and import the complete notebook. '
-          'Existing notebook IDs are preserved. No existing notebook is overwritten.'),
+        Text(AppStrings.of(context).text('Download into private staging, then validate and import the complete notebook. Existing notebook IDs are preserved. No existing notebook is overwritten.')),
         const SizedBox(height: 16),
         _EndpointField(controller: _endpoint),
         const SizedBox(height: 12),
         TextField(controller: _username, autocorrect: false, enableSuggestions: false,
-          decoration: const InputDecoration(labelText: 'WebDAV username')),
+          decoration: InputDecoration(labelText: AppStrings.of(context).text('WebDAV username'))),
         const SizedBox(height: 12),
         TextField(controller: _password, obscureText: true, autocorrect: false,
-          enableSuggestions: false, decoration: const InputDecoration(labelText: 'WebDAV password')),
-        SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Foreground automatic sync'),
-          subtitle: const Text('No guaranteed background execution.'), value: _automatic,
+          enableSuggestions: false, decoration: InputDecoration(labelText: AppStrings.of(context).text('WebDAV password'))),
+        SwitchListTile(contentPadding: EdgeInsets.zero, title: Text(AppStrings.of(context).text('Foreground automatic sync')),
+          subtitle: Text(AppStrings.of(context).text('No guaranteed background execution.')), value: _automatic,
           onChanged: (value) => setState(() => _automatic = value)),
-        if (_error != null) Text(_error!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+        if (_error != null) Text(AppStrings.of(context).message(_error!), style: TextStyle(color: Theme.of(context).colorScheme.error)),
       ]))),
-    actions: [TextButton(onPressed: () => Navigator.pop(context), child: const Text('Cancel')),
-      FilledButton(onPressed: _submit, child: const Text('Download notebook'))],
+    actions: [TextButton(onPressed: () => Navigator.pop(context), child: Text(AppStrings.of(context).text('Cancel'))),
+      FilledButton(onPressed: _submit, child: Text(AppStrings.of(context).text('Download notebook')))],
   );
 }
 
@@ -106,7 +106,7 @@ class _EndpointField extends StatelessWidget {
   @override
   Widget build(BuildContext context) => TextField(controller: controller, enabled: enabled,
     keyboardType: TextInputType.url, autocorrect: false, enableSuggestions: false,
-    onChanged: onChanged, decoration: const InputDecoration(labelText: 'HTTPS WebDAV collection',
+    onChanged: onChanged, decoration: InputDecoration(labelText: AppStrings.of(context).text('HTTPS WebDAV collection'),
       hintText: 'https://server.example/dav/notebook/'));
 }
 
@@ -153,10 +153,10 @@ class _NotebookSyncPanelState extends State<NotebookSyncPanel> {
     super.dispose();
   }
   Future<bool> _confirm(String title, String detail, String action) async =>
-      await showDialog<bool>(context: context, builder: (context) => AlertDialog(
-        title: Text(title), content: Text(detail), actions: [
-          TextButton(onPressed: () => Navigator.pop(context, false), child: const Text('Cancel')),
-          FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(action)),
+      await showDialog<bool>(context: context, builder: (context) => AlertDialog(scrollable: true, 
+        title: Text(title), content: Text(AppStrings.of(context).message(detail)), actions: [
+          TextButton(onPressed: () => Navigator.pop(context, false), child: Text(AppStrings.of(context).text('Cancel'))),
+          FilledButton(onPressed: () => Navigator.pop(context, true), child: Text(AppStrings.of(context).text(action))),
         ])) == true;
 
   Future<void> _act(Future<NotebookSyncOutcome> Function() action, {bool secret = false}) async {
@@ -168,7 +168,9 @@ class _NotebookSyncPanelState extends State<NotebookSyncPanel> {
         if (item.success) _choices.remove(item.path);
       }
       if (!result.success && !result.cancelled) {
-        setState(() => _formError = result.error ?? 'Synchronization needs attention; retained data was not discarded.');
+        setState(() => _formError = result.code == null
+          ? result.error ?? 'Synchronization needs attention; retained data was not discarded.'
+          : 'Core error ${result.code}: ${result.error ?? 'Synchronization needs attention; retained data was not discarded.'}');
       }
     } on Object {
       if (mounted) setState(() => _formError = 'The synchronization action could not complete. Existing data and credentials remain protected.');
@@ -188,10 +190,8 @@ class _NotebookSyncPanelState extends State<NotebookSyncPanel> {
     final previous = facts?.provider.bindingEndpoint ?? facts?.endpoint ?? '';
     var confirmed = false;
     if (previous.isNotEmpty && previous != endpoint) {
-      confirmed = await _confirm('Change WebDAV endpoint?',
-        'Retire the previous local synchronization baseline before connecting to the new endpoint? '
-        'Previous recovery archives and remote notebooks are not deleted. '
-        'A failed new connection may remain disabled with recoverable state.', 'Change endpoint');
+      confirmed = await _confirm(AppStrings.of(context).text('Change WebDAV endpoint?'),
+        AppStrings.of(context).text('Retire the previous local synchronization baseline before connecting to the new endpoint? Previous recovery archives and remote notebooks are not deleted. A failed new connection may remain disabled with recoverable state.'), AppStrings.of(context).text('Change endpoint'));
       if (!confirmed || !mounted) return;
     }
     await _act(() => widget.sync.configure(endpoint: endpoint, username: _username.text,
@@ -199,16 +199,15 @@ class _NotebookSyncPanelState extends State<NotebookSyncPanel> {
   }
 
   Future<void> _disable() async {
-    if (!await _confirm('Disable WebDAV sync?',
-      'Keep the local notebook and all remote data. Local routing and credentials are removed '
-      'only after the corresponding steps succeed; failed cleanup remains visible.', 'Disable sync') || !mounted) { return; }
+    if (!await _confirm(AppStrings.of(context).text('Disable WebDAV sync?'),
+      AppStrings.of(context).text('Keep the local notebook and all remote data. Local routing and credentials are removed only after the corresponding steps succeed; failed cleanup remains visible.'), AppStrings.of(context).text('Disable sync')) || !mounted) { return; }
     await _act(widget.sync.disable);
   }
 
   String _resolution(CoreSyncResolution resolution) => switch (resolution) {
-    CoreSyncResolution.keepLocal => 'Keep local',
-    CoreSyncResolution.keepRemote => 'Keep remote',
-    CoreSyncResolution.keepBoth => 'Keep both',
+    CoreSyncResolution.keepLocal => AppStrings.of(context).text('Keep local'),
+    CoreSyncResolution.keepRemote => AppStrings.of(context).text('Keep remote'),
+    CoreSyncResolution.keepBoth => AppStrings.of(context).text('Keep both'),
   };
 
   @override
@@ -222,69 +221,67 @@ class _NotebookSyncPanelState extends State<NotebookSyncPanel> {
     final last = state.lastSuccessUtcMillis;
     return Material(child: SafeArea(child: Column(children: [
       Padding(padding: const EdgeInsets.all(12), child: Row(children: [
-        const Expanded(child: Text('WebDAV synchronization', style: TextStyle(fontSize: 20))),
-        IconButton(tooltip: 'Refresh sync facts', onPressed: state.busy ? null : () => widget.sync.reconcile(),
+        Expanded(child: Text(AppStrings.of(context).text('WebDAV synchronization'), style: const TextStyle(fontSize: 20))),
+        IconButton(tooltip: AppStrings.of(context).text('Refresh sync facts'), onPressed: state.busy ? null : () => widget.sync.reconcile(),
           icon: const Icon(Icons.refresh)),
-        IconButton(tooltip: 'Close sync information', onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
+        IconButton(tooltip: AppStrings.of(context).text('Close sync information'), onPressed: () => Navigator.pop(context), icon: const Icon(Icons.close)),
       ])),
-      if (state.busy) LinearProgressIndicator(semanticsLabel: 'Synchronization ${state.phase.name}'),
+      if (state.busy) LinearProgressIndicator(semanticsLabel: AppStrings.of(context).text('Synchronization {name}', {'name': (AppStrings.of(context).text(state.phase.name)).toString()})),
       Expanded(child: SingleChildScrollView(padding: EdgeInsets.fromLTRB(16, 8, 16,
         16 + MediaQuery.viewInsetsOf(context).bottom), child: Center(child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 760), child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Text(notebookSyncStatus(state), style: Theme.of(context).textTheme.titleMedium),
-            const Text('Configured is not proof of connectivity. Sync captures saved notebook data; '
-              'unsaved editor input remains a separate private draft.'),
+            Text(notebookSyncStatus(context, state), style: Theme.of(context).textTheme.titleMedium),
+            Text(AppStrings.of(context).text('Configured is not proof of connectivity. Sync captures saved notebook data; unsaved editor input remains a separate private draft.')),
             if (last != null && last > 0) Padding(padding: const EdgeInsets.only(top: 8),
-              child: Text('Last successful saved snapshot: ${DateTime.fromMillisecondsSinceEpoch(last).toLocal()}')),
+              child: Text(AppStrings.of(context).text('Last successful saved snapshot: {value}', {'value': (DateTime.fromMillisecondsSinceEpoch(last).toLocal()).toString()}))),
             if (state.error != null || _formError != null) Padding(padding: const EdgeInsets.symmetric(vertical: 12),
-              child: SelectableText(_formError ?? state.error!, style: TextStyle(color: Theme.of(context).colorScheme.error))),
+              child: SelectableText(AppStrings.of(context).message(_formError ?? state.error!), style: TextStyle(color: Theme.of(context).colorScheme.error))),
             Wrap(spacing: 8, runSpacing: 8, children: [
               FilledButton.icon(onPressed: state.canSync ? () => _act(widget.sync.syncNow) : null,
-                icon: const Icon(Icons.sync), label: const Text('Sync now')),
-              if (state.busy || state.queued) OutlinedButton(onPressed: () => widget.sync.cancel(), child: const Text('Cancel sync')),
+                icon: const Icon(Icons.sync), label: Text(AppStrings.of(context).text('Sync now'))),
+              if (state.busy || state.queued) OutlinedButton(onPressed: () => widget.sync.cancel(), child: Text(AppStrings.of(context).text('Cancel sync'))),
               OutlinedButton(onPressed: !state.busy ? () => _act(() => widget.sync.recover(
                 username: _username.text.isEmpty ? null : _username.text,
                 password: _password.text.isEmpty ? null : _password.text), secret: true) : null,
-                child: const Text('Recover sync')),
+                child: Text(AppStrings.of(context).text('Recover sync'))),
               TextButton(onPressed: !state.busy && (facts?.enabled == true || state.readiness == NotebookSyncReadiness.orphan)
-                ? _disable : null, child: const Text('Disable sync')),
+                ? _disable : null, child: Text(AppStrings.of(context).text('Disable sync'))),
             ]),
             const Divider(height: 32),
             if (state.readiness == NotebookSyncReadiness.unsupported)
-              const Text('This backend is preserved but not supported by mobile. No automatic migration is performed.'),
+              Text(AppStrings.of(context).text('This backend is preserved but not supported by mobile. No automatic migration is performed.')),
             _EndpointField(controller: _endpoint, enabled: !state.busy,
               onChanged: (_) => _inputChanged = true),
             const SizedBox(height: 12),
             TextField(controller: _username, enabled: !state.busy, autocorrect: false,
-              enableSuggestions: false, decoration: const InputDecoration(labelText: 'WebDAV username')),
+              enableSuggestions: false, decoration: InputDecoration(labelText: AppStrings.of(context).text('WebDAV username'))),
             const SizedBox(height: 12),
             TextField(controller: _password, enabled: !state.busy, obscureText: true,
               autocorrect: false, enableSuggestions: false,
-              decoration: const InputDecoration(labelText: 'WebDAV password', helperText: 'Password bytes are not trimmed. Stored secrets are never displayed here.')),
-            SwitchListTile(contentPadding: EdgeInsets.zero, title: const Text('Foreground automatic sync'),
-              subtitle: const Text('A coalescing 30-second window; no guaranteed background execution.'),
+              decoration: InputDecoration(labelText: AppStrings.of(context).text('WebDAV password'), helperText: AppStrings.of(context).text('Password bytes are not trimmed. Stored secrets are never displayed here.'))),
+            SwitchListTile(contentPadding: EdgeInsets.zero, title: Text(AppStrings.of(context).text('Foreground automatic sync')),
+              subtitle: Text(AppStrings.of(context).text('A coalescing 30-second window; no guaranteed background execution.')),
               value: _automatic, onChanged: state.busy ? null : (value) {
                 setState(() { _automatic = value; _inputChanged = true; });
                 if (facts?.enabled == true) _act(() => widget.sync.setAutoSyncEnabled(value));
               }),
             Wrap(spacing: 8, runSpacing: 8, children: [
               FilledButton(onPressed: state.busy || state.readiness == NotebookSyncReadiness.unsupported ? null : _configure,
-                child: const Text('Enable / update connection')),
+                child: Text(AppStrings.of(context).text('Enable / update connection'))),
               OutlinedButton(onPressed: state.busy || facts?.registered != true ? null : () => _act(
                 () => widget.sync.rotateCredentials(username: _username.text, password: _password.text), secret: true),
-                child: const Text('Update credentials')),
+                child: Text(AppStrings.of(context).text('Update credentials'))),
             ]),
-            const Padding(padding: EdgeInsets.only(top: 12), child: Text('Recovery may need credentials for a retained candidate account. '
-              'It verifies recorded outcomes rather than overwriting a newer note or deleting uncertain data.')),
+            Padding(padding: EdgeInsets.only(top: 12), child: Text(AppStrings.of(context).text('Recovery may need credentials for a retained candidate account. It verifies recorded outcomes rather than overwriting a newer note or deleting uncertain data.'))),
             if (conflicts.isNotEmpty) ...[
               const Divider(height: 32),
-              Text('Conflicts (${conflicts.length})', style: Theme.of(context).textTheme.titleMedium),
-              const Text('Choices are restricted to core capabilities. Metadata and protected content may not support Keep both.'),
+              Text(AppStrings.of(context).text('Conflicts ({length})', {'length': (conflicts.length).toString()}), style: Theme.of(context).textTheme.titleMedium),
+              Text(AppStrings.of(context).text('Choices are restricted to core capabilities. Metadata and protected content may not support Keep both.')),
               for (final conflict in rows) Padding(padding: const EdgeInsets.symmetric(vertical: 8), child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start, children: [
                   SelectableText(conflict.path),
-                  Text(conflict.binary ? 'Binary / opaque conflict' : 'File conflict'),
-                  DropdownButton<CoreSyncResolution>(isExpanded: true, hint: const Text('Choose resolution'),
+                  Text(conflict.binary ? AppStrings.of(context).text('Binary / opaque conflict') : AppStrings.of(context).text('File conflict')),
+                  DropdownButton<CoreSyncResolution>(isExpanded: true, hint: Text(AppStrings.of(context).text('Choose resolution')),
                     value: _choices[conflict.path]?.resolution,
                     items: [CoreSyncResolution.keepLocal, CoreSyncResolution.keepRemote,
                       if (conflict.canKeepBoth) CoreSyncResolution.keepBoth]
@@ -292,16 +289,19 @@ class _NotebookSyncPanelState extends State<NotebookSyncPanel> {
                     onChanged: state.busy ? null : (choice) { if (choice != null) { setState(() => _choices[conflict.path] =
                       NotebookSyncResolution(path: conflict.path, resolution: choice, ownerGeneration: state.ownerGeneration)); } }),
                   for (final outcome in state.conflictOutcomes.where((item) => item.path == conflict.path && !item.success))
-                    Text(outcome.error ?? 'This conflict remains unresolved.', style: TextStyle(color: Theme.of(context).colorScheme.error)),
+                    Text(AppStrings.of(context).message(outcome.code == null
+                      ? outcome.error ?? 'This conflict remains unresolved.'
+                      : 'Core error ${outcome.code}: ${outcome.error ?? 'This conflict remains unresolved.'}'),
+                      style: TextStyle(color: Theme.of(context).colorScheme.error)),
                 ])),
               if (pages > 1) Wrap(crossAxisAlignment: WrapCrossAlignment.center, spacing: 8, children: [
-                TextButton(onPressed: page == 0 ? null : () => setState(() => _page = page - 1), child: const Text('Previous conflicts')),
-                Text('Page ${page + 1} of $pages'),
-                TextButton(onPressed: page + 1 >= pages ? null : () => setState(() => _page = page + 1), child: const Text('Next conflicts')),
+                TextButton(onPressed: page == 0 ? null : () => setState(() => _page = page - 1), child: Text(AppStrings.of(context).text('Previous conflicts'))),
+                Text(AppStrings.of(context).text('Page {value} of {pages}', {'value': (page + 1).toString(), 'pages': (pages).toString()})),
+                TextButton(onPressed: page + 1 >= pages ? null : () => setState(() => _page = page + 1), child: Text(AppStrings.of(context).text('Next conflicts'))),
               ]),
               FilledButton(onPressed: state.busy || _choices.isEmpty ? null : () => _act(
                 () => widget.sync.resolveConflicts(_choices.values.toList())),
-                child: Text('Resolve selected (${_choices.length})')),
+                child: Text(AppStrings.of(context).text('Resolve selected ({length})', {'length': (_choices.length).toString()}))),
             ],
           ])))),
       ),

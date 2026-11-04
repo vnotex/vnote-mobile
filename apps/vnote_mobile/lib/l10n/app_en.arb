@@ -1,0 +1,1856 @@
+{
+  "@@locale": "en",
+  "mc6ded73456425aed": " The external copy may be incomplete.",
+  "mc550dabc45a15d07": " · Missing file",
+  "mb4bad1261a4c697e": " · {bytes} bytes",
+  "@mb4bad1261a4c697e": {
+    "placeholders": {
+      "bytes": {
+        "type": "Object"
+      }
+    }
+  },
+  "md5c7feae744e9b53": "A Markdown file that refers to sibling assets must be selected through its containing folder or ZIP. Private bytes are retained; no live rollback is assumed.",
+  "m448dd1e8c81b2a03": "A coalescing 30-second window; no guaranteed background execution.",
+  "m9c3ec17a763a69e9": "A generation must be 128 bits of lowercase hex.",
+  "mbf8b7f597ee353f3": "A live source view must resynchronize or retire before replacement.",
+  "mcb02f05bfc77aa02": "A managed storage ancestor is not an accessible directory.",
+  "m8e4f9db119ceba86": "A previous external Save As may already exist or be incomplete. Verify its destination before saving again.",
+  "m5e744d4207b2f91b": "A previous external copy may have completed or may be incomplete. Save As creates another chosen copy.",
+  "m90bb3307bd8c4707": "A previous external copy may have completed or may be incomplete. Save as creates another chosen copy.",
+  "m232b3fb38e0bf7c8": "A provider destination may be incomplete, or a previous Save As may already exist. Verify the destination before saving again.",
+  "m66d0517dde23750a": "A published import now conflicts with another notebook. Both copies were preserved.",
+  "m49783c9e85f4dadc": "A repeated delivery is retained. It will not import automatically.",
+  "m6cc317d958051f1f": "A resync candidate is already retained or unavailable.",
+  "m9d11807abcda68a4": "A retained draft needs an explicit recovery decision. Return to Notebooks.",
+  "m6ba8ac39a28e81ca": "A retained file/resource transfer requires recovery; this notebook is quarantined.",
+  "mb8f5e754c091be64": "A retained transfer needs recovery. Return to Notebooks to resolve it.",
+  "mb0d2b07070c47844": "A sealed cohort name is immutable.",
+  "m2ca9fcfcfc2c62bb": "A shared item must be reconciled before this notebook can be opened.",
+  "mb1282f6b648c9405": "A snapshot entry is linked or is not a regular file.",
+  "mf6cd9c96a0f1e523": "A snapshot file changed while archiving.",
+  "m3f9eede746f469ee": "A snapshot file changed.",
+  "m987738e18448d673": "A snapshot filename is not safe to export unchanged.",
+  "mdd4ae01f36f0277d": "A source operation is unavailable or already pending.",
+  "meb151b3fdf2b8e5f": "A stored name or file type changed during import.",
+  "m4b20cf06eedae14f": "A supported native WebView is required.",
+  "m1a886610c04679d0": "A supported native preview surface is required. Source remains available.",
+  "m5c57b9148474cd2a": "A transfer lease is still active.",
+  "m37a456f976c21dff": "Abandon private recovery records?",
+  "mb53adf5d70e4a55b": "Abandon private staging",
+  "m211b912462cd8f87": "Accepted-name record too large.",
+  "m0dd2e6086f16a161": "Acknowledged draft revision: {revision}",
+  "@m0dd2e6086f16a161": {
+    "placeholders": {
+      "revision": {
+        "type": "Object"
+      }
+    }
+  },
+  "m1d1ef79023b49d82": "Acknowledged journal data is invalid. Export its raw archive; no text was fabricated.",
+  "m8b32d7c5045d911e": "Acknowledged journal data is invalid. No recovered text is fabricated. The owned raw archive remains exportable.",
+  "mc1221c48f3b664fc": "Acknowledged revision {revision}; disk must be revalidated.",
+  "@mc1221c48f3b664fc": {
+    "placeholders": {
+      "revision": {
+        "type": "Object"
+      }
+    }
+  },
+  "m56e58d1ea2bc31ee": "Acknowledgements must answer a host request.",
+  "maac6defa1846338b": "Actions for {name}",
+  "@maac6defa1846338b": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "mf3459664ef742a24": "Actual ZIP entry exceeds its declared size or ratio limit.",
+  "m8da05f8dbc2c90d8": "Actual ZIP output exceeds its tree or ratio limit.",
+  "ma7874d1a42ade2c4": "Actual imported bytes exceed the limit.",
+  "mebda695e767a518e": "Add attachment",
+  "m04136060b40fb36a": "Add image",
+  "me8c114c9694cecc3": "Add image asset",
+  "m53f008a2eea1bb91": "Ambiguous ZIP end record.",
+  "m70a40b4651625717": "An acknowledged source cannot be replaced by a picker retry.",
+  "md232b0461d63bddc": "An export file is missing, linked, or unavailable.",
+  "m277fe724e3a3880e": "An export marker already exists. Nothing was replaced.",
+  "m4b70c229ebb13768": "An export operation is still active.",
+  "mdb2c858518dfc4bc": "An export requires an explicit immutable source origin.",
+  "m7eac4d193ca238de": "An immutable prepared cohort is required.",
+  "mb423b81d70554329": "An import operation is still active.",
+  "m46ced66b3e2fff64": "An imported file changed while inventorying.",
+  "mba3bcbc3249aff03": "An incomplete WebDAV download cannot be resumed as a proved notebook. Discard its private staging before reconnecting.",
+  "md63cc56a0180ae69": "Another operation owns the synchronization reservation.",
+  "@md63cc56a0180ae69": {
+    "errorCode": "sync_reservation_busy"
+  },
+  "m8d9bef44dd786455": "Another private import is retained. Resolve the current attempt or explicitly discard this copy.",
+  "mdcaad044f6967216": "Another published import is quarantined. Resolve the current attempt to recover it.",
+  "m42faf14e7371468e": "Another transfer still owns private staging.",
+  "m092b9712bdd44445": "Any tag",
+  "mdeff014ce14613c9": "Application Support changed during initialization.",
+  "mcaf6874db5599e3e": "Application Support resolves to temporary/cache storage.",
+  "ma1bfca1457299c81": "Apply to target folder",
+  "mcacdce0b5b7ce247": "Archive output already exists. Nothing was replaced.",
+  "m4610ac4492233b8a": "Attach private draft storage before opening the workspace.",
+  "mcc6897ebdaf40f47": "Attach synchronization credentials before opening the workspace.",
+  "m3b28f80f828dff2d": "Attachments and images",
+  "mb30d961c569e4137": "Await sync close before dispose.",
+  "mf3eaabf13fac468d": "Back to folders",
+  "m7b47361aad19bb48": "Base",
+  "ma70393b6f1f1e79a": "Binary / opaque conflict",
+  "mcb19465f5fe69c2f": "Block quote",
+  "m94fee62e68e257c0": "Bold",
+  "ma2b5baef0f36f6b9": "Bullet list",
+  "m59c9c5eb6151cc77": "Bundled editor dependency notices",
+  "m19766ed6ccb2f4a3": "Cancel",
+  "ma3077040dcb8f3f6": "Cancel export",
+  "m69292b8b36d3cbfb": "Cancel files transfer",
+  "m6dd6cafb0d3f5ef8": "Cancel import",
+  "m9970c96849013d72": "Cancel resource transfer",
+  "mb54563babd63a1e7": "Cancel search",
+  "m2ebf087cf420e05d": "Cancel sync",
+  "mf48e8dc778dc625b": "Cancel transfer",
+  "m0fb0f4680d3343d7": "Cancelled. Completed private bytes are retained.",
+  "m85389795657441cb": "Cancelled. Private bytes and any uncertain live outcome are retained.",
+  "me8ba335c06515ddd": "Cancelling search…",
+  "m8be19b24b2f7b706": "Cannot move into this folder or its descendants",
+  "m0d1cfa10b0078600": "Capture a complete resource snapshot first.",
+  "maa7fbd19d74e0442": "Capturing preview source",
+  "me124ba47cb3f7cda": "Case sensitive",
+  "mcce1e101ae0526a3": "Case-folded or canonically equivalent paths collide.",
+  "mbcc64ae6cfd4b10d": "Catalog retired.",
+  "m86b1336152a8782e": "Central-directory count disagrees.",
+  "m8ea07f1ca20da048": "Change WebDAV endpoint?",
+  "m9eda763f633bd0fd": "Change applied, but the folder could not be refreshed. It was not rolled back.",
+  "m25c98e0d0b410e4b": "Change applied.",
+  "ma7faa82e4a50f6a6": "Change endpoint",
+  "m30d32d5b47123f2e": "Change failed: {error}",
+  "@m30d32d5b47123f2e": {
+    "description": "Service message template",
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "m7a36c97b76a2dd92": "Change new folder name",
+  "md97b2073da88bbcf": "Changing the synchronization endpoint requires confirmation.",
+  "@md97b2073da88bbcf": {
+    "errorCode": "sync_endpoint_confirmation_required"
+  },
+  "m58f5ff4a8133f7cb": "Check shared items",
+  "mdb5d31bfc91e39ae": "Checking retained shared items…",
+  "m5f49deac09abfdf1": "Choices are restricted to core capabilities. Metadata and protected content may not support Keep both.",
+  "m522b3d4cb11078f0": "Choose a managed notebook root or the current folder. A new child folder groups this delivery.",
+  "m97cef0bdc8fd23df": "Choose a notebook and child folder first.",
+  "m877ad780db1037b3": "Choose between the received source and the divergent view before reloading.",
+  "mc60ca1a2eb2ac205": "Choose destination and import",
+  "m7c6ddca1583c5b52": "Choose file, folder or ZIP for a cohort.",
+  "mce3ef52452f627d9": "Choose resolution",
+  "m2de7fe1b177b1e5c": "Claim this shared item before copying it.",
+  "m2f7ccf65deaa174e": "Clean up outgoing shares",
+  "m1f5696c922e6dd7b": "Clean up outgoing shares?",
+  "m159f215e95edde3e": "Cleanup is restricted to a direct export-staging child.",
+  "m20f6caa33b80e08f": "Cleanup is restricted to a direct private import child.",
+  "m3b7ea51793e9d906": "Clear search",
+  "mdb1a974dbc2b8530": "Clone credential rekey has not been proved.",
+  "ma036d1648866f347": "Clone credentials require a committed import receipt.",
+  "mac7c85bebe83e405": "Clone publication is unresolved.",
+  "m7d9eb7acb13e2462": "Close",
+  "m36947f09f9213b36": "Close abort is unavailable.",
+  "md4552cebb8bcd8a4": "Close aborted; source is retained.",
+  "md417874c5c6e9588": "Close capture changed.",
+  "mdbdf219e5fdc427f": "Close requires the exact quiesced, durable source or explicit discard.",
+  "ma2b2c727a453dbc6": "Close resources",
+  "m64d0f6f1a83f933e": "Close sync information",
+  "m65fea88034f683e0": "Close the note to browse folders. Unsaved source must be saved, retained as a draft, or explicitly discarded.",
+  "m6be36b3433e12c85": "Close the selected note before importing shared items.",
+  "m30cd738733303cc3": "Close the selected notebook first.",
+  "m7545380a2996b3b3": "Code block",
+  "m2567a12b167227fc": "Cohort committed. Discard removes only private staging, never the imported folder.",
+  "m3de31f09f36e8cbd": "Cohort storage cannot be reconciled. Notebook writers remain blocked.",
+  "m65716597f2027d1b": "Complete tag data is required before saving.",
+  "mff4a6907381a374c": "Completed import has private cleanup remaining. Its notebook is not deleted by cleanup.",
+  "maf4edaa1454148f5": "Configured is not proof of connectivity. Sync captures saved notebook data; unsaved editor input remains a separate private draft.",
+  "meebdd24a77d9ad32": "Confirm",
+  "mf1b76b0e44a10509": "Confirm that every recipient has finished reading. This removes retained system-share copies, not notebook content. Android blocks cleanup while readers are active or uncertain. iOS cannot detect all recipients still reading shared file URLs; confirming cleanup revokes those copies.",
+  "m426a20ffce6a4c79": "Conflict resolution could not reserve the notebook safely.",
+  "@m426a20ffce6a4c79": {
+    "errorCode": "sync_conflict_admission_failed"
+  },
+  "mbd957afa30ea4fb0": "Conflicts ({length})",
+  "@mbd957afa30ea4fb0": {
+    "placeholders": {
+      "length": {
+        "type": "Object"
+      }
+    }
+  },
+  "m30e87f07c07ed225": "Connect WebDAV",
+  "m79a4e938e9736418": "Connect existing WebDAV notebook",
+  "m31fbef162594de01": "Continue",
+  "md51295490725da1f": "Continue import",
+  "mf0e04955e3bdda0b": "Contradictory Unicode ZIP path.",
+  "mbe175b521c7a0920": "Contradictory ZIP64 end records.",
+  "m3f33eb6b3f602b0f": "Copy received source",
+  "md339ca42ccd5995d": "Copying the selected source…",
+  "m44877888651ec7b7": "Core error {code}: {message}",
+  "@m44877888651ec7b7": {
+    "description": "Service message template",
+    "placeholders": {
+      "code": {
+        "type": "Object"
+      },
+      "message": {
+        "type": "Object"
+      }
+    }
+  },
+  "m4759498ac2a719c6": "Create",
+  "mc9bf599011eb60da": "Create a new pending delivery from the retained bytes. The original receipt remains and no import starts until you choose a destination.",
+  "m7af189a2b3f03017": "Create tag",
+  "m74431020d20734f6": "Creating ZIP copy…",
+  "m5ba916809c5f85e5": "Credential cleanup remains pending for this notebook.",
+  "m1919bf9fcb05893d": "Credential rotation failed.",
+  "@m1919bf9fcb05893d": {
+    "errorCode": "sync_rotation_failed"
+  },
+  "m02347bdab0991643": "Credential rotation has no committed receipt.",
+  "@m02347bdab0991643": {
+    "errorCode": "sync_rotation_uncommitted"
+  },
+  "me3272b913327a192": "Current disk and private source conflict; neither was overwritten.",
+  "m7b0c8342fe5a67d5": "Current disk will be checked again. Only a matching base or established saved prefix can be restored. Later acknowledged source opens as dirty until a new saved receipt is durable.",
+  "m80fde50ebe2d341f": "Current disk, identity, or policy differs. Disk and private source are preserved separately. Export or explicitly keep disk; automatic overwrite is forbidden.",
+  "m1a5db52359a6d813": "Current folder",
+  "m44366d4dcf32969b": "Current note",
+  "m572139468c561014": "Decoder cannot reset imported output.",
+  "mf884055d7019baa0": "Decoder requested an unbounded or unavailable history range.",
+  "me2d0a54968ead24e": "Delete",
+  "m8e13216a05b75255": "Delete “{name}”?",
+  "@m8e13216a05b75255": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m2f7d5407842d2e4a": "Dependency licenses and source notices",
+  "m293d404a500f5f9a": "Destination",
+  "m6c4ce92f29b324cd": "Destination: {folder}",
+  "@m6c4ce92f29b324cd": {
+    "placeholders": {
+      "folder": {
+        "type": "Object"
+      }
+    }
+  },
+  "m9a39eba334c3571c": "Disable WebDAV sync?",
+  "mc4aaf27231fa96ed": "Disable sync",
+  "m0c348e898b5812af": "Disabling synchronization requires recovery.",
+  "@m0c348e898b5812af": {
+    "errorCode": "sync_disable_recovery"
+  },
+  "meb1a70e39274bb76": "Discard",
+  "md613ad5416cdcf51": "Discard export",
+  "m07f00380c4076934": "Discard export data {label}",
+  "@m07f00380c4076934": {
+    "placeholders": {
+      "label": {
+        "type": "Object"
+      }
+    }
+  },
+  "mae2aa7b8e8cd589b": "Discard files staging?",
+  "m8bc2a9d3cac1a58f": "Discard import",
+  "mdd794bdc07054171": "Discard import data {label}",
+  "@mdd794bdc07054171": {
+    "placeholders": {
+      "label": {
+        "type": "Object"
+      }
+    }
+  },
+  "m03575ed75ab8f89b": "Discard only the retained delivery after native recovery proves it safe. A committed notebook folder is never removed. Uncertain imports remain retained.",
+  "m8b1467991bf12a8a": "Discard private draft",
+  "mf281437b85d7b497": "Discard private residue?",
+  "me87105c646cb64d0": "Discard private staging?",
+  "m503dfec18eb412ad": "Discard resource staging?",
+  "m2c842e56cc0478c0": "Discard shared item",
+  "mdd3e84929ee7417b": "Discard shared item?",
+  "me09f6efbcabd761f": "Discard staging",
+  "mf3ecc8986e997b4f": "Discard this import?",
+  "mc78ba5623bb418a2": "Discard “{label}”?",
+  "@mc78ba5623bb418a2": {
+    "placeholders": {
+      "label": {
+        "type": "Object"
+      }
+    }
+  },
+  "m6853f39a4fcd3ea2": "Discarded receipt",
+  "m9e8ba12fef8f311a": "Disk and draft conflict. Retain the draft and inspect recovery before reopening.",
+  "m225565dec6be94f3": "Disk and draft disagree. Inspect recovery before writing.",
+  "m6a759c8be6c9afbd": "Disk and draft still conflict.",
+  "mec9ee1563dc20476": "Disk changed during restoration. Both private captures are retained.",
+  "mbb00c0151d8ef8f2": "Disk changed during source restoration. Both captures are retained.",
+  "m57dac1a6e1cbfbcc": "Disk or source policy changed during recovery. Both disk and the private checkpoint are retained.",
+  "mffedead6cdcdf46f": "Dismiss retained duplicate",
+  "mf115d92c11210fcc": "Dismiss retained duplicate?",
+  "m2a2ada7a6d644eb6": "Display name only. The notebook folder is not renamed.",
+  "mc91dd30d3c9976ee": "Divergent source requires an explicit recovery choice.",
+  "mf762038f2f33a331": "Document export cancellation is unavailable.",
+  "m7ef13e24b0da93cf": "Document import cancellation is unavailable.",
+  "m18b64ec9d9401c66": "Download into private staging, then validate and import the complete notebook. Existing notebook IDs are preserved. No existing notebook is overwritten.",
+  "m5a73bd2615f34eb1": "Download notebook",
+  "m6afc25ed82f771ee": "Downloading the WebDAV notebook into private staging…",
+  "mebf12ef47cf575b3": "Draft",
+  "ma9aa3e4b4e22b3d1": "Draft admission failed. Received source is retained; preserve the live editor too.",
+  "mbfce2b0c3c6926b8": "Draft admission failed; source is retained.",
+  "m3f5778200b9255fc": "Draft durability exceeds received source.",
+  "mbe235a7e3a16c89d": "Duplicate notebook identity. Neither copy can be opened from this library.",
+  "m7e9a8d16d8c6ffc0": "Duplicate path or file/directory collision.",
+  "m84288f69321253f7": "Durable draft credit exhausted; source is retained.",
+  "md059284bd0919eb9": "Edit exceeds 65,536 inserted UTF-16 units.",
+  "m25751f44481fb298": "Edit exceeds the 4 MiB document limit. Previous text is retained.",
+  "mc9c48b78cbf0f6d2": "Edit revision gap; both texts are retained.",
+  "mdd158c66cb86ffa6": "Edit splits a surrogate pair or CRLF.",
+  "m0ceab5713eb72e68": "Edited writes use {value} line endings; opening preserves exact source.",
+  "@m0ceab5713eb72e68": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "me4dfa55ffeefba88": "Editor barrier does not match the received prefix.",
+  "m19c871b7c25b0fe1": "Editor barrier timed out; source is retained.",
+  "m56d4eb27a00a804a": "Editor cannot accept this edit; source is retained.",
+  "m6217f6314b119cdf": "Editor quiescence is unavailable.",
+  "m714203a9de1733b0": "Editor retired. Received source is retained.",
+  "md0ee96fdedc6fc07": "Editor transport failed. Received source and durable drafts are retained.",
+  "m9968dc54aaaa7237": "Editor transport failed; acknowledged private source is retained.",
+  "m87d11e6467a0ecba": "Empty accepted-name record.",
+  "m36bd13a14944c1ba": "Enable / update connection",
+  "m1a5dfd398560589f": "Enabling synchronization has no committed receipt.",
+  "@m1a5dfd398560589f": {
+    "errorCode": "sync_enable_uncommitted"
+  },
+  "m096bae15f385d0c0": "Encoded text exceeds its byte limit.",
+  "mf45aef6e0f7eca1b": "Encrypted",
+  "m4ec5067881a7211a": "Encrypted or patched ZIP metadata is unsupported.",
+  "m6f7f26a4bcbfa771": "Encrypted or unsupported ZIP entry.",
+  "mba118bf7fc9c1aed": "English",
+  "m099f9079ba79b851": "Enter a name.",
+  "mcb23d7e0c5d7c413": "Enter a portable filename (at most 255 UTF-8 bytes).",
+  "m98e5d17fa74d3513": "Enter a username and password or app password.",
+  "mcf1387bfa554ccec": "Enter search text or choose a tag.",
+  "m1bb329019da6c20e": "Escaping imported entry.",
+  "ma4426b25f55f58b2": "Established saved prefix: {savedRevision}",
+  "@ma4426b25f55f58b2": {
+    "placeholders": {
+      "savedRevision": {
+        "type": "Object"
+      }
+    }
+  },
+  "m40080ac6830617e6": "Everything selected goes into one new child folder with this name. Original paths and bytes are preserved; new node IDs are generated. VNote-ID links are not rewritten and remote links are not fetched. Choose a containing folder or ZIP for Markdown with sibling assets. Notebook backups use Import notebook instead. The library will show the retained source before you prepare and apply it.",
+  "me1fa7f5a4822b721": "Exact destination filename",
+  "md6f682f081ddb2bb": "Existing assignment without a definition; kept unless unchecked.",
+  "m526762f2f754336c": "Existing import staging must be resolved first.",
+  "me6c735dc16a0757b": "Existing links may break. The core tries to recycle the file, but may permanently delete it if recycling fails. No note source is rewritten and this app does not provide restore.",
+  "m22e079cf8d185638": "Existing notebook identities are duplicated. Resolve them before importing.",
+  "m3c9a59cd6cd60575": "Expected a JSON object.",
+  "m2d6768e70696d000": "Expected a notebook root or one sole notebook wrapper directory.",
+  "me4fd2629b1f01808": "Export ZIP",
+  "m567545ee9d17aa76": "Export a copy of this attachment? Another application or provider will receive its bytes.",
+  "m47c8e0cee4bd398e": "Export cancelled.",
+  "m1dc693c50ac2ff0f": "Export cancelled. The completed ZIP is retained.",
+  "m1e679036ed8915bc": "Export cleanup encountered an unsafe path.",
+  "m2b48438935613d0d": "Export could not be completed. The notebook was not changed.",
+  "m42baeb2100e73640": "Export draft text",
+  "m4b4463aaa4ece88a": "Export metadata is too large.",
+  "m3a3b8c06f46a7672": "Export ownership marker is invalid or unsupported.",
+  "m5dd189e368eb2b97": "Export ownership marker is invalid.",
+  "m2188e3d4b0b8dd46": "Export ownership marker is too large.",
+  "ma4f25506722ec74a": "Export raw journal",
+  "m59dd92186e2807a2": "Export staging already exists. Refresh and discard it first.",
+  "m82a08268eae653e2": "Export staging contains unexpected entries.",
+  "m85d779f69298e959": "Export staging could not be reconciled. Explicit discard is required.",
+  "md5ef0dca3ebdf215": "Export staging discarded.",
+  "m5f96a23216813926": "Export staging needs explicit cleanup.",
+  "m1d8f125a99f699be": "Export storage is linked, changed, or unavailable.",
+  "m76b5c8711a734a79": "Export storage must be a canonical absolute directory.",
+  "m0b3c8c4623715f0b": "Export {name}",
+  "@m0b3c8c4623715f0b": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "mc41e9a9b81492c22": "Export “{name}”?",
+  "@mc41e9a9b81492c22": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "mde695c39214bd964": "Exporter is closed.",
+  "mf7c1fd62992951e8": "External copy saved. The private snapshot remains until explicitly discarded.",
+  "m3fd2e193d9687530": "External link is not permitted.",
+  "mb0ef3c9023e51215": "File and editor source are separate. Insert a link or image below; source then follows draft persistence and autosave.",
+  "m0da33609d1eb1460": "File changes commit separately. Inserted source uses draft recovery and autosave.",
+  "mb3638a0494897140": "File conflict",
+  "mb13539adfac28014": "Files and assets",
+  "m655a755affa62ee9": "Files: {name}…",
+  "@m655a755affa62ee9": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m43a1f8e7b15cc2bc": "Files: {phase}…",
+  "@m43a1f8e7b15cc2bc": {
+    "placeholders": {
+      "phase": {
+        "type": "Object"
+      }
+    }
+  },
+  "m987b16420c6dadc7": "Filesystem work requires an admitted lease.",
+  "mb9274474d0990cb9": "Filter by tag",
+  "mea59733a84485f52": "Finish composition and save the exact final revision, or keep it as a durable draft without writing the notebook. Explicit discard removes unwritten source only after confirmation.",
+  "me2239eb25be8937f": "Finish connection",
+  "m2481dc7403cc41d5": "Finish connection recovery?",
+  "m60d55866c81d616a": "Finish or discard this private transaction before starting another file change.",
+  "m2c839457151ee154": "Finish published clone credential recovery before discarding its private receipt.",
+  "mb0aa737747badb30": "Finish the current notebook/transfer ownership before synchronization.",
+  "ma1a46cfcdffe41e6": "Finishing published import…",
+  "mb7151290c0aee8e0": "Flutter and plugin licenses",
+  "m74ccd43303847f26": "Folder",
+  "m8c3654e9f7a00cab": "Follow preview link?",
+  "m1638888b2591e39a": "Foreground automatic sync",
+  "m8a101766f537ab3d": "Foreground autosave is enabled. Only acknowledged durable prefixes survive supported process restart.",
+  "m126d8799005caabf": "Forget settled history",
+  "md3a293299e3fbc7d": "Forget settled history?",
+  "m6c99867e41769990": "Format Markdown",
+  "m8149599f2b864e83": "Formatting requires Markdown source.",
+  "m92f321b9ec631629": "GNU GPL version 3",
+  "m8bbe6aa4fe04c77b": "GNU LGPL version 3",
+  "m85aa54cd25d0dd57": "HTTPS WebDAV collection",
+  "md95e9370ef74ec20": "Heading 1",
+  "m3291955e900530da": "Heading 2",
+  "mc6845f11c2d38dec": "Heading 3",
+  "mdf78f14225f42096": "Heading 4",
+  "m8b9c54a41e633c9f": "Heading 5",
+  "mc5225c24c27dae7e": "Heading 6",
+  "m5db2211d548e434d": "Host request numbers exhausted.",
+  "m40936a4e18cb15cc": "Host request numbers exhausted; retain this session.",
+  "m57757ac6eccf85a2": "Immutable cohort prepared. Apply it to the captured parent.",
+  "m2cff9baabf56ca00": "Import",
+  "mcb0bf46bf1e385db": "Import ZIP",
+  "md40853029c36aecb": "Import another copy",
+  "md137103f8603c935": "Import another copy?",
+  "m8598e15a7ec853e5": "Import cancelled before publication.",
+  "m486cb265569cba9c": "Import cancelled. Any completed private copy is retained.",
+  "mafcc4930bac89bb5": "Import cancelled. The completed prepared copy is retained.",
+  "mc15a4496434990dd": "Import cleanup encountered an unsafe path.",
+  "m3d706950572a2681": "Import could not be completed. Private source bytes are retained.",
+  "mef3bb73c83f03db8": "Import directory is missing, linked or changed.",
+  "m6a9e73cf0d421411": "Import file",
+  "m36c704a8af2ce32b": "Import file is missing, linked or special.",
+  "m824ca255db35db13": "Import files",
+  "mf82a8227d393331d": "Import files ZIP",
+  "md55b72a546b076eb": "Import files folder",
+  "m8629928fba6f0a99": "Import files into this folder",
+  "mb849e38fdb5674c0": "Import folder",
+  "maf36d656da4ce558": "Import has not been published; the prepared copy was retained.",
+  "m298d1e7b4fb6b50f": "Import into {value}",
+  "@m298d1e7b4fb6b50f": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m4feba92ca28713a9": "Import notebook",
+  "m8e941bb7de7d2120": "Import output already exists; nothing was replaced.",
+  "m01bfc53009d119a6": "Import publication requires recovery; this copy is quarantined.",
+  "ma124c3f8f16edc44": "Import recovery returned an invalid ownership record.",
+  "m7185eb3dd318fd5f": "Import recovery storage is unavailable; this root cannot be registered safely.",
+  "m286ae3fb8a97a3a6": "Import requires completion or recovery",
+  "m7c47535350273fe6": "Import shared item",
+  "m8727f0d4f00b02f0": "Import staging already exists. Nothing was replaced.",
+  "m376ed69f218c1979": "Import storage could not be reconciled. Publication remains unavailable.",
+  "mcab095bc5abbc0e9": "Import storage is linked, changed, or unavailable.",
+  "m93d3b0f514707694": "Import storage must use separate canonical private directories.",
+  "m207786cb1bba1067": "Import this notebook?",
+  "m399e8d0e22cf7b48": "Import: {value}",
+  "@m399e8d0e22cf7b48": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "mf5a8094b8f2732a8": "Imported file or tree exceeds the byte limit.",
+  "mcbd42c76275194aa": "Imported files",
+  "m21effe923df1db82": "Imported node identities collide with an existing notebook. No IDs were regenerated.",
+  "m989ca87bbfd579a4": "Imported notebook routing still requires recovery.",
+  "m98a20dfbe050e4a7": "Imported path is too deep.",
+  "m390766c63466a5a3": "Imported receipt",
+  "m57ad78bab586c905": "Importer is closed.",
+  "m7b4715e364af0b24": "Inbox claim did not match.",
+  "m1d5922556ae2902e": "Include .md (Markdown) or .txt (plain text).",
+  "m2f1f291bc2f73afb": "Incoming shares",
+  "m83823cff27ab7f45": "Incoming sharing could not be activated safely.",
+  "@m83823cff27ab7f45": {
+    "errorCode": "activation_unavailable"
+  },
+  "m5b76744b0f063ccd": "Incoming sharing is unavailable on this installation. System export may still be available.",
+  "m7dc546f48d83df51": "Initialize export storage first.",
+  "m742e8d7543ed273d": "Initialize import storage first.",
+  "m5494187b19004f11": "Initialize transfer storage first.",
+  "me767deee633e3545": "Inline code",
+  "mcf3a92dadb38f288": "Insert image",
+  "m421eaa9e095dc28c": "Insert link",
+  "m599ff7514d369ded": "Insertion exceeds its source limit.",
+  "m50e29098f551d618": "Insertion exceeds the document limit.",
+  "m762f4c0172318871": "Insertion must change source.",
+  "mc3404a3151948f18": "Insertion would split a CRLF at its resulting cursor.",
+  "m1c5cb01b695ff40f": "Inspect / refresh",
+  "m2dcc2cc8cd61d1f9": "Inspect actual resources",
+  "m52ca43696e9cf11e": "Inspect base / draft / disk",
+  "ma5e77ed38e4327cc": "Inspect the listed actual resources first. The live outcome is ambiguous. Every live file, including an unexpected suffix copy, is preserved. Only private staging and recovery records are abandoned. Nothing is recopied, deleted live, or linked into source.",
+  "made8bd479c8644ec": "Inspection requires an admitted import operation.",
+  "m9fb35c6aa5da3fb3": "Interrupted private allocation discarded.",
+  "m744d0756d702857b": "Interrupted resource allocation",
+  "mfee9f727e5936f25": "Invalid WebDAV clone identity.",
+  "m0eece642a9d798c3": "Invalid ZIP central-directory range or entry count.",
+  "mf96a39c0fb656025": "Invalid ZIP64 end record.",
+  "m7149184ef9771fdc": "Invalid ZIP64 version or split entry.",
+  "m32018a38f2e0e26d": "Invalid acknowledgement capture.",
+  "mbb0ce05106fbe3ae": "Invalid acknowledgement error.",
+  "m0a9d76ee0a79dff8": "Invalid central directory signature.",
+  "medd98e71fc56fa3b": "Invalid central name or header range.",
+  "mc536e72ca84d1f6e": "Invalid change fields.",
+  "m90456423767c83b2": "Invalid change object.",
+  "mcfc5c90052b314bb": "Invalid change types.",
+  "m2602d018bc04146c": "Invalid cohort export state.",
+  "m6f1b445a52341e91": "Invalid decoder output range.",
+  "maa3cd9dedac36d67": "Invalid deflate backreference.",
+  "mb34dc01f453ed54d": "Invalid document identity or disk base hash.",
+  "md07db59dff73f260": "Invalid edit range count.",
+  "m532a3e3bde5e78f4": "Invalid editor activity.",
+  "m075d2ae3257c5ac1": "Invalid explicit link destination.",
+  "m088bf2935a71ba1a": "Invalid explicit shared copy.",
+  "m1c2240fcec59456d": "Invalid heading fragment.",
+  "me53bcbeff99a696e": "Invalid heading level.",
+  "m907b018f424b1272": "Invalid host request reply.",
+  "m4a42eba137a8a550": "Invalid immutable export binding.",
+  "m6b2064fc2670310a": "Invalid import ownership identifier.",
+  "mef034a2ea9b0a513": "Invalid import transaction location or preparation format.",
+  "m418a799935ea5222": "Invalid imported path component.",
+  "m34ef6a9587ddc106": "Invalid imported path.",
+  "mafba165d26207dc0": "Invalid inbox byte count.",
+  "mfd86bf7e41866b50": "Invalid inbox claim.",
+  "maba20ec05bd36cef": "Invalid inbox count.",
+  "m1eb0dbece658b1a4": "Invalid inbox file.",
+  "mb5d6d552abafaaae": "Invalid inbox record.",
+  "mc46b738d9ee3b87d": "Invalid inbox reply.",
+  "m671e87c859991023": "Invalid inbox target.",
+  "m9530bbbef1c09a53": "Invalid local ZIP64 version.",
+  "m699a562a6726c417": "Invalid locale preference reply.",
+  "m5a233cf0398d51f4": "Invalid message type or revision.",
+  "m742f0f2a6636aa38": "Invalid mutation export state.",
+  "m3738ab258eb22072": "Invalid operation.",
+  "m7e1494fef728e395": "Invalid or ambiguous ZIP descriptor.",
+  "md9db42adcfd22ff2": "Invalid provider accepted-name record.",
+  "mf9503152d3bd7ad1": "Invalid request ID.",
+  "m37b87a058dee0082": "Invalid retained capture.",
+  "m9388f9f4f912abd1": "Invalid selection fields.",
+  "m0faef8129bedcdc6": "Invalid selection revision.",
+  "m9b3710bd51a4d423": "Invalid selection types.",
+  "mceeb62b616ee21b0": "Invalid source-operation identity.",
+  "mcefaa4c61c207701": "Invalid surface identity.",
+  "m7e74765da6c53c88": "Inventory record is too large.",
+  "m9bf37cb58a694456": "Italic",
+  "m41814055a6d43685": "Join inbox owners before releasing the barrier.",
+  "m27aff32cf4dbfe10": "Join inbox writers before releasing the barrier.",
+  "m3a00f8eaa5e68269": "Keep an appropriate extension. Bytes are copied unchanged; existing files are never overwritten.",
+  "m93672212b4c25a89": "Keep both",
+  "med5ca606407551c4": "Keep disk / discard draft",
+  "m0cdc4ae39ed1aa2a": "Keep disk and discard private draft?",
+  "mbbcc810f654fd360": "Keep draft",
+  "m82b0b50c13119060": "Keep local",
+  "m63b5a84472872c75": "Keep remote",
+  "md5d592b5bc87c7ef": "Keep the local notebook and all remote data. Local routing and credentials are removed only after the corresponding steps succeed; failed cleanup remains visible.",
+  "ma4fe65264ef7dbb3": "Language",
+  "m508c6e7d7fb3903c": "Language preference could not be loaded: {detail}",
+  "@m508c6e7d7fb3903c": {
+    "placeholders": {
+      "detail": {
+        "type": "Object"
+      }
+    }
+  },
+  "m7b4f9b536477ea25": "Language preference could not be saved: {detail}",
+  "@m7b4f9b536477ea25": {
+    "placeholders": {
+      "detail": {
+        "type": "Object"
+      }
+    }
+  },
+  "mff090c0bc7986c97": "Last successful saved snapshot: {value}",
+  "@mff090c0bc7986c97": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m2faced7f5f950570": "Legal assets could not be loaded: {error}",
+  "@m2faced7f5f950570": {
+    "placeholders": {
+      "error": {
+        "type": "Object"
+      }
+    }
+  },
+  "m6980a89485b93552": "Legal notices",
+  "m03cdbec482663f4e": "Library closed.",
+  "m84d54eb5634f2648": "Line {line}: {snippet}",
+  "@m84d54eb5634f2648": {
+    "placeholders": {
+      "line": {
+        "type": "Object"
+      },
+      "snippet": {
+        "type": "Object"
+      }
+    }
+  },
+  "ma6a32dbc5618ea39": "Link",
+  "m0be7db8d7ab75239": "Link destination",
+  "m87b44998ceb843c2": "Link inserted. Check the editor's draft and saved status.",
+  "m77f8560055ef1901": "Links and special files cannot be imported.",
+  "m77646782cd342e32": "Loading notebooks…",
+  "mb19ce5dcae649e4b": "Loading tag filters…",
+  "m23acfd6690fb5c78": "Loading tags…",
+  "maf68d5c30d7e479e": "Local ZIP name or data range disagrees.",
+  "m8d678ad8bb0031c3": "Local ZIP sizes or CRC contradict the central entry.",
+  "me42f6f2c74264473": "Local and central ZIP headers disagree.",
+  "mdc0eda13ee3f09e3": "Local notebooks need your own exported copies. OS backup exclusion is requested, not guaranteed; app removal or device loss may remove local data.",
+  "m96ce86dee0c3c850": "Managed library exceeds the {maxNotebooks}-notebook limit.",
+  "@m96ce86dee0c3c850": {
+    "description": "Service message template",
+    "placeholders": {
+      "maxNotebooks": {
+        "type": "Object"
+      }
+    }
+  },
+  "mc2e27b607e2906d1": "Managed notebook",
+  "m2ace985a09ebac15": "Managed notebooks could not be enumerated.",
+  "m7a0004529a24dc88": "Managed notebooks parent is inaccessible.",
+  "m97c6dac73413942f": "Managed notebooks parent is unavailable or linked.",
+  "mcf91fa534eb88524": "Managed storage changed during initialization.",
+  "me648a7608d77429f": "Managed storage escapes its persistent support root.",
+  "m146d2fe871dc29da": "Matches selected tag",
+  "m6156f0af8aa7ebef": "Message exceeds its encoded size limit.",
+  "m1b13527b5fd5fde0": "Missing ZIP64 end records.",
+  "mde4038270afdc683": "Missing content",
+  "mc8c6e8e62fa8db96": "Missing edit selection.",
+  "m4958f5e679cbced2": "Missing or contradictory ZIP64 extra values.",
+  "mc96c16ef9930a840": "Missing or truncated ZIP end record.",
+  "m5b685a4b2c43bd5f": "Missing rejection error.",
+  "me017df61a383088c": "Missing request ID.",
+  "m2b1680b0c44f345a": "Missing source-operation change outcome.",
+  "m6ecc3df6bffdd06c": "Move",
+  "m56f124777749d1f8": "Move here",
+  "ma464ebf51a5281b4": "Move “{name}”",
+  "@ma464ebf51a5281b4": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "md1fcb0068cdd0ee2": "Multiple ready exports were found. Discard extras to recover one.",
+  "m8606f9a6d2b2b223": "Mutation desired records must use version1.",
+  "m9e7d40324a2c8228": "Mutation records cannot carry an export origin.",
+  "mdcd1d5223f73b3a9": "Name",
+  "mf0845726240660a9": "Native core and dependency notices",
+  "m2b2ec7965a7daca3": "Native language settings are unavailable.",
+  "m95081eb69109d626": "Native library notices are available after a successful native startup.",
+  "mf85a033d242bcbd2": "Native sharing support is unavailable.",
+  "@mf85a033d242bcbd2": {
+    "errorCode": "native_unavailable"
+  },
+  "m3eceaf10cc92ac56": "Native source is retained while the secure editor is unavailable.",
+  "m828aaf50ccf64032": "Native surface router is retired.",
+  "mdcde1444b72aea6c": "Native surfaces are retiring.",
+  "md9fa34263e0a0ab0": "Native write returned a mismatched saved receipt.",
+  "m7dba8c5447eb0d4b": "New child folder name",
+  "mcf28f49ec597a6ed": "New folder",
+  "m76ea482f843e76e4": "New note",
+  "mf423e44c42bbfee1": "New notebook",
+  "m609117d5b0f93302": "New tag",
+  "m4a12aa1e7218f650": "Next conflicts",
+  "mabff716889b08858": "No committed cohort was found. The immutable source is retained.",
+  "m98a0d1d02d88c495": "No completed external copy was reported. The private snapshot is retained.",
+  "m743178659ea04fa0": "No completed mutation was proved. Private input remains retained.",
+  "m8e114b5b8d173cde": "No current resource listing. Use Inspect / refresh.",
+  "m5ba0f14270a677b2": "No divergent source candidate is retained.",
+  "maf0dc07b04c6a6a2": "No guaranteed background execution.",
+  "mf13860208fd8dc60": "No matching notes.",
+  "m3c18a557e58da2cd": "No mutation was dispatched. Explicitly discard this private allocation.",
+  "m295e105e736705cc": "No notebooks yet. Choose New notebook to create one.",
+  "m20353cf88a5c40cc": "No retained shared items.",
+  "md9e41d0c24deff91": "No tags yet. Create a tag to get started.",
+  "mc28ceefaaa19d96f": "No tracked attachments or unindexed assets.",
+  "mc1c451c66b9c32d3": "No valid source can be reconstructed. Export the raw journal archive.",
+  "me5c5a2a3009c87e1": "Non-ASCII ZIP names must be flagged UTF-8.",
+  "m7a04cf0e2e324ca8": "Nonportable imported path.",
+  "m8e5191b40cb4d526": "Not a notebook backup. The entire vx_notebook directory (including unknown files), notebook identity, tags, configuration and configured recycle data are omitted.",
+  "md8da2c49df39d91d": "Note",
+  "m0dec07abf92dbe72": "Notebook",
+  "m08275176e109eb08": "Notebook backup",
+  "mc68f7aab1e9e0efd": "Notebook closure requires synchronization recovery.",
+  "@mc68f7aab1e9e0efd": {
+    "errorCode": "sync_close_recovery"
+  },
+  "m9068f4dd1a23d3b9": "Notebook context",
+  "mce473991e468be8b": "Notebook export metadata is invalid.",
+  "me93b7529199dd1ea": "Notebook folder",
+  "m271bcc3b94042a9e": "Notebook identity changed during import validation.",
+  "mdbbfed50718f0a52": "Notebook import cancelled.",
+  "mf44049f422a30456": "Notebook imported.",
+  "m761100590fe9a44c": "Notebook location is inaccessible.",
+  "m26fddc6481afa76f": "Notebook location is linked or missing. Refresh the library.",
+  "m010ab42ac6127b29": "Notebook location is linked or unavailable.",
+  "m05a557c69dd30308": "Notebook location is not a direct managed child.",
+  "m65ebe7fb17ff3b56": "Notebook location is not a supported managed child.",
+  "m3d212076d876c11f": "Notebook operation failed.",
+  "m0e5e65f4d40d5cc8": "Notebook operation failed. Received source and private recovery data are retained.",
+  "m22343e8f555e914e": "Notebook shutdown did not finish. Received source is retained. Copy it, then restart the app before reopening this notebook. This editor cannot be resumed.",
+  "m0f328adfd2eee68f": "Notebook source",
+  "mc4f7f607ff22de15": "Notebook {notebookId}\nNote {nodeId}",
+  "@mc4f7f607ff22de15": {
+    "placeholders": {
+      "notebookId": {
+        "type": "Object"
+      },
+      "nodeId": {
+        "type": "Object"
+      }
+    }
+  },
+  "m3b5da3d371c89f06": "Notebook {notebookId}\nParent {parentId}",
+  "@m3b5da3d371c89f06": {
+    "placeholders": {
+      "notebookId": {
+        "type": "Object"
+      },
+      "parentId": {
+        "type": "Object"
+      }
+    }
+  },
+  "m0ae9bd5b1008ae83": "Notebooks",
+  "mcc62f6c7b2a82fd1": "Numbered list",
+  "m3081e983ffd544ad": "Observed disk SHA-256: {diskHash}",
+  "@m3081e983ffd544ad": {
+    "placeholders": {
+      "diskHash": {
+        "type": "Object"
+      }
+    }
+  },
+  "mc9d7d894fd4d953d": "Only a raw archive can export an unidentifiable journal.",
+  "mef28b13475527b4a": "Only acknowledged durable prefixes are listed. Restoring opens a new capture without overwriting current disk. Unreceived or composing input may not survive a view or process loss.",
+  "m578c5b7f0ac449ec": "Only an acknowledged private source can be prepared.",
+  "m1245362a6f2bf6d8": "Only one notebook owner is active. Incoming shares and retained transfers are reconciled before notebook writes.",
+  "m6e30aa8c90f0ae95": "Only private staging is discarded. Committed attachments and images remain in the notebook. An unresolved live outcome must be recovered or explicitly abandoned.",
+  "m691003709183abb7": "Only private transfer staging is discarded. A committed attachment or image is not removed and note source is not changed.",
+  "mbc30cbf738159d00": "Only saved content is exported. The ZIP itself is not encrypted. The notebook is not changed.",
+  "m35f8e00cc39e4b06": "Only this private staging item may be removed. Ambiguous published roots remain quarantined.",
+  "mdf35c8410cf8b970": "Open existing notebook",
+  "m3e6f70beedfd2e71": "Open the app to enable safe incoming sharing.",
+  "@m3e6f70beedfd2e71": {
+    "errorCode": "activation_required"
+  },
+  "m10b7b2dcf72278cf": "Open the linked note? Current input will be kept as a durable draft first.",
+  "m7ecefc69683a81da": "Opening managed notebook…",
+  "m7bb870d729db8aac": "Opening selected note…",
+  "mf83c5af974d0ae68": "Out-of-order edit base; both texts are retained.",
+  "m7b4bb0ef33decee5": "Overlapping or out-of-bounds edit range.",
+  "mdd2477cda99c0310": "Ownership or recovery records are invalid. Live destinations cannot safely be ruled out.",
+  "mb9b1485818f4702c": "Page {value} of {pages}",
+  "@mb9b1485818f4702c": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      },
+      "pages": {
+        "type": "Object"
+      }
+    }
+  },
+  "m755c4bfe40ce6f00": "Parent: {parent}",
+  "@m755c4bfe40ce6f00": {
+    "placeholders": {
+      "parent": {
+        "type": "Object"
+      }
+    }
+  },
+  "mda1b379960c82b7a": "Password bytes are not trimmed. Stored secrets are never displayed here.",
+  "md6d93a44ceff56d3": "Persistent storage has no accessible ancestor.",
+  "m079aedbbadb84b15": "Prepare captured source",
+  "md91234fc0f027eb9": "Prepare immutable folder",
+  "m43daac11faf7341c": "Prepare the captured source before importing it.",
+  "m8e086bda49dffb79": "Prepare the captured source first.",
+  "mbb76815c5cf0caa9": "Prepare this resource operation before applying it.",
+  "mefa7cea21ba0992c": "Preparing safe preview",
+  "mf2975eaf9775940d": "Preparing saved notebook snapshot…",
+  "m324b134f57c70c72": "Preview",
+  "me24a9f2d0c3d59a9": "Preview became unavailable. The editor and draft are retained.",
+  "mf08df57bbaaf80af": "Preview capture returned a different generation.",
+  "m4a9bfe8517a5a432": "Preview capture was cancelled.",
+  "m6f56cc56ce29ee9c": "Preview could not complete. Source and drafts are retained.",
+  "m94721ac9c030b7ea": "Preview exceeded its rendering time limit.",
+  "mabc06bd4bb2b0394": "Preview exceeded its time limit. The editor and draft are retained.",
+  "m307e721f4a2af479": "Preview output did not pass its safety checks.",
+  "m639951f9353edda6": "Preview rendering was cancelled.",
+  "mb2b8645058f0e3b3": "Previous conflicts",
+  "m810cd73d8c2f9a5b": "Private cleanup cannot forget an unresolved live destination. Recover its ownership first.",
+  "m8569ab95f73a7979": "Private clone staging has no available budget.",
+  "m0591f78be0503e3a": "Private cohort staging discarded. Any committed live folder is unchanged.",
+  "mf4312b4a98169441": "Private copy prepared. Validate and import to publish it.",
+  "m2789385b4236f468": "Private draft credits are exhausted; source is retained.",
+  "m1dfa86c0082bde19": "Private draft enumeration exceeded its bound.",
+  "m9ab0192701062868": "Private draft recovery",
+  "m9610ff04b339f442": "Private draft recovery must finish before admitting notebook mutations.",
+  "mc41d0fa911ec4bcb": "Private draft recovery must finish before admitting resource mutations.",
+  "m83a032d7bad9181f": "Private draft recovery must finish before opening a note.",
+  "me7f51ff11cc7d408": "Private draft storage is closed.",
+  "mec3cab60de908b56": "Private draft storage is unavailable; the export remains retained.",
+  "mdc310e539a0a4a84": "Private export storage could not be prepared.",
+  "m9c3cf77bde156d0b": "Private import data is retained for retry or explicit discard.",
+  "m549ff7094f34da19": "Private import staging discarded.",
+  "m0f70d727f13c7b9e": "Private import storage could not be reconciled.",
+  "m931b35b7b48d26f2": "Private resource staging discarded. Live resources are unchanged.",
+  "m200adf3438c6c093": "Private save candidate is invalid.",
+  "m6819f8ca05ef9da0": "Private sharing storage is corrupt and remains retained.",
+  "@m6819f8ca05ef9da0": {
+    "errorCode": "storage_corrupt"
+  },
+  "me56f869366a7dbe6": "Private snapshot ready. Save As uses these exact bytes without retaining a notebook owner.",
+  "mb27f80f0599bcfe6": "Private staging abandoned. Any live resource, including an unexpected filename, is unchanged. No link was inserted.",
+  "m84bd50708d687f21": "Private storage backup protection is unavailable.",
+  "m7145b18d345c73c1": "Private storage returned a mismatched durable receipt.",
+  "mf7374856859c933c": "Private transfer staging is full.",
+  "m1a9a9b46520aae91": "Provider inventory omitted a physical directory.",
+  "mbb7fdc0e3b6789e9": "Quarantined journal; raw export remains available.",
+  "mff416ef7a585bc2b": "Quarantined private draft",
+  "m56f02526cf25f723": "Read-only Markdown preview",
+  "mc67ba5113baf6bbc": "Read-only context",
+  "mf05b70ff5432a347": "Read-only preview · source revision {sourceRevision}",
+  "@mf05b70ff5432a347": {
+    "placeholders": {
+      "sourceRevision": {
+        "type": "Object"
+      }
+    }
+  },
+  "mefc6e6c3f54f2247": "Ready export exceeds its reserved size.",
+  "mc1b419d4f7334209": "Ready export marker is invalid or unsupported.",
+  "m27c3a58682ba2c91": "Ready to import",
+  "mba0a13934897f75c": "Receiving shared items is unavailable until private staging can be reconciled.",
+  "mb2bef42a20c392ad": "Recipients may still be reading; outgoing copies remain retained.",
+  "@mb2bef42a20c392ad": {
+    "errorCode": "readers_active"
+  },
+  "m2cada189dc7615d1": "Reconciling private import storage…",
+  "mfca490a35af44718": "Recover editor view",
+  "mfaefd4ef4d50ec42": "Recover sync",
+  "m3ef1a28c6d10d388": "Recovery may need credentials for a retained candidate account. It verifies recorded outcomes rather than overwriting a newer note or deleting uncertain data.",
+  "m11a8f23e15b4f2bb": "Recovery runs first if publication is unresolved. A committed folder is never deleted. Only proven private staging can be removed; ambiguous ownership stays quarantined.",
+  "m74273989b0966e23": "Redo",
+  "m0e91610117029a62": "Refresh",
+  "m9e92581a74cb5889": "Refresh failed: {refreshError}",
+  "@m9e92581a74cb5889": {
+    "description": "Service message template",
+    "placeholders": {
+      "refreshError": {
+        "type": "Object"
+      }
+    }
+  },
+  "m5b529abadacc1d5d": "Refresh preview",
+  "m93b75073b1eaca9b": "Refresh sync facts",
+  "mdb6feace80dee375": "Refresh the library before creating or opening a notebook.",
+  "mc7ff1ca53c43239f": "Refresh the notebook before choosing a destination.",
+  "ma7c39e2f4444effc": "Refresh the notebook before loading tags.",
+  "mbdcbdb4f254d412b": "Relative note, #heading, or HTTPS URL",
+  "m596b418ec39f49c8": "Reload tags",
+  "mc3812fc4acb861d5": "Remove",
+  "mfffa2e32da712d49": "Remove file",
+  "m939110b922ef3a49": "Remove only the repeated delivery bytes. Keep the original receipt so another redelivery does not import automatically.",
+  "m36c5db9d550892dd": "Remove this private staging and, only if ownership is proven, its unregistered published copy. Existing notebooks and the original source are not deleted.",
+  "m7ad877bc4fa7c4e3": "Remove “{name}”?",
+  "@m7ad877bc4fa7c4e3": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m3064d79a295cefe4": "Rename",
+  "mc34eaa0860a96974": "Rename attachment",
+  "mdb0afc72b19236b1": "Rename notebook",
+  "m25680e871c1fb94f": "Rename requires exactly one new name.",
+  "ma886d1dc4f128e27": "Reopen",
+  "ma936ab43c4c6331f": "Reopen from disk?",
+  "meca03f1b45663fde": "Request ID reused with changed payload.",
+  "m6750a4f4a51178c7": "Request is older than the replay window; both texts are retained.",
+  "m7de63ceb0001c97a": "Reselect source",
+  "mad3c1075c36d26f1": "Reserved imported path component.",
+  "m5968ec1eb3cfa786": "Resolve conflicting retained transfers before applying a resource.",
+  "m6deb341187e3be5a": "Resolve conflicting retained transfers before preparing or applying a new copy.",
+  "m0f4e10c4a7a9f421": "Resolve existing import staging first.",
+  "m68fa0bae8dd3432c": "Resolve selected ({length})",
+  "@m68fa0bae8dd3432c": {
+    "placeholders": {
+      "length": {
+        "type": "Object"
+      }
+    }
+  },
+  "m41f6dee3da8fbd93": "Resolve the existing import staging first.",
+  "m722e0636a940a6a9": "Resolve the retained cohort staging first.",
+  "m09cf1eaa1023caa3": "Resolve the retained resource staging first.",
+  "m3691aac609b9f276": "Resolve the retained resource target first.",
+  "m0a051ceb92bab807": "Resolve unavailable notebooks before importing another copy.",
+  "m52eef9ec298f9b15": "Resource actions for {name}",
+  "@m52eef9ec298f9b15": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m097e5932a538a3d5": "Resource listing cancelled.",
+  "m605c4be231963c79": "Resource listing could not be refreshed: {value}",
+  "@m605c4be231963c79": {
+    "description": "Service message template",
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "mada36b1b889ffc28": "Resource operation committed. Source links change only when you explicitly insert one.",
+  "m64ac9fdb4ba82db6": "Resource storage cannot be reconciled. Notebook writers remain blocked.",
+  "m940e6545e5c44bc7": "Resources: {name}…",
+  "@m940e6545e5c44bc7": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m5d685ef057e5c344": "Resources: {phase}…",
+  "@m5d685ef057e5c344": {
+    "placeholders": {
+      "phase": {
+        "type": "Object"
+      }
+    }
+  },
+  "ma76e13b9839270eb": "Restore",
+  "md7f9b6f49f439765": "Restore as new capture",
+  "m5d24693bbca0cd62": "Restore private draft?",
+  "mbdd516f716686e10": "Restored checkpoint belongs to a different capture.",
+  "mb000cfec2591e1ab": "Results are incomplete: the search limit was reached. Narrow your search.",
+  "mf12822f97a311b3e": "Resume import",
+  "m97ec40e56e2be6e3": "Resync resume capture changed.",
+  "m7db3bdad27580a2c": "Retained failed delivery",
+  "mbaa1aa101f026f47": "Retained file transfers",
+  "mb99364a67c4ce449": "Retained for recovery or explicit private discard; no live rollback is assumed.",
+  "m85f72502bb45bb55": "Retained for recovery. No copy, move or link is replayed after an uncertain dispatch.",
+  "m05c0f363ae843f19": "Retire native surfaces before disposing their router.",
+  "m6b9d0eb1a488c082": "Retire the previous local synchronization baseline before connecting to the new endpoint? Previous recovery archives and remote notebooks are not deleted. A failed new connection may remain disabled with recoverable state.",
+  "m6402202df7574051": "Retry / recover",
+  "mb3e0f91783b4e529": "Retry open",
+  "me42e093a3e4efc18": "Retry preparation",
+  "mf37b055f32a8e7f8": "Retry recovery",
+  "m3878aaf72059c607": "Retry save / reconcile",
+  "m25a2c43120ca689f": "Retry tag filters",
+  "m3671f49709455860": "Return to Notebooks before applying files.",
+  "m941594ec70a378ec": "Return to Notebooks before recovering resources.",
+  "m368e60383ef6d317": "Return to Notebooks before resolving this shared item.",
+  "ma7b4708248156af4": "Return to notebook",
+  "m8a15a2b9f2e2722b": "Return to notebook?",
+  "m495ab9ccaefc5bb4": "Return to source",
+  "m44cb005ee2e65d9c": "Root",
+  "m1509f561f2416598": "Save",
+  "m088203b4cd88789e": "Save As",
+  "m14efa3ef30ba2aa4": "Save As again",
+  "mb709781ef4c7f207": "Save a ZIP copy of the saved notebook, including attachments and recycle content. Local sync history/state is excluded.",
+  "m115cb7de150e3dce": "Save and close",
+  "mbfbeedd43a2cc5eb": "Save export as…",
+  "mb7297226fd1f4681": "Save name",
+  "mb7d0a349ffa80065": "Save now",
+  "m8f3e7cd3d4b1f764": "Save or discard the existing export staging first.",
+  "m642296c689e6282c": "Save raw files and assets with their original hierarchy and unchanged bytes. Unsupported files stay opaque. The entire vx_notebook directory, including unknown files stored there, and configured recycle data are omitted. Notebook identity, tags and configuration are not backed up. This is not a notebook backup. Protected content requires Notebook backup; nothing is decrypted or converted. Links are not rewritten; references to omitted or external data and VNote IDs may not work.",
+  "mea2c9daa1a058a8b": "Saved locally",
+  "m2f2be822acdabe69": "Saved receipt exceeds durable source.",
+  "m7ce0134c4e87afc0": "Saving revision {value}; newer input remains editable.",
+  "@m7ce0134c4e87afc0": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "mebce846061459ff3": "Export in progress…",
+  "m49c266baaaa70981": "Search",
+  "m2949f29dd9e1046e": "Search cancelled.",
+  "m436d53e741443faf": "Search failed: {searchError}",
+  "@m436d53e741443faf": {
+    "description": "Service message template",
+    "placeholders": {
+      "searchError": {
+        "type": "Object"
+      }
+    }
+  },
+  "m4011f739f41fc1b4": "Search notebook",
+  "mb5ff8abe7bd93a16": "Search saved Markdown and text notes throughout this notebook. Unsaved editor changes are not searched.",
+  "m38d268a10995c7d9": "Search text",
+  "mbda848e5f093ede8": "Searching saved notes…",
+  "mef06a6b75e9c471b": "Secure credential storage changed.",
+  "@mef06a6b75e9c471b": {
+    "errorCode": "vault_changed"
+  },
+  "m91048f78a36b111a": "Secure credential storage is corrupt.",
+  "@m91048f78a36b111a": {
+    "errorCode": "vault_corrupt"
+  },
+  "mb551933198a6d7e5": "Secure credential storage is locked.",
+  "@mb551933198a6d7e5": {
+    "errorCode": "vault_locked"
+  },
+  "m842e6222ea0570c9": "Secure credential storage is unavailable or changed. Connection staging is retained.",
+  "ma26f4b6d886c42e0": "Secure credential storage is unavailable.",
+  "@ma26f4b6d886c42e0": {
+    "errorCode": "vault_unavailable"
+  },
+  "m69c24cdfabd0bdfa": "Secure credential storage reached its limit.",
+  "@m69c24cdfabd0bdfa": {
+    "errorCode": "vault_limit"
+  },
+  "m60e65c7b7c95778d": "Secure storage unavailable",
+  "m9a01e104f86c0629": "Selection splits a surrogate pair or CRLF, or is out of bounds.",
+  "m951d7e9bb51d59d5": "Settled receipts without retained duplicates will be forgotten. Pending imports and retained duplicate bytes remain. Sharing the same item again may then create a new import.",
+  "m29887a5ff9846ccc": "Share",
+  "m5374f3ad932a11a8": "Share original bytes",
+  "m79a4647a2355f8ac": "Share retained copy",
+  "m33191e4f140dc2cc": "Shared content could not be completed safely.",
+  "m8bf310a377cc3e66": "Shared filenames collide; no partial import was accepted.",
+  "@m8bf310a377cc3e66": {
+    "errorCode": "name_collision"
+  },
+  "m480d8dcfa16a12ba": "Shared item error {code}. Retained bytes and uncertain outcomes remain protected.",
+  "@m480d8dcfa16a12ba": {
+    "description": "Service message template",
+    "placeholders": {
+      "code": {
+        "type": "Object"
+      }
+    }
+  },
+  "m605489301a992360": "Shared items",
+  "m4e99bf8ce9f8b6fc": "Shared items could not be reconciled. Notebook writers remain blocked.",
+  "mf3d0a4c774efadd3": "Shared with the system. Recipient persistence is not guaranteed.",
+  "md560cfcd35da0812": "Simplified Chinese",
+  "m70fb05b2e4933268": "Some import staging requires explicit cleanup or recovery.",
+  "m37ee5fec01971144": "Some private drafts could not establish a durable disk receipt. Inspect or export them; affected documents remain blocked.",
+  "m93d5caa637157b66": "Some selected conflicts remain unresolved.",
+  "@m93d5caa637157b66": {
+    "errorCode": "sync_conflict_partial"
+  },
+  "m0e570ca6fabe24f9": "Source",
+  "m2877b362f9b0234b": "Source abort transport is unavailable.",
+  "m9e8f89e68341fb6a": "Source bytes prepared. Apply the exact requested name; existing files are never replaced.",
+  "m3cb02f9123e6da58": "Source contains a lone surrogate.",
+  "m6b0282b9fb147b07": "Source exceeds the UTF-16 document limit.",
+  "med7bee4e95b1afdb": "Source flush is unavailable.",
+  "mc969dbc020af962f": "Source operation timed out; source is retained.",
+  "mdc68cd6b1a9304a1": "Source preserved with its original layout. Prepare one new child folder; VNote identity links are not rewritten.",
+  "mcb5b05949237a1b5": "Source preserved. A Markdown file requiring sibling assets needs its containing folder or ZIP. VNote identity links are not rewritten.",
+  "m21b3cf697d82989f": "Source receipt arrived without its matching edit or no-change result.",
+  "m5c105cd039f592b6": "Source selection no longer matches the received revision.",
+  "mbc219fe1a27ed4fd": "Source synchronization recovery remains required.",
+  "m8acde4f1f655d485": "Special files cannot be imported.",
+  "m08c132fb5e0cf8ca": "Split ZIP archives are unsupported.",
+  "mdc0a95a878b13d2d": "Split ZIP64 archives are unsupported.",
+  "m0426923bc331ed78": "Stable imported root: {cohortId}",
+  "@m0426923bc331ed78": {
+    "placeholders": {
+      "cohortId": {
+        "type": "Object"
+      }
+    }
+  },
+  "mdcfb3979bda2ae58": "Standalone files and assets",
+  "m920e413c7d411b61": "Status",
+  "mb7e3309b473149d3": "Storage and recovery",
+  "mc2170dae5629ae26": "Surface listener is already owned or retired.",
+  "mdf50781ff576e7d9": "Sync coordinator is closed.",
+  "m4edaaa9f74512389": "Sync credential cleanup pending",
+  "md9d9e1b8744560d6": "Sync information is not ready",
+  "m3659a0f0dfd049e3": "Sync needs an HTTPS endpoint",
+  "m620b91ea2462dfb9": "Sync needs configuration recovery",
+  "m4b974747efaab774": "Sync needs credentials",
+  "ma1ad4c17c582e27f": "Sync needs recovery",
+  "m885e8f48bd70af10": "Sync now",
+  "m28c30058bba25967": "Sync off",
+  "m6eca57f710686cc4": "Sync queued",
+  "me671121814e55072": "Sync recovery could not prove safe source replacement. Keep the received draft.",
+  "m3d2235ab774c402d": "Sync: {name}",
+  "@m3d2235ab774c402d": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "md902e2d8b0758ac9": "Synchronization cancellation could not resume the source safely.",
+  "m1062083abd697029": "Synchronization cancellation needs source recovery.",
+  "mcd2867a3f4de2429": "Synchronization configuration failed.",
+  "@mcd2867a3f4de2429": {
+    "errorCode": "sync_configuration_failed"
+  },
+  "m12ced7fdf6d81a93": "Synchronization could not be disabled.",
+  "@m12ced7fdf6d81a93": {
+    "errorCode": "sync_disable_failed"
+  },
+  "m1eea9484497b2737": "Synchronization could not be enabled.",
+  "@m1eea9484497b2737": {
+    "errorCode": "sync_enable_failed"
+  },
+  "mf29fe76be196abda": "Synchronization could not establish which paths changed.",
+  "@mf29fe76be196abda": {
+    "errorCode": "sync_changed_paths_unavailable"
+  },
+  "m8dc5d4418dc4425b": "Synchronization could not finish safely.",
+  "@m8dc5d4418dc4425b": {
+    "errorCode": "sync_finish_failed"
+  },
+  "m8a8ce3e133057c60": "Synchronization could not safely refresh or resume the source.",
+  "m3000713a93d8ded5": "Synchronization credentials require recovery.",
+  "@m3000713a93d8ded5": {
+    "errorCode": "sync_credential_recovery"
+  },
+  "m459c6c67a753cb8b": "Synchronization failed.",
+  "@m459c6c67a753cb8b": {
+    "errorCode": "sync_failed"
+  },
+  "m340de224c15fa412": "Synchronization is already active.",
+  "@m340de224c15fa412": {
+    "errorCode": "sync_busy"
+  },
+  "m4224c5d9cab981d9": "Synchronization is disabled.",
+  "@m4224c5d9cab981d9": {
+    "errorCode": "sync_disabled"
+  },
+  "md7b09ec4fd676b3b": "Synchronization is incomplete; retained recovery data remains.",
+  "@md7b09ec4fd676b3b": {
+    "errorCode": "sync_incomplete"
+  },
+  "m769fdc0d9aeb3616": "Synchronization is not ready.",
+  "@m769fdc0d9aeb3616": {
+    "errorCode": "sync_not_ready"
+  },
+  "m7ddfd1c45db432ad": "Synchronization metadata needs an explicit refresh.",
+  "me69144435c200df4": "Synchronization needs attention; retained data was not discarded.",
+  "m4f05dfb1d3b879e1": "Synchronization ownership could not be established.",
+  "@m4f05dfb1d3b879e1": {
+    "errorCode": "sync_ownership_unknown"
+  },
+  "mf067e2f4694189a6": "Synchronization ownership could not be unregistered.",
+  "@mf067e2f4694189a6": {
+    "errorCode": "sync_unregister_failed"
+  },
+  "m2b919ce6cae90191": "Synchronization readiness could not be established. Use Sync recovery before changing this notebook.",
+  "m33ac1002b4175a4a": "Synchronization refresh could not establish current notebook state.",
+  "mff526f4c18e7ba60": "Synchronization refresh requires recovery.",
+  "@mff526f4c18e7ba60": {
+    "errorCode": "sync_refresh_recovery"
+  },
+  "mdd698b950a0736c0": "Synchronization requires recovery.",
+  "@mdd698b950a0736c0": {
+    "errorCode": "sync_recovery_required"
+  },
+  "m862225502ca974d8": "Synchronization retirement needs recovery. Native close still drains its work.",
+  "m09d8e891281e9061": "Synchronization routing requires recovery.",
+  "@m09d8e891281e9061": {
+    "errorCode": "sync_routing_recovery"
+  },
+  "m873e7beed9f7bc77": "Synchronization source refresh needs explicit recovery.",
+  "m433f14d88d05b6c3": "Synchronization was cancelled.",
+  "@m433f14d88d05b6c3": {
+    "errorCode": "sync_cancelled"
+  },
+  "mae9e8b2fe8e3cdc2": "Synchronization {name}",
+  "@mae9e8b2fe8e3cdc2": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m1d2c587df6dc2f31": "System Save As is unavailable.{incomplete}",
+  "@m1d2c587df6dc2f31": {
+    "description": "Service message template",
+    "placeholders": {
+      "incomplete": {
+        "type": "Object"
+      }
+    }
+  },
+  "mc673af5e1886e60d": "System import is unavailable. The private attempt can be retried or discarded.",
+  "m6ae0ffc6f1b78e87": "System language",
+  "m77ded0242e9a792c": "System sharing failed. Private bytes are retained.",
+  "m39e94c68edc7dff8": "System sharing is unavailable.",
+  "@m39e94c68edc7dff8": {
+    "errorCode": "share_unavailable"
+  },
+  "m002d94c361491adf": "System sharing is unavailable. Private bytes are retained.",
+  "mc2d69ebfc0e3707e": "System sharing was cancelled. Private bytes are retained.",
+  "m6658557065dd2560": "Tag created",
+  "m31c541ca2d8b94d5": "Tag created. Select assignments and Save to apply them to this note.",
+  "m667605c010a8767b": "Tag filters could not load: {_tagsError}",
+  "@m667605c010a8767b": {
+    "description": "Service message template",
+    "placeholders": {
+      "_tagsError": {
+        "type": "Object"
+      }
+    }
+  },
+  "m1331275bc537b4c2": "Tags",
+  "m8cf4102d430951e7": "Tags for “{name}”",
+  "@m8cf4102d430951e7": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "mc0eb2c23aa70ef98": "Tags saved",
+  "me0dc54ee6c944bab": "Tags saved.",
+  "m435d4e2f56e43be7": "Target notebook unavailable until its actual outcome is reconciled. Other notebooks may remain usable.",
+  "m5d32533d2c6c942a": "Task list",
+  "mf25902d152d73801": "The WebDAV clone identity is unavailable.",
+  "mc553f4a022788908": "The WebDAV download did not produce a complete native receipt. Private data is retained.",
+  "m6ae1a30fbef533c9": "The ZIP exceeds its reserved output size.",
+  "m2e4aa1bef76d9b4a": "The ZIP is retained for retry.",
+  "m4eeb3b802386635a": "The ZIP is retained for retry.{incomplete}",
+  "@m4eeb3b802386635a": {
+    "description": "Service message template",
+    "placeholders": {
+      "incomplete": {
+        "type": "Object"
+      }
+    }
+  },
+  "mbb64d02603a10e76": "The ZIP is retained. The external copy may be incomplete.",
+  "m9882130bd7173315": "The acknowledged journal and received source conflict.",
+  "m5f14e3628c3ea21d": "The already-published notebook is retained while its credential and routing transaction finishes. No new copy is created.",
+  "m414b7f9b2bb570d6": "The clean source changed during synchronization.",
+  "m17b814f66debd0ff": "The clone identity is unavailable.",
+  "m61dbcc4e4e57f075": "The clone publication identity changed.",
+  "m064ae9e0bc15a4d8": "The committed shared item has no receipt.",
+  "m3085b8dd40a9f91e": "The complete copy will be checked and registered with its original identities. Existing notebooks will not be overwritten or merged.",
+  "mf7000dbeed7cda38": "The complete notebook identity walk could not be verified.",
+  "me26baa1f1ad92b99": "The complete notebook is published and retained. Finish connection recovery before clearing its private publication receipt.",
+  "m44251a625ec1ead9": "The completed import was recovered.",
+  "mc85819e3725ac367": "The conflict could not be resolved.",
+  "@mc85819e3725ac367": {
+    "errorCode": "sync_conflict_failed"
+  },
+  "mc8733f060d627596": "The conflict selection is no longer current.",
+  "@mc8733f060d627596": {
+    "errorCode": "sync_stale_conflict"
+  },
+  "m2250a4ad39a5eed7": "The copy could not be saved.{incomplete}",
+  "@m2250a4ad39a5eed7": {
+    "description": "Service message template",
+    "placeholders": {
+      "incomplete": {
+        "type": "Object"
+      }
+    }
+  },
+  "m34b361f7294bb752": "The current disk matches the expected base. Restore opens the private source as a new, dirty capture; it does not overwrite disk.",
+  "m43865f0b9b102718": "The current disk outcome cannot be established. Private recovery data is retained.",
+  "m92df08a69d109d48": "The delivery exceeds its allowed size or file count.",
+  "@m92df08a69d109d48": {
+    "errorCode": "delivery_limit"
+  },
+  "mce593b029d5f825c": "The destination cannot change after import starts.",
+  "me674648001fab5d1": "The destination of a claimed shared item is immutable.",
+  "mfaf82cd54ac951c5": "The downloaded notebook needs publication recovery.",
+  "@mfaf82cd54ac951c5": {
+    "errorCode": "sync_clone_publication_recovery"
+  },
+  "m0726187ae5aaf6cd": "The draft capture has retired.",
+  "m8c2c31e7e7d9efc9": "The draft export pin remains retained.",
+  "m43a48106c01e18dd": "The editor is closing. Received source is retained.",
+  "m0bc833f3400edd7c": "The editor transport queue is full. Source and drafts are retained.",
+  "me7cb571565ea7927": "The exact saved disk prefix was established. Any later acknowledged edits remain recoverable in the original source representation.",
+  "meb91846b608d6a49": "The existing notebook is unavailable. Refresh the library before opening it.",
+  "ma1625455fb12b255": "The export request identity is invalid.",
+  "m23ad08eec8de3657": "The export source is unavailable; discard only private staging.",
+  "m926e8daa17b03fe9": "The export staging location already exists.",
+  "mcaaaa5a4b0386fe9": "The export worker stopped unexpectedly.",
+  "m14829f541422287a": "The file is retained; no additional copy was made. Link insertion failed: {value} Choose the intended cursor and explicitly use Insert link again.",
+  "@m14829f541422287a": {
+    "description": "Service message template",
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m17cb43fabf5e720e": "The file operation committed. No editor link is inserted by recovery. Open the note and explicitly insert a link; Write still controls source durability.",
+  "m92b87f732971ac8e": "The final import receipt is unavailable.",
+  "m021653914785da82": "The final source capture changed. Received source and private drafts are retained.",
+  "m295ea0d7ae68f2e4": "The final source prefix was not durably retained.",
+  "m0d45cafc5a9cce84": "The final source prefix was not saved.",
+  "m2bd2559de547fea1": "The immutable export source is unavailable. Only explicit private discard is allowed.",
+  "md424fd1df35eaf74": "The import cancellation lease is no longer current.",
+  "mbea5ed2a38b64757": "The import is retained. Any published copy remains quarantined.",
+  "m1be9b26729568ddb": "The import outcome requires recovery. No rollback is assumed.",
+  "mc02ef5dc477f4685": "The import requires recovery. Any published copy remains quarantined.",
+  "m567650e15740b822": "The import worker stopped unexpectedly.",
+  "m9acaeb0e19cc839c": "The imported notebook is retained while credential promotion is unresolved.",
+  "m5988f5fa1b9bef04": "The interrupted WebDAV download is incomplete. Discard private staging before reconnecting.",
+  "mf86604c4df6821cc": "The linked notebook is not the selected notebook.",
+  "m7c5bba65dbc9b45e": "The live editor differs from the received mirror. Choose which source to checkpoint into a new editor session; the other version remains recovery evidence.",
+  "m77f813f7b56771b7": "The live outcome is ambiguous. Inspect the resource listing first. This abandons only the private source and recovery records; every live file, including an unexpected suffix copy, is preserved. No file is recopied and no link is inserted. Existing links may need manual repair.",
+  "m5b49970953d9ffcb": "The managed notebook identity changed. It was not recreated.",
+  "mde7639b41a35a96d": "The managed notebook identity changed. Refresh was refused.",
+  "m45a86dbb45416db6": "The managed notebook identity is unavailable or quarantined. The private draft remains retained.",
+  "m1961d4a9cbc2bf26": "The native HTTPS trust provider is unavailable.",
+  "@m1961d4a9cbc2bf26": {
+    "errorCode": "sync_trust_unavailable"
+  },
+  "mb36b70b39a138e8c": "The native editor binding is malformed.",
+  "m7364403105fd9bf6": "The native surface returned a malformed completion.",
+  "mb613d1964d7429c0": "The native web surface could not complete its operation.",
+  "m123bd6aa22c0ed73": "The native web surface is unavailable on this platform.",
+  "m23f853a259f57c45": "The new notebook location already exists. Nothing was replaced.",
+  "m01fc21aa40b8a1cc": "The note cannot replace its source view during an operation.",
+  "m6948803726fa2dd6": "The note cannot reserve synchronization while another owner is active.",
+  "mbaf2c3df876b5296": "The note is not available for a resource operation.",
+  "mcbb0429fe70fb8f1": "The notebook could not be opened.",
+  "mf0b940d8aa55739e": "The notebook could not open.",
+  "m83cfcea6a6042a48": "The notebook could not open. Use Refresh to retry.",
+  "m5c0be3b3f5bf6d12": "The notebook identity changed during export.",
+  "mbb2a2594b7290274": "The notebook is closing.",
+  "mf53d79cd0fb50747": "The notebook library is closed.",
+  "m4b0a2acbe5d30c8b": "The notebook library is closing.",
+  "m1f6ee2bc42f8a477": "The notebook library is unavailable.",
+  "mf87a88e164004cb3": "The notebook session is closing; accepted draft obligations are being joined.",
+  "mc3e9a81588eae336": "The opening checkpoint is unavailable or quarantined.",
+  "m2bf505762afce8de": "The operation could not complete. Source and durable drafts are retained.",
+  "mb0ef009cf5ceb977": "The original export source is unavailable. The private request is retained; discard it explicitly or recover its original owner.",
+  "m8556368a394e7bcc": "The original export source is unavailable. The request remains retained.",
+  "mf923593ae542c4d4": "The original shared bytes are unavailable.",
+  "@mf923593ae542c4d4": {
+    "errorCode": "payload_unavailable"
+  },
+  "m4701a3d43865622c": "The physical tree differs from the accepted names.",
+  "m1f567977a2bc0c64": "The platform returned an invalid diagnostic code.",
+  "@m1f567977a2bc0c64": {
+    "errorCode": "invalid_platform_error"
+  },
+  "mbcac94fe57b59fe2": "The prepared ZIP is corrupt. Discard it and export again.",
+  "mf2765b61882dcff6": "The prepared ZIP is missing or corrupt. Discard it and export again.",
+  "m98c7155a9078bb2c": "The prepared ZIP size changed.",
+  "m6d8d1e2cc6eea3ff": "The prepared ZIP size changed. Discard it and export again.",
+  "m053ac20b508588e0": "The prepared export is no longer current.",
+  "m78cefaf4a91d5fca": "The preview must finish retirement before another render.",
+  "md936b75cecf18afa": "The preview source session changed.",
+  "m2ba3dc2be3112a64": "The provider copy exceeds the import limits.",
+  "m1f32de3fa099389a": "The provider could not complete its private copy. Reselect or discard it.",
+  "ma27f9f6552d5abb8": "The provider did not complete its private copy. Reselect or discard it.",
+  "mba75b3d825a24cfb": "The published clone notebook identity changed.",
+  "m6e9399ed2b4eb73d": "The published copy is quarantined. Validate and finish the import.",
+  "m53f28af63ed81dc9": "The quiesced prefix is not yet a durable private draft.",
+  "m6e444ba4a997c9cb": "The renderer completion does not match its generation.",
+  "mb647ccf74f969b97": "The required recovery proof is unavailable.",
+  "@mb647ccf74f969b97": {
+    "errorCode": "proof_unavailable"
+  },
+  "m79dadb0f3cc2d41c": "The resource did not provide a safe note-relative URL.",
+  "mc24d58759509bf4d": "The resource listing belongs to a different target.",
+  "m5d772cc9647b936b": "The resource target is no longer current.",
+  "m18f13d01475044cd": "The retained draft has no safe notebook identity.",
+  "m6dde9fddb23ab6e9": "The retained export no longer matches its owned snapshot.",
+  "mb75f31af96e47e9c": "The retained import no longer accepts new source bytes.",
+  "@mb75f31af96e47e9c": {
+    "errorCode": "stage_not_receiving"
+  },
+  "m980f3cbcf7b8b5a4": "The retained journal does not match the received chain.",
+  "mcb515784311b5511": "The retained notebook location is invalid.",
+  "m2661ec9196be423c": "The retained sharing history is full.",
+  "@m2661ec9196be423c": {
+    "errorCode": "history_full"
+  },
+  "m0946482709159b73": "The retained synchronization source was not safely checkpointed.",
+  "mebe032d43c2915dd": "The saved receipt does not identify the dispatched source candidate.",
+  "m163eb62adf9f6092": "The secure credential record is invalid.",
+  "@m163eb62adf9f6092": {
+    "errorCode": "vault_invalid"
+  },
+  "me2709c914041beb4": "The secure editor view failed. Received source and durable drafts are retained.",
+  "ma3a1676e326c0fed": "The selected conflict batch is invalid.",
+  "@ma3a1676e326c0fed": {
+    "errorCode": "sync_conflict_batch_invalid"
+  },
+  "m65e8333a330dea52": "The selected conflict resolution is unavailable.",
+  "@m65e8333a330dea52": {
+    "errorCode": "sync_conflict_choice_unavailable"
+  },
+  "m787acfdf892e9ee3": "The selected note could not open.",
+  "m63876eaece3388de": "The selected note has changed.",
+  "m1ea0198cebaaa33f": "The selected note is still open.",
+  "mb89c4724d77e40e7": "The shared inbox is busy.",
+  "@mb89c4724d77e40e7": {
+    "errorCode": "inbox_busy"
+  },
+  "me83523c3826d2729": "The shared inbox is full; settle retained items first.",
+  "@me83523c3826d2729": {
+    "errorCode": "inbox_full"
+  },
+  "m19bc141202874aa7": "The shared item disposition is not yet durable.",
+  "m46ad9abecdb074c4": "The shared item is already claimed by a different operation.",
+  "@m46ad9abecdb074c4": {
+    "errorCode": "claim_conflict"
+  },
+  "m45045b97b1e4d1f9": "The shared item operation could not be completed. Retained bytes are unchanged.",
+  "m4db30d494d320747": "The shared item receipt could not be settled.",
+  "m688e5c32e02f0c64": "The snapshot contents no longer match their size summary.",
+  "m4672fafc450d2183": "The snapshot directory count changed.",
+  "m117a97b63d7901b6": "The snapshot exceeds the export resource limits.",
+  "m354b603af4d3ae4a": "The snapshot file count changed.",
+  "m94834159633e60ed": "The snapshot format does not match the requested export.",
+  "m96490d4bf4a62482": "The snapshot size changed.",
+  "m973675ec597a8db2": "The snapshot size summary is invalid.",
+  "mb4cacb481f3e7aef": "The source capture changed.",
+  "mda144105afc9e241": "The source view is unavailable.",
+  "md3574f18dea64b89": "The synchronization action could not complete. Existing data and credentials remain protected.",
+  "ma230d835491458ea": "The synchronization owner changed.",
+  "@ma230d835491458ea": {
+    "errorCode": "sync_owner_changed"
+  },
+  "me588851941c1ff7f": "The synchronization owner is unavailable.",
+  "@me588851941c1ff7f": {
+    "errorCode": "sync_owner_unavailable"
+  },
+  "m8e9f83f64771147a": "The synchronization reservation requires recovery.",
+  "@m8e9f83f64771147a": {
+    "errorCode": "sync_reservation_recovery"
+  },
+  "mca3c3345c367df1f": "The synchronization reservation retired.",
+  "m121ef41c2216e79c": "The synchronized editor source requires recovery.",
+  "@m121ef41c2216e79c": {
+    "errorCode": "sync_source_recovery"
+  },
+  "m4bba90f41417bd89": "The synchronized note identity changed. Received source is retained.",
+  "m5fa85e5681c3c7bd": "The synchronized notebook identity changed.",
+  "@m5fa85e5681c3c7bd": {
+    "errorCode": "sync_identity_changed"
+  },
+  "md227116b8f12c78d": "The synchronized notebook is closing.",
+  "@md227116b8f12c78d": {
+    "errorCode": "sync_notebook_closing"
+  },
+  "mf744a6cb6fd6a852": "The system completed the saved copy. Remote sync is not guaranteed.",
+  "m846616e5ef35fffb": "The tag snapshot is no longer current. Reload tags before saving.",
+  "m66db52a5b6953371": "The workspace closed while the note was opening.",
+  "m68dbcb03a82b4c20": "The write outcome requires a durable receipt: {value}",
+  "@m68dbcb03a82b4c20": {
+    "description": "Service message template",
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m466b6610f0c79184": "This WebView cannot enforce the required offline security policy.",
+  "m2efdc936a4124a9b": "This WebView cannot prove the required offline security policy. Source and drafts remain available for recovery or export.",
+  "m189ffd097eb9dc52": "This backend is preserved but not supported by mobile. No automatic migration is performed.",
+  "m86be45f65aefce7d": "This cleanup item is no longer current.",
+  "m4e22622a784cf2b4": "This cohort attempt is no longer current.",
+  "mc9daf5aec2ba890c": "This cohort attempt is no longer retained.",
+  "mbf29d85640184335": "This conflict remains unresolved.",
+  "mbd88d713ecd33916": "This folder is empty.",
+  "mc4e6ea824e1f780f": "This import attempt is no longer current.",
+  "maff0292bf750e189": "This import cleanup item is no longer current.",
+  "m9220cc1be6528af4": "This includes the folder and its contents. ",
+  "m28598de330a3c4f7": "This is not an export snapshot request.",
+  "m665c498288614de0": "This is the last known folder listing. Refresh before changing or opening notes.",
+  "mcb848d6560d8f279": "This notebook already exists in the library.",
+  "m7c2b122d20f07350": "This notebook is already managed. Open the existing copy or discard this import.",
+  "mad283f04b856a43e": "This permanently discards this private recovery capture. The current notebook file is unchanged. Export first if you need to keep private edits or evidence of corruption. An unfinished export may prevent discard.",
+  "m603cc16627fae49a": "This prepared export is no longer current.",
+  "mf649e88aedc733fd": "This removes only the selected app-private export copy or interrupted export data. It does not remove a notebook or a copy already saved to a provider.",
+  "m2b017b0d5b7654fd": "This resource attempt is no longer current.",
+  "ma2da2f452c8991d9": "This resource attempt is no longer retained.",
+  "m07555f42f0de91b2": "This resource source cannot be replaced.",
+  "m86a07f645546e156": "This source cannot be replaced.",
+  "mcb93254e29ea01a8": "This synchronization backend is unsupported.",
+  "@mcb93254e29ea01a8": {
+    "errorCode": "sync_unsupported_backend"
+  },
+  "me68ece5b406dcc4e": "Too many accepted provider entries.",
+  "m29da08acf0492693": "Too many imported entries.",
+  "me0caded64107d515": "Too many inbox files.",
+  "m649cdb3f7ba1d4e4": "Track attachment",
+  "mfd5bc6443021955e": "Tracked attachment",
+  "m23cbbf0418a39944": "Transfer controller is closed.",
+  "m2c3a1a726a6cc267": "Transfer could not be completed. Private bytes and any uncertain live outcome are retained.",
+  "m25700502b0e853bc": "Transfer storage changed during initialization.",
+  "m5ff86b5a754973cf": "Transfer storage escapes its persistent support root.",
+  "me6c6010981841242": "Transfer worker exited without a result.",
+  "md7264f8e7af8f19c": "Transfer worker stopped unexpectedly.",
+  "mcbdc74450cea42c5": "Truncated ZIP descriptor.",
+  "m048d32fa033d4cf5": "Truncated ZIP extra header.",
+  "m172410c1a6a44021": "Truncated central directory.",
+  "m45ec4de1862a591a": "Truncated or repeated ZIP extra field.",
+  "mf6995f1086ad2476": "Truncated or trailing deflate data.",
+  "m1a51d42c8d8b32d4": "Truncated stored ZIP data.",
+  "m9165d38e816aa3b9": "Two source versions are retained",
+  "m87625385f2b4959c": "Unable to request the source-operation cursor. Text is retained.",
+  "me458628c8e25d182": "Unable to send the editor barrier. Text is retained.",
+  "m05feecb6f260e5f0": "Unable to send the source operation. Source is retained.",
+  "m493c4a7e8edae799": "Unavailable: {value}",
+  "@m493c4a7e8edae799": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "ma8283ade31856f71": "Undo",
+  "m9f346663bca1be58": "Unencrypted HTTP link. ",
+  "mfc9a0fce4f97abb7": "Unexpected editor reload. Received source is retained; a durable new epoch is required.",
+  "mc3dc55e76599fabb": "Unexpected or missing message fields.",
+  "mbb026e03457fe6c9": "Unexpected ready response.",
+  "m4ed0fd59d0474b45": "Unexpected received acknowledgement.",
+  "ma8140cf0a4adf5d9": "Unexpected source selection barrier.",
+  "me257453a8aa3208a": "Unindexed asset",
+  "m52ba55a62a2bb04d": "Unknown editor message type.",
+  "m2a46fc187f6be491": "Unknown formatting action.",
+  "mb6032784bf0efa65": "Unknown host request.",
+  "m9d75689691ba2581": "Unknown resource action.",
+  "m686074c2248a3823": "Unknown transfer owner.",
+  "md5db5e334a5533cd": "Unknown transfer phase.",
+  "m12d92070eec908bc": "Unreceived or provisional input is outside the durability guarantee.",
+  "mf9c1b016363c821e": "Unrecognized cohort staging",
+  "mcdd3cffaa70ad300": "Unrecognized or unsafe export staging. Preserved for explicit discard.",
+  "m97c646987ac17caa": "Unrecognized preview staging was retained. Source editing and export remain available.",
+  "m1a27c052a5f56cab": "Unrecognized resource staging",
+  "m98bca7e161467d98": "Unrecognized staging cannot be safely deleted while a live ownership claim may remain.",
+  "mc10f1fec837261d5": "Unrecognized, incomplete, or ambiguous private import data. No live notebook deletion is authorized.",
+  "m633e1c3fe350457f": "Unrequested editor barrier.",
+  "ma599580143e42f75": "Unrequested resync candidate.",
+  "m63706dc8d055c540": "Unsupported desired record version.",
+  "m63f3f40d7cbc7c05": "Unsupported export operation.",
+  "m9eebfbd36537913a": "Unsupported import operation.",
+  "m143e424dd38ff996": "Unsupported import source kind.",
+  "m3de2702f79ea0a21": "Unsupported protocol version.",
+  "m736b8f9051e84733": "Unsupported source editor language.",
+  "m0a9ca33a8c441d80": "Unsupported surface text scale.",
+  "mde515cb49412f16a": "Unsupported sync backend",
+  "m82c69c40f1684f25": "Unsupported transfer worker command.",
+  "m272e50aa93c16939": "Unterminated accepted-name record.",
+  "m0f1c3c40836d5661": "Untrack (keep file)",
+  "m1a36aeec06bba4f8": "Unwritten changes",
+  "m55490a4bf3a8e8cb": "Up",
+  "mef9a7ae0b5bec50e": "Up one folder",
+  "m6f35ac236a3b3ce0": "Update credentials",
+  "m015e0daed94f754a": "Updating private export storage…",
+  "m85e97d4765a9972a": "Use Prepare export or Save As for the retained snapshot.",
+  "m84a50835e32fef2b": "Use a valid HTTPS collection URL without user information, query or fragment.",
+  "m055fc2448ae116a1": "Use dark theme",
+  "m2869d14f300db285": "Use editor source",
+  "m844f490b1edf8485": "Use light theme",
+  "mf5016bbdcfa20d0c": "Use received source",
+  "me599a50a3d4dff43": "VNote Mobile application code is licensed under GNU LGPLv3, the same license as VNote. Bundled dependencies retain their own licenses. The full LGPL and referenced GPL terms are included below.",
+  "mc02c3a539b71fbd4": "Validate and import",
+  "m04e8492a3aa1125a": "Validating identities and publishing notebook…",
+  "m385b29aaea4353cd": "Validating notebook archive and paths…",
+  "m98e5fb968da465e9": "Wait for the secure editor, or close the note before synchronizing.",
+  "m3b5024c161716776": "Waiting for synchronization ownership timed out.",
+  "@m3b5024c161716776": {
+    "errorCode": "sync_reservation_timeout"
+  },
+  "ma1dbafbb80774d41": "WebDAV configured",
+  "mb532835449757ecd": "WebDAV notebook downloaded and validated. Import preserves its identity and proved baseline.",
+  "mb5814e7c01fb49a9": "WebDAV password",
+  "m997758158e90792e": "WebDAV synchronization",
+  "m8e28186e77883ae3": "WebDAV username",
+  "m65a2be59b23edbac": "Working on import…",
+  "m5f170a031f4cfec8": "ZIP ASi link/device encoding is unsupported.",
+  "md942ed0d666431b3": "ZIP Unix link/device encoding is unsupported.",
+  "m43eb60269ec82d75": "ZIP actual size or CRC does not match the header.",
+  "mb3b502d2e7d91a74": "ZIP changed during preflight.",
+  "mda75aab9cd0c235d": "ZIP entry sizes or directory checksum disagree.",
+  "ma103189d6f9a2ae3": "ZIP expansion exceeds 100:1. Use Import folder for the equivalent notebook instead.",
+  "m15560727e4beeb0d": "ZIP file",
+  "m41cdbfd7f91080f1": "ZIP file, tree, or input byte limit exceeded.",
+  "m69039379a78205f0": "ZIP header range is invalid or truncated.",
+  "m284ab451329a0dd6": "ZIP input size is invalid.",
+  "m2ae3023cc050e163": "ZIP links, special types or contradictory attributes are unsupported.",
+  "mca73407bc71087f6": "ZIP local/data/descriptor ranges overlap.",
+  "m7e44c89b4d70a3cd": "ZIP output is append-only.",
+  "ma1e0317837ec0ddc": "ZIP output is not buffered in memory.",
+  "m0c91e0b0df2f7336": "ZIP output total differs from its declaration.",
+  "m65652ca46c4d09cb": "ZIP parser disagrees with raw preflight.",
+  "m67a1d6bfb102937d": "ZIP prepared. Choose where to save a copy.",
+  "m00f9accf71b25d25": "ZIP64 integer is out of range.",
+  "m7e9e5ac30f2216fd": "add",
+  "m61c1c8cded1d1a29": "applying",
+  "m1bd768529618dcdf": "archiving",
+  "m408fd2300df0dac0": "cancelling",
+  "mb737815f5ca9697f": "captured",
+  "mc3eefb58d7c42440": "closed",
+  "m6f9a48800d2f3095": "closing",
+  "mcc962289af2873dd": "committed",
+  "mf0619c643b2c0ab1": "configuring",
+  "m47ef59b14bb68090": "conflicts",
+  "m3d6df245178e6076": "connecting",
+  "m8082d8aa69408b1a": "consumed",
+  "mc5ca768aaad8a373": "core-specified",
+  "m631aada47deaf488": "credentials",
+  "made2e2709b66f802": "disabling",
+  "m1fcc4b37141c12bd": "discarded",
+  "m6bff73ce96c4f61e": "discarding",
+  "md46aee08cc49f6d1": "export",
+  "m98dea427e6566da1": "exportReady",
+  "md9505729a190798a": "exportUnavailable",
+  "m82e38fe22442fe99": "exporting",
+  "m5d28a90f4498a814": "failed",
+  "m3b9c358f36f0a31b": "file",
+  "m119572831346daee": "finishing",
+  "m034a0062488256f1": "folder",
+  "m4fb62348858c2f6f": "idle",
+  "m6105d6cc76af4003": "image",
+  "m7fa6f415fc0fcef7": "importing",
+  "m3f02dd51aae47ced": "inspecting",
+  "m282bcbc3f0a34a8a": "intent",
+  "m0fc4dfc4feb3b154": "listing",
+  "mffa63583dfa6706b": "missing",
+  "m3009be769fb8f956": "network",
+  "m140bedbf9c3f6d56": "none",
+  "mb0f4b2e7996a5f4f": "prepared",
+  "md932d92a2579ccba": "preparing",
+  "ma06dfb75557ac13f": "publishing",
+  "mc3ecfc91e8f0cc7c": "quarantined",
+  "mb24d6d33736ecd56": "ready",
+  "m5edfeacf4e5da824": "receiving",
+  "m0e6f425a12b3bebb": "reconciling",
+  "m776477ae292948ef": "recovering",
+  "m0b61ac5d9426518a": "refreshing",
+  "m7e5608ab610017af": "remove",
+  "m9e84869d369b2a53": "rename",
+  "mf3a123daf1436217": "reserving",
+  "m878f5aa26f7caf0b": "resolving",
+  "m77656727d4f203a0": "rotating",
+  "mcccbe264816db7d9": "saving",
+  "m0a0dcac5952689a5": "settling",
+  "m41cf6794ba4200b8": "source",
+  "me919a75364398a44": "staging",
+  "m644b72e97de001b8": "synchronizing",
+  "m2bb8bf7259c4ea0e": "track",
+  "mb605596c21a63623": "tracked",
+  "m80fb9edd009c8b57": "unindexed",
+  "m3f867cd074c318ce": "untrack",
+  "m8d1f2dc05230b603": "validating",
+  "m4a70fe9aa6436e02": "zip",
+  "m31800b69f0850542": "{bytes} bytes",
+  "@m31800b69f0850542": {
+    "placeholders": {
+      "bytes": {
+        "type": "Object"
+      }
+    }
+  },
+  "m2b1a9538a52ca6af": "{bytes} bytes · retained until saved or discarded",
+  "@m2b1a9538a52ca6af": {
+    "placeholders": {
+      "bytes": {
+        "type": "Object"
+      }
+    }
+  },
+  "me1ce2c7322af9715": "{entries} entries · {bytes} bytes",
+  "@me1ce2c7322af9715": {
+    "placeholders": {
+      "entries": {
+        "type": "Object"
+      },
+      "bytes": {
+        "type": "Object"
+      }
+    }
+  },
+  "m88543fb86cd37b79": "{entries} entries · {bytes} bytes · {name}",
+  "@m88543fb86cd37b79": {
+    "placeholders": {
+      "entries": {
+        "type": "Object"
+      },
+      "bytes": {
+        "type": "Object"
+      },
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m007e6450082f6dd9": "{files} files · {bytes} bytes",
+  "@m007e6450082f6dd9": {
+    "placeholders": {
+      "files": {
+        "type": "Object"
+      },
+      "bytes": {
+        "type": "Object"
+      }
+    }
+  },
+  "ma6b4468edaacbe52": "{length} matching notes.",
+  "@ma6b4468edaacbe52": {
+    "placeholders": {
+      "length": {
+        "type": "Object"
+      }
+    }
+  },
+  "mf504ddc49a11afaf": "{message}\nLibrary refresh failed: {value}",
+  "@mf504ddc49a11afaf": {
+    "description": "Service message template",
+    "placeholders": {
+      "message": {
+        "type": "Object"
+      },
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m3b77c1ceedc95cce": "{name} (parent: {parent})",
+  "@m3b77c1ceedc95cce": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      },
+      "parent": {
+        "type": "Object"
+      }
+    }
+  },
+  "m1884f9f5e3a79468": "{name} — notebook root",
+  "@m1884f9f5e3a79468": {
+    "placeholders": {
+      "name": {
+        "type": "Object"
+      }
+    }
+  },
+  "m89d7a194fec610a4": "{openError}\nBrowser restore failed: {_error}",
+  "@m89d7a194fec610a4": {
+    "description": "Service message template",
+    "placeholders": {
+      "openError": {
+        "type": "Object"
+      },
+      "_error": {
+        "type": "Object"
+      }
+    }
+  },
+  "m93bee185064f3b3b": "{skipped} unsupported or unavailable notes were skipped.",
+  "@m93bee185064f3b3b": {
+    "placeholders": {
+      "skipped": {
+        "type": "Object"
+      }
+    }
+  },
+  "mc6fb4d7f32ec41af": "{value} · Received {receivedRevision} · Draft {draftRevision} · Saved {value4}",
+  "@mc6fb4d7f32ec41af": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      },
+      "receivedRevision": {
+        "type": "Object"
+      },
+      "draftRevision": {
+        "type": "Object"
+      },
+      "value4": {
+        "type": "Object"
+      }
+    }
+  },
+  "m08c2bbcbe38aa85c": "{value}, but tags could not be refreshed. The change was not rolled back.",
+  "@m08c2bbcbe38aa85c": {
+    "description": "Service message template",
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m3710dc30dc219a85": "{value}Open {origin} in the system browser?",
+  "@m3710dc30dc219a85": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      },
+      "origin": {
+        "type": "Object"
+      }
+    }
+  },
+  "mf61c0b58aea8fe59": "{value}The core tries to recycle deleted content, but may permanently delete it if recycling fails. This app does not provide undo or restore.",
+  "@mf61c0b58aea8fe59": {
+    "placeholders": {
+      "value": {
+        "type": "Object"
+      }
+    }
+  },
+  "m35905a0d4d9e7da2": "Incoming sharing is paused until retained staging is at most 3 GiB. Existing work is preserved.",
+  "m7bb1751119c4ca96": "Shared item error share_quota. Share storage is full. Clean up finished outgoing shares or settle inbox items and history. For a prepared notebook or resource export, use Save As instead.",
+  "mdd4a2ac4b9cc0e56": "Share storage is full. Clean up finished outgoing shares or settle inbox items and history. For a prepared notebook or resource export, use Save As instead.",
+  "@mdd4a2ac4b9cc0e56": {"errorCode": "share_quota"}
+}

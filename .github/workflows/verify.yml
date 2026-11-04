@@ -51,8 +51,16 @@ jobs:
         with:
           flutter-version: 3.47.9
           channel: stable
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          cmdline-tools-version: '13114758'
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
+          accept-android-sdk-licenses: false
+          log-accepted-android-sdk-licenses: false
       - name: Build debug APK with bundled assets
         run: node scripts/verify.mjs android
+      - name: Validate UNSIGNED release APK and AAB (not an owner release)
+        run: node scripts/verify.mjs android-package
 
   ios-notebook:
     runs-on: macos-26
@@ -63,6 +71,16 @@ jobs:
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: .node-version
+      - uses: actions/setup-java@cf277c60eb25467037889841efdb72551f06f6c3 # v4
+        with:
+          distribution: temurin
+          java-version: '17.0.20+101'
+      - uses: android-actions/setup-android@9fc6c4e9069bf8d3d10b2204b1fb8f6ef7065407 # v3
+        with:
+          cmdline-tools-version: '13114758'
+          packages: 'platform-tools platforms;android-36 build-tools;36.0.0 ndk;28.2.13676358'
+          accept-android-sdk-licenses: false
+          log-accepted-android-sdk-licenses: false
       - uses: maxim-lobanov/setup-xcode@1242409711ff5721add51979e9e11e23ebb7e5a4 # v1
         with:
           xcode-version: '26.6'
@@ -74,7 +92,7 @@ jobs:
         with:
           flutter-version: 3.47.9
           channel: stable
-      - name: Build unsigned device and simulator apps
+      - name: Validate UNSIGNED device app and archive, then debug simulator (not an owner release)
         run: node scripts/verify.mjs ios
 
   windows-core-compile:

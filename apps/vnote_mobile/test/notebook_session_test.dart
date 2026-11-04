@@ -41,10 +41,16 @@ class _PresentationStore {
   final candidateSources = <String, String>{};
   int sequence = 0;
   Object? appendError;
+  Object? discardError;
+  Object? scanError;
+  Completer<void>? rebaseGate;
   Future<Map<String, Object?>> run(Map<String, Object?> request, {Uint8List? payload}) async {
     final op = request['op'];
     final token = request['token'] as String?;
-    if (op == 'scan') return {'entries': records.values.toList(), 'nextOffset': null};
+    if (op == 'scan') {
+      if (scanError != null) throw scanError!;
+      return {'entries': records.values.toList(), 'nextOffset': null};
+    }
     if (op == 'prune') return {'removed': 0};
     if (op == 'begin') {
       final source = utf8.decode(payload!);
@@ -91,6 +97,7 @@ class _PresentationStore {
       return Map.of(candidate);
     }
     if (op == 'rebase' || op == 'rebaseSource') {
+      await rebaseGate?.future;
       final next = request['newToken'] as String;
       final source = payload == null ? sources[token]! : utf8.decode(payload);
       final fresh = Map<String, Object?>.of(record)..addAll({'token': next,
@@ -104,6 +111,7 @@ class _PresentationStore {
     }
     if (op == 'discard') {
       records.remove(token); sources.remove(token); bases.remove(token);
+      if (discardError != null) throw discardError!;
       return {'discarded': true};
     }
     return {...record,
@@ -213,6 +221,48 @@ class ControlledCore implements NotebookCore {
   Future<void> _close() async { closes++; await closeGate?.future; }
 }
 
+// Unlike the ordinary presentation double, this owner retires admission before
+// awaiting CLOSED and preserves its failing close future, as the native owner does.
+class RetiringCloseCore extends ControlledCore {
+  RetiringCloseCore(this.failure);
+  final Object? failure;
+  bool retired = false;
+  int rejectedAdmissions = 0;
+  Future<void>? _retirement;
+
+  void _admit() {
+    if (!retired) return;
+    rejectedAdmissions++;
+    throw StateError('The native owner has retired.');
+  }
+
+  @override
+  Future<CoreNote> read() { _admit(); return super.read(); }
+  @override
+  Future<CoreSyncFacts> inspectSync() { _admit(); return super.inspectSync(); }
+  @override
+  Future<CoreDraftInspection> reconcileDraft({required String draftsRoot,
+      required String documentKey, required String token}) {
+    _admit();
+    return super.reconcileDraft(draftsRoot: draftsRoot, documentKey: documentKey, token: token);
+  }
+  @override
+  Future<CoreDraftWriteResult> writeDraft({required String draftsRoot,
+      required String documentKey, required String token, required String candidateId}) {
+    _admit();
+    return super.writeDraft(draftsRoot: draftsRoot, documentKey: documentKey,
+      token: token, candidateId: candidateId);
+  }
+  @override
+  Future<void> close() => _retirement ??= _retire();
+  Future<void> _retire() async {
+    retired = true;
+    closes++;
+    await closeGate?.future;
+    if (failure != null) throw failure!;
+  }
+}
+
 Map<String, Object?> reply(EditorSession editor, String type, String requestId,
     Map<String, Object?> fields, {int? revision}) => {
   'v': 2, 'type': type, 'documentId': editor.documentId,
@@ -253,6 +303,32 @@ Future<NotebookSession> start(ControlledCore core) async {
 }
 
 void main() {
+  test('inbox barrier joins an admitted source restoration before exposing its new draft epoch', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final previous = session.value.editor!;
+    insert(previous, 'restored source');
+    final store = _stores[session.drafts.root]!;
+    final gate = Completer<void>();
+    store.rebaseGate = gate;
+    final restoring = session.recoverWebView();
+    await turn();
+    var joined = false;
+    final barrier = session.beginInboxBarrier();
+    unawaited(barrier.then((_) { joined = true; }));
+    await turn();
+    expect(joined, isFalse);
+    gate.complete();
+    final restored = await restoring;
+    await barrier;
+    expect(session.value.editor, same(restored));
+    expect(restored.generation, isNot(previous.generation));
+    expect(restored.value.text, '${note().text}restored source');
+    expect(session.value.inboxBlocked, isTrue);
+    expect(session.value.dirty, isTrue);
+    expect(core.writes, isEmpty);
+    session.endInboxBarrier(foreground: false);
+  });
+
   test('receipt and draft credits are independent before native publication', () async {
     final core = ControlledCore(); final session = await start(core);
     final editor = session.value.editor!;
@@ -284,6 +360,130 @@ void main() {
     core.writes.last.completion.complete(CoreWriteResult(revision: 3, baseHash: thirdHash));
     expect(await newest, isTrue); expect(session.value.onDiskRevision, 3);
   });
+  test('inbox barrier joins dispatched save but refuses queued receipts without losing latest source', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    void send(Map<String, Object?> message) => answer(editor, message);
+    insert(editor, 'first');
+    final writing = session.write(send);
+    await turn();
+    insert(editor, 'latest');
+    final queued = session.write(send);
+    var joined = false;
+    final barrier = session.beginInboxBarrier();
+    expect(session.beginInboxBarrier(), same(barrier));
+    unawaited(barrier.then((_) { joined = true; }));
+    expect(session.value.inboxBlocked, isTrue);
+    expect(await queued, isFalse);
+    expect(await session.write(send), isFalse);
+    await turn();
+    expect(joined, isFalse);
+    expect(core.writes, hasLength(1));
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    expect(await writing, isTrue);
+    await barrier;
+    expect(joined, isTrue);
+    expect(session.value.editor, same(editor));
+    expect(editor.value.text, '${note().text}firstlatest');
+    expect(session.value.draftRevision, 2);
+    expect(session.value.onDiskRevision, 1);
+    expect(session.value.dirty, isTrue);
+    expect(core.writes, hasLength(1));
+    session.endInboxBarrier(foreground: false);
+    final latest = session.write(send);
+    await turn();
+    expect(core.writes.last.revision, 2);
+    expect(core.writes.last.text, editor.value.text);
+    core.writes.last.completion.complete(CoreWriteResult(revision: 2, baseHash: thirdHash));
+    expect(await latest, isTrue);
+  });
+
+  test('inbox barrier joins borrowed resources and blocks owner replacement and new borrowers', () async {
+    final core = ControlledCore(); final session = await start(core);
+    final editor = session.value.editor!;
+    final gate = Completer<void>();
+    final resources = session.withResources((_) => gate.future);
+    final barrier = session.beginInboxBarrier();
+    var joined = false;
+    unawaited(barrier.then((_) { joined = true; }));
+    insert(editor, 'retained during scan');
+    await expectLater(session.withResources((_) async => fail('No second borrower')), throwsStateError);
+    expect(await session.close(NotebookDisposition.discard, (message) => answer(editor, message)), isFalse);
+    expect(await session.reopen(NotebookDisposition.retain, (message) => answer(editor, message)), isFalse);
+    await expectLater(session.recoverWebView(), throwsStateError);
+    await turn();
+    expect(joined, isFalse);
+    expect(core.closes, 0);
+    gate.complete();
+    await resources;
+    await barrier;
+    expect(session.value.draftRevision, 1);
+    expect(editor.value.text, '${note().text}retained during scan');
+    expect(core.writes, isEmpty);
+    session.endInboxBarrier(foreground: false);
+  });
+
+  test('inbox barrier joins an already-started note ownership transition', () async {
+    final core = ControlledCore()..closeGate = Completer<void>();
+    final session = await start(core);
+    final editor = session.value.editor!;
+    insert(editor, 'keep private');
+    final closing = session.close(NotebookDisposition.retain, (message) => answer(editor, message));
+    await turn();
+    expect(core.closes, 1);
+    var joined = false;
+    final barrier = session.beginInboxBarrier();
+    unawaited(barrier.then((_) { joined = true; }));
+    await turn();
+    expect(joined, isFalse);
+    core.closeGate!.complete();
+    expect(await closing, isTrue);
+    await barrier;
+    expect(session.value.closed, isTrue);
+    expect(session.value.draftRevision, 1);
+    expect(core.writes, isEmpty);
+    session.endInboxBarrier(foreground: false);
+  });
+
+  testWidgets('inbox hold cannot be bypassed by foreground and paused release never autosaves', (tester) async {
+    final core = ControlledCore();
+    final drafts = presentationDrafts();
+    final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+    await session.initialize();
+    final editor = session.value.editor!;
+    ready(editor);
+    void send(Map<String, Object?> message) => answer(editor, message);
+    session.bindTransport(send);
+    insert(editor, 'latest');
+    await session.beginInboxBarrier();
+    session.setForeground(true);
+    expect(await session.write(send), isFalse);
+    await tester.pump(const Duration(seconds: 6));
+    expect(core.writes, isEmpty);
+    expect(session.value.draftRevision, 1);
+    session.endInboxBarrier(foreground: false);
+    await tester.pump(const Duration(seconds: 6));
+    expect(core.writes, isEmpty);
+    expect(session.value.editor, same(editor));
+    await session.beginInboxBarrier();
+    session.endInboxBarrier(foreground: true);
+    await tester.pump(const Duration(milliseconds: 800));
+    expect(core.writes.single.text, '${note().text}latest');
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+    await tester.pump();
+    await session.beginInboxBarrier();
+    session.setResourceBlock('Unresolved inbox target');
+    insert(editor, 'quarantined');
+    session.endInboxBarrier(foreground: true);
+    expect(await session.write(send), isFalse);
+    await tester.pump(const Duration(seconds: 6));
+    expect(core.writes, hasLength(1));
+    expect(session.value.error, 'Unresolved inbox target');
+    expect(session.value.dirty, isTrue);
+    expect(session.value.draftRevision, 2);
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+  });
+
   test('resource barrier delays body writes but not draft persistence', () async {
     final core = ControlledCore(); final session = await start(core);
     final editor = session.value.editor!; final gate = Completer<void>();
@@ -305,6 +505,253 @@ void main() {
     expect(core.writes, isEmpty); expect(session.value.draftRevision, 1);
     expect(session.value.closed, isTrue);
   });
+  for (final disposition in [NotebookDisposition.retain, NotebookDisposition.discard, NotebookDisposition.write]) {
+    testWidgets('lost final ${disposition.name} close reply retains proven source for fresh-epoch recovery', (tester) async {
+      final core = ControlledCore();
+      final drafts = presentationDrafts();
+      final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+      await session.initialize();
+      final editor = session.value.editor!;
+      ready(editor);
+      insert(editor, 'terminal source');
+      final sent = <Map<String, Object?>>[];
+      var pageClosed = false;
+      void send(Map<String, Object?> message) {
+        sent.add(message);
+        if (message['type'] == 'close' && message['mode'] == 'complete') {
+          pageClosed = true; // The page closes, but its reply never reaches Dart.
+          return;
+        }
+        // Transport callbacks run while pump owns Flutter's async guard.
+        if (message['type'] != 'ack') expectSync(pageClosed, isFalse);
+        answer(editor, message);
+      }
+      session.bindTransport(send);
+      final closing = session.close(disposition, send);
+      await tester.pump();
+      if (disposition == NotebookDisposition.write) {
+        core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+        await tester.pump();
+      }
+      expect(pageClosed, isTrue);
+      expect(_stores[drafts.root]!.sources[editor.generation], '${note().text}terminal source');
+      expect(core.closes, 0);
+      await tester.pump(const Duration(seconds: 5));
+      expect(await closing, isFalse);
+      expect(sent.where((message) => message['mode'] == 'abort'), isEmpty);
+      expect(session.value.error, 'Editor barrier timed out; source is retained.');
+      expect(session.value.closed, isFalse);
+      expect(session.value.restartRequired, isFalse);
+      expect(editor.value.ready, isFalse);
+      expect(session.canRecoverQuiescedView, isTrue);
+      final late = sent.singleWhere((message) => message['mode'] == 'complete');
+      answer(editor, late);
+      expect(editor.value.closed, isFalse, reason: 'A timed-out reply cannot revive or close its retired correlation.');
+      expect(session.canRecoverQuiescedView, isTrue);
+      final replacement = await session.recoverWebView();
+      expect(replacement.generation, isNot(editor.generation));
+      expect(replacement.value.text, '${note().text}terminal source');
+      expect(session.canRecoverQuiescedView, isFalse);
+      ready(replacement);
+      void nextSend(Map<String, Object?> message) => answer(replacement, message);
+      session.bindTransport(nextSend);
+      insert(replacement, ' new input');
+      final saving = session.write(nextSend);
+      await tester.pump();
+      expect(core.writes.last.text, '${note().text}terminal source new input');
+      core.writes.last.completion.complete(CoreWriteResult(revision: 1, baseHash: thirdHash));
+      expect(await saving, isTrue);
+      expect(session.value.dirty, isFalse);
+      await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+    });
+  }
+
+  testWidgets('discard cleanup failure after native join retains the mirror and requires restart', (tester) async {
+    final core = RetiringCloseCore(null);
+    final drafts = presentationDrafts();
+    final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+    await session.initialize();
+    final editor = session.value.editor!;
+    ready(editor); insert(editor, 'copyable after discard');
+    _stores[drafts.root]!.discardError = StateError('Discard reply lost after deletion');
+    final sent = <Map<String, Object?>>[];
+    expect(await session.close(NotebookDisposition.discard, (message) {
+      sent.add(message); answer(editor, message);
+    }), isFalse);
+    expect(core.retired, isTrue);
+    expect(core.closes, 1);
+    expect(editor.value.closed, isTrue);
+    expect(session.value.closed, isFalse);
+    expect(session.value.restartRequired, isTrue);
+    expect(session.value.error, NotebookSession.ownerRestartRequiredMessage);
+    expect(_stores[drafts.root]!.records, isEmpty);
+    expect(editor.value.text, '${note().text}copyable after discard');
+    expect(sent.where((message) => message['mode'] == 'abort'), isEmpty);
+    await expectLater(session.recoverWebView(), throwsStateError);
+    expect(core.rejectedAdmissions, 0);
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+  });
+
+  test('retained reopen detaches only after native join and admits exactly one fresh owner', () async {
+    final first = RetiringCloseCore(null)..closeGate = Completer<void>();
+    final second = ControlledCore();
+    final drafts = presentationDrafts();
+    var opens = 0;
+    final session = NotebookSession(openCore: () async => ++opens == 1 ? first : second,
+      drafts: drafts, notebookRelative: 'book');
+    await session.initialize();
+    final editor = session.value.editor!;
+    ready(editor); insert(editor, 'retained reopen');
+    final reopening = session.reopen(NotebookDisposition.retain, (message) => answer(editor, message));
+    await turn();
+    expect(first.retired, isTrue);
+    expect(opens, 1);
+    expect(session.canRecoverQuiescedView, isFalse);
+    expect(session.value.editor, same(editor));
+    first.closeGate!.complete();
+    expect(await reopening, isTrue);
+    expect(opens, 2);
+    expect(session.value.restartRequired, isFalse);
+    expect(session.value.editor, isNot(same(editor)));
+    expect(session.value.editor!.value.text, '${note().text}retained reopen');
+    expect(first.rejectedAdmissions, 0);
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+  });
+
+  for (final failScan in [false, true]) {
+    test('failed ${failScan ? 'draft scan' : 'fresh owner open'} after close keeps restart mode', () async {
+      final core = RetiringCloseCore(null);
+      final drafts = presentationDrafts();
+      var opens = 0;
+      final session = NotebookSession(openCore: () async {
+        if (++opens > 1) throw StateError('New owner could not open');
+        return core;
+      }, drafts: drafts, notebookRelative: 'book');
+      await session.initialize();
+      final editor = session.value.editor!;
+      ready(editor); insert(editor, 'retained across failed reopen');
+      if (failScan) _stores[drafts.root]!.scanError = StateError('Draft scan failed');
+      final sent = <Map<String, Object?>>[];
+      expect(await session.reopen(NotebookDisposition.retain, (message) {
+        sent.add(message); answer(editor, message);
+      }), isFalse);
+      expect(core.retired, isTrue);
+      expect(opens, failScan ? 1 : 2);
+      expect(session.value.editor, same(editor));
+      expect(session.value.restartRequired, isTrue);
+      expect(session.value.error, NotebookSession.ownerRestartRequiredMessage);
+      expect(editor.value.text, '${note().text}retained across failed reopen');
+      expect(sent.where((message) => message['mode'] == 'abort'), isEmpty);
+      await expectLater(session.recoverWebView(), throwsStateError);
+      await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+    });
+  }
+
+  testWidgets('terminal recovery refuses a journal read-back that differs from its quiesced snapshot', (tester) async {
+    final core = ControlledCore();
+    final drafts = presentationDrafts();
+    final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+    await session.initialize();
+    final editor = session.value.editor!;
+    ready(editor); insert(editor, 'retained');
+    final closing = session.close(NotebookDisposition.retain, (message) {
+      if (message['mode'] != 'complete') answer(editor, message);
+    });
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    expect(await closing, isFalse);
+    final store = _stores[drafts.root]!;
+    store.sources[editor.generation] = 'different private source';
+    final records = store.records.length;
+    await expectLater(session.recoverWebView(), throwsStateError);
+    expect(session.value.editor, same(editor));
+    expect(editor.value.text, '${note().text}retained');
+    expect(store.records.length, records, reason: 'No rebase before read-back equality.');
+    expect(store.sources[editor.generation], 'different private source');
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+  });
+
+  testWidgets('unquiesced and pending-abort sources never gain terminal recovery permission', (tester) async {
+    final core = ControlledCore();
+    final drafts = presentationDrafts();
+    final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+    await session.initialize();
+    final editor = session.value.editor!;
+    ready(editor); insert(editor, 'live source');
+    final sent = <Map<String, Object?>>[];
+    session.bindTransport(sent.add);
+    expect(session.canRecoverQuiescedView, isFalse);
+    await expectLater(session.recoverWebView(), throwsStateError);
+    final closing = session.close(NotebookDisposition.retain, sent.add);
+    await tester.pump();
+    await tester.pump(const Duration(seconds: 5));
+    expect(sent.last['mode'], 'abort');
+    expect(session.canRecoverQuiescedView, isFalse);
+    await expectLater(session.recoverWebView(), throwsStateError);
+    answer(editor, sent.last);
+    expect(await closing, isFalse);
+    final resync = editor.requestResync(sent.add);
+    final request = sent.last;
+    expect(request['type'], 'resync');
+    editor.receive(jsonEncode(reply(editor, 'resync', request['requestId'] as String,
+      {'mode': 'candidate', 'text': editor.value.text, 'anchor': editor.value.anchor, 'head': editor.value.head})));
+    await resync;
+    expect(session.canRecoverQuiescedView, isFalse);
+    expect(editor.value.text, '${note().text}live source');
+    await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+  });
+
+  for (final abandon in [false, true]) {
+    testWidgets('native close failure ${abandon ? 'after failed-view discard' : 'after final ACK'} requires restart without deleting drafts', (tester) async {
+      final failure = StateError('Native CLOSED failed');
+      final core = RetiringCloseCore(failure)..closeGate = Completer<void>();
+      final drafts = presentationDrafts();
+      var opens = 0;
+      final session = NotebookSession(openCore: () async { opens++; return core; }, drafts: drafts, notebookRelative: 'book');
+      await session.initialize();
+      final editor = session.value.editor!;
+      ready(editor); insert(editor, 'copyable source');
+      if (abandon) editor.reportTransportError('View lost');
+      final sent = <Map<String, Object?>>[];
+      void send(Map<String, Object?> message) { sent.add(message); answer(editor, message); }
+      final closing = session.close(NotebookDisposition.discard, send);
+      await tester.pump();
+      expect(core.retired, isTrue);
+      expect(core.closes, 1);
+      expect(session.synchronizationCore, isNull, reason: 'Admission retires before CLOSED completes.');
+      expect(session.canRecoverQuiescedView, isFalse);
+      await expectLater(session.recoverWebView(), throwsStateError);
+      expect(_stores[drafts.root]!.sources[editor.generation], '${note().text}copyable source');
+      core.closeGate!.complete();
+      expect(await closing, isFalse);
+      expect(session.value.restartRequired, isTrue);
+      expect(session.value.error, NotebookSession.ownerRestartRequiredMessage);
+      expect(session.value.closed, isFalse);
+      expect(sent.where((message) => message['mode'] == 'abort'), isEmpty);
+      if (abandon) {
+        expect(sent, isEmpty);
+      } else {
+        expect(editor.value.closed, isTrue);
+      }
+      expect(await session.write(send), isFalse);
+      expect(await session.close(NotebookDisposition.discard, send), isFalse);
+      expect(await session.reopen(NotebookDisposition.write, send), isFalse);
+      await session.retryOpen(); await session.initialize();
+      await expectLater(session.withResources((_) async => fail('Retired owner borrowed')), throwsStateError);
+      expect(() => session.installSyncReservation(SyncReservationRequest(
+        operationId: '12345678-0000-4000-8000-000000000001', ownerGeneration: 1, kind: SyncReservationKind.lifecycle)), throwsStateError);
+      expect(await session.recoverSyncSources(), isFalse);
+      editor.reportTransportError('Late transport failure');
+      session.setResourceBlock('Unrelated quarantine');
+      expect(session.value.error, NotebookSession.ownerRestartRequiredMessage);
+      expect(opens, 1); expect(core.rejectedAdmissions, 0);
+      expect(identical(core.close(), core.close()), isTrue);
+      expect(_stores[drafts.root]!.sources[editor.generation], '${note().text}copyable source');
+      await expectLater(session.shutdown(), throwsA(same(failure)));
+      session.dispose(); await drafts.shutdown(); drafts.dispose();
+    });
+  }
+
   test('storage failure aborts close and does not erase accepted source', () async {
     final core = ControlledCore(); final session = await start(core);
     final editor = session.value.editor!; insert(editor, 'retained');
@@ -314,6 +761,11 @@ void main() {
     expect(editor.value.quiesced, isFalse); expect(editor.value.closed, isFalse);
     expect(editor.value.text, 'base\r\nretained'); expect(session.value.onDiskRevision, 0);
     _stores[session.drafts.root]!.appendError = null;
+    insert(editor, ' after abort');
+    await session.beginInboxBarrier();
+    expect(session.value.draftRevision, 2);
+    expect(_stores[session.drafts.root]!.sources[editor.generation], '${note().text}retained after abort');
+    session.endInboxBarrier(foreground: false);
   });
   test('receipt error stays visible and blocks automatic blind retry', () async {
     final core = ControlledCore()..reconciliationError = StateError('receipt fsync failed');
@@ -355,6 +807,85 @@ void main() {
     expect(core.writes.length, 1); expect(session.value.draftRevision, 2);
     expect(session.value.dirty, isTrue);
   });
+  for (final queued in [false, true]) {
+    testWidgets('settled autosave retires its ${queued ? 'queued target' : 'idle timer'} without another barrier', (tester) async {
+      final core = ControlledCore();
+      final drafts = presentationDrafts();
+      final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+      await session.initialize();
+      final editor = session.value.editor!;
+      ready(editor);
+      final barriers = <Map<String, Object?>>[];
+      session.bindTransport((message) {
+        if (message['type'] != 'flush') return;
+        barriers.add(message);
+        if (barriers.length == 1) answer(editor, message);
+      });
+      insert(editor, 'focused input');
+      await tester.pump(const Duration(milliseconds: 750));
+      expect(core.writes, hasLength(1));
+      if (queued) {
+        // The first source barrier re-arms idle autosave while the native write
+        // is still outstanding. That target must not outlive the saved receipt.
+        await tester.pump(const Duration(milliseconds: 750));
+        expect(session.value.pendingRevision, 1);
+      }
+      core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: secondHash));
+      await tester.pump();
+      // Do not answer an unexpected second barrier: clean source must never
+      // acquire another timeout merely because its first save took time.
+      await tester.pump(const Duration(milliseconds: 750));
+      await tester.pump(const Duration(seconds: 5));
+      expect(barriers, hasLength(1));
+      expect(core.writes, hasLength(1));
+      expect(session.value.receivedRevision, 1);
+      expect(session.value.draftRevision, 1);
+      expect(session.value.onDiskRevision, 1);
+      expect(session.value.error, isNull);
+      expect(session.value.dirty, isFalse);
+      expect(editor.value.locallySaved, isTrue);
+      expect(editor.canFlushSource, isTrue);
+      session.setForeground(false);
+      await session.beginInboxBarrier();
+      session.endInboxBarrier(foreground: true);
+      await tester.pump(const Duration(seconds: 6));
+      expect(barriers, hasLength(1));
+      expect(session.value.dirty, isFalse);
+      expect(editor.value.text, '${note().text}focused input');
+      await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+    });
+  }
+  for (final composing in [false, true]) {
+    testWidgets('${composing ? 'composing' : 'nonresponsive'} source still fails its save barrier safely', (tester) async {
+      final core = ControlledCore();
+      final drafts = presentationDrafts();
+      final session = NotebookSession(openCore: () async => core, drafts: drafts, notebookRelative: 'book');
+      await session.initialize();
+      final editor = session.value.editor!;
+      ready(editor);
+      final barriers = <Map<String, Object?>>[];
+      session.bindTransport((message) {
+        if (message['type'] == 'flush') barriers.add(message);
+      });
+      insert(editor, 'retained input');
+      if (composing) {
+        editor.receive(jsonEncode(reply(editor, 'activity', 'editor-2',
+          {'sequence': 1, 'pending': false, 'composing': true})));
+      }
+      await tester.pump(const Duration(milliseconds: 750));
+      expect(barriers, hasLength(1));
+      await tester.pump(const Duration(seconds: 5));
+      expect(session.value.error, 'Editor barrier timed out; source is retained.');
+      expect(session.value.dirty, isTrue);
+      expect(session.value.receivedRevision, 1);
+      expect(session.value.draftRevision, 1);
+      expect(session.value.onDiskRevision, 0);
+      expect(editor.value.text, '${note().text}retained input');
+      expect(editor.value.composing, composing);
+      expect(core.writes, isEmpty);
+      await session.shutdown(); session.dispose(); await drafts.shutdown(); drafts.dispose();
+    });
+  }
   testWidgets('continuous input cannot postpone foreground autosave past five seconds', (tester) async {
     final core = ControlledCore();
     final drafts = presentationDrafts();
@@ -408,8 +939,10 @@ void main() {
       (_) => fail('A lost transport cannot acknowledge a flush'));
     await turn(); expect(core.closes, 1); expect(session.value.closed, isFalse);
     expect(editor.value.text, 'base\r\ncopyable until discard');
+    expect(_stores[session.drafts.root]!.records.containsKey(editor.generation), isTrue);
     core.closeGate!.complete(); expect(await closing, isTrue);
     expect(session.value.closed, isTrue); expect(core.writes, isEmpty);
+    expect(_stores[session.drafts.root]!.records.containsKey(editor.generation), isFalse);
   });
 
   test('no-edit write and close create no journal and do not normalize bytes', () async {

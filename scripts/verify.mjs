@@ -7,8 +7,8 @@ import { fileURLToPath } from 'node:url';
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const pins = JSON.parse(readFileSync(join(root, 'toolchains.json'), 'utf8'));
 const mode = process.argv[2] ?? 'verify';
-if (!['verify', 'sync', 'assets', 'check', 'android', 'ios', 'run'].includes(mode)) {
-  throw new Error('Usage: node scripts/verify.mjs [verify|sync|assets|check|android|ios|run]');
+if (!['verify', 'sync', 'assets', 'check', 'android', 'ios', 'android-package', 'ios-package', 'run'].includes(mode)) {
+  throw new Error('Usage: node scripts/verify.mjs [verify|sync|assets|check|android|ios|android-package|ios-package|run]');
 }
 if (process.version !== `v${pins.node}`) {
   throw new Error(`Node ${pins.node} required; found ${process.version}`);
@@ -52,6 +52,11 @@ function verifySync() {
   run(python, [join(root, 'scripts', 'verify_sync.py'), '--dart', dart, '--flutter', flutter]);
 }
 
+
+if (mode === 'android-package' || mode === 'ios-package') {
+  run(process.execPath, ['scripts/release.mjs', mode.split('-')[0], 'unsigned-validation']);
+  process.exit(0);
+}
 if (run(npm, ['--version'], root, true) !== pins.npm) {
   throw new Error(`npm ${pins.npm} required`);
 }
@@ -90,7 +95,7 @@ if (mode === 'check') {
       if (!xcode.startsWith(`Xcode ${pins.ios.xcode}\n`)) {
         throw new Error(`Select Xcode ${pins.ios.xcode} before packaging`);
       }
-      run(flutter, ['build', 'ios', '--no-codesign', '--no-pub'], app);
+      run(process.execPath, ['scripts/release.mjs', 'ios', 'unsigned-validation']);
       run(flutter, ['build', 'ios', '--simulator', '--debug', '--no-pub'], app);
     } else {
       run(flutter, ['run', '--no-pub'], app);

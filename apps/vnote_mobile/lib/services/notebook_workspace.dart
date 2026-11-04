@@ -125,6 +125,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   Future<void>? _initialization;
   Future<void>? _shutdownFuture;
   Completer<void>? _active;
+  Completer<void>? _inboxBarrier;
 
   String get nativeNotices =>
       _catalog?.nativeNotices ?? _session?.nativeNotices ?? '';
@@ -145,7 +146,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     final created = NotebookSync(notebookId: _notebookId, credentials: _syncCredentials);
     _sync = created;
     created.addListener(_syncChanged);
-    created.setForeground(_foreground);
+    created.setForeground(_foreground && _inboxBarrier == null);
     return created;
   }
 
@@ -157,9 +158,50 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   }
 
   void setForeground(bool foreground) {
+    _foreground = foreground && _inboxBarrier == null;
+    _sync?.setForeground(_foreground);
+    _session?.setForeground(_foreground);
+    if (_foreground) unawaited(_attachCurrentSyncOwner());
+  }
+
+  /// Library owns this exclusion across inbox scan and quarantine publication.
+  /// Admission closes synchronously; the future joins all previously admitted
+  /// catalog/session owners and retires sync before reconciliation may inspect.
+  Future<void> beginInboxBarrier() {
+    final existing = _inboxBarrier;
+    if (existing != null) return existing.future;
+    final barrier = Completer<void>();
+    _inboxBarrier = barrier;
+    _foreground = false;
+    final sessionBarrier = _session?.beginInboxBarrier();
+    _sync?.setForeground(false);
+    _publish();
+    unawaited(_joinInboxOwners(sessionBarrier).then(barrier.complete, onError: barrier.completeError));
+    return barrier.future;
+  }
+
+  Future<void> _joinInboxOwners(Future<void>? sessionBarrier) async {
+    await Future.wait<void>([
+      _detachSync(),
+      if (_active != null) _active!.future,
+      ?sessionBarrier,
+    ]);
+    // An admitted catalog->NOTE transition may have installed a new session.
+    await _session?.beginInboxBarrier();
+  }
+
+  /// Parent passes true only for the still-current resumed lifecycle epoch.
+  /// Transfer quarantine is independent and survives this transient release.
+  void endInboxBarrier({required bool foreground}) {
+    final barrier = _inboxBarrier;
+    if (barrier == null) return;
+    if (!barrier.isCompleted) throw StateError('Join inbox owners before releasing the barrier.');
+    _inboxBarrier = null;
     _foreground = foreground;
+    _session?.endInboxBarrier(foreground: foreground);
     _sync?.setForeground(foreground);
-    _session?.setForeground(foreground);
+    _publish();
+    if (foreground) unawaited(_attachCurrentSyncOwner());
   }
 
   void setExternalTransferBusy(bool busy) {
@@ -182,7 +224,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   }
 
   Future<void> _attachCurrentSyncOwner() {
-    if (_shuttingDown || _ownerTransition || _active != null) return Future.value();
+    if (_shuttingDown || !_foreground || _inboxBarrier != null || _ownerTransition || _active != null) return Future.value();
     final note = _session;
     if (note != null && (note.value.editor?.value.ready != true || note.value.closed)) return Future.value();
     final core = note?.synchronizationCore ?? _catalog;
@@ -208,6 +250,11 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     }());
     return settled.future;
   }
+
+  /// Joins readiness already in progress for this owner, not a queued/manual
+  /// synchronization. Resource callers must recheck their owner and admission
+  /// after this join; it grants no reservation and never writes editor source.
+  Future<void> settleSyncAttachment() => _syncAttaching ?? Future<void>.value();
 
   Future<void> _detachSync() {
     final pending = _syncDetaching;
@@ -255,7 +302,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   }
 
   Future<void> initialize() =>
-      _shuttingDown ? Future<void>.value() : _initialization ??= _initialize();
+      _shuttingDown || _inboxBarrier != null ? Future<void>.value() : _initialization ??= _initialize();
 
   Future<void> _initialize() async {
     if (!_admit()) return;
@@ -538,8 +585,11 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
       );
       _session = session;
       session.addListener(_sessionChanged);
-      session.setForeground(_foreground);
-      await session.initialize();
+      session.setResourceBlock(_transferBlock);
+      session.setForeground(_foreground && _inboxBarrier == null);
+      final initializing = session.initialize();
+      if (_inboxBarrier != null) await session.beginInboxBarrier();
+      await initializing;
       if (_shuttingDown) return false;
       if (session.value.editor == null) {
         final openError =
@@ -710,8 +760,8 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
   }
 
   bool _admit({bool ownerTransition = false}) {
-    if (_shuttingDown || _active != null || _ownerTransition ||
-        (!ownerTransition && (_syncReservation != null || _syncAttaching != null ||
+    if (_shuttingDown || _inboxBarrier != null || _active != null || _ownerTransition ||
+        (!ownerTransition && (_transferBlock != null || _syncReservation != null || _syncAttaching != null ||
             (_sync?.value.busy ?? false)))) { return false; }
     _ownerTransition = ownerTransition;
     _active = Completer<void>();
@@ -733,7 +783,7 @@ class NotebookWorkspace extends ValueNotifier<NotebookWorkspaceState> {
     value = NotebookWorkspaceState(
       directory: _directory,
       session: _session,
-      busy: _active != null,
+      busy: _active != null || _inboxBarrier != null,
       stale: _stale || _transferBlock != null || _syncRecoveryRequired ||
           (_sync?.value.facts?.refreshRequired ?? false),
       error: _transferBlock ?? _error,
@@ -825,7 +875,7 @@ class _WorkspaceSyncParticipant implements NotebookSyncParticipant {
 
   @override
   NotebookSyncReservation installSyncReservation(SyncReservationRequest request) {
-    if (!current || workspace._shuttingDown || workspace._ownerTransition ||
+    if (!current || workspace._shuttingDown || workspace._inboxBarrier != null || workspace._ownerTransition ||
         workspace._syncReservation != null || workspace._transferBlock != null ||
         workspace._externalTransferBusy) {
       throw StateError('Finish the current notebook/transfer ownership before synchronization.');

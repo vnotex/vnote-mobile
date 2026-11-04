@@ -118,7 +118,7 @@ void ValidateCommand(const Json &j, bool clone) {
       const auto budget = j.at("stagingBudgetBytes").get<uint64_t>();
       // This is a requested ceiling; CheckClone clamps current capacity and the
       // owner subtracts metadata/copy headroom before assigning core limits.
-      Require(budget > 128 * 1024 && budget <= 4ULL * 1024 * 1024 * 1024, VXCORE_ERR_INVALID_PARAM);
+      Require(budget > 128 * 1024 && budget <= vxm_import::kAdmissionBytes, VXCORE_ERR_INVALID_PARAM);
     } else Require(action == "begin" || action == "stage" || action == "network" || action == "refresh" ||
         action == "enable" || action == "credentials" || action == "credentialRecovery" || action == "disable" ||
         action == "unregister" || action == "configure" || action == "providerInspect" || action == "providerBegin" ||
@@ -281,7 +281,10 @@ std::unique_ptr<Work> Runtime::Prepare(const Json &j, const char *credentials, J
           encoded.c_str(), credentials, &work->lifecycle));
       phase_ = action;
       return work;
-    } catch (...) { Release(); throw; }
+    } catch (...) {
+      if (action == "clone") vxm_import::ReleaseCloneBudget(fs::u8path(root_).parent_path().u8string());
+      Release(); throw;
+    }
   }
   if (action == "stage" || action == "network" || action == "apply") {
     Require(operation_ == operation && !cancelled_.load(), cancelled_.load() ? VXCORE_ERR_CANCELLED : VXCORE_ERR_INVALID_STATE);
@@ -427,6 +430,7 @@ std::unique_ptr<Work> Runtime::Prepare(const Json &j, const char *credentials, J
   return {};
 }
 void Runtime::Abort(Work &work) noexcept {
+  if (work.action == "clone") vxm_import::ReleaseCloneBudget(fs::u8path(root_).parent_path().u8string());
   if (work.lifecycle) {
     vxcore_sync_free_lifecycle(work.lifecycle); work.lifecycle = nullptr;
     Release();
@@ -445,6 +449,7 @@ void Runtime::Execute(Work &work) noexcept {
 }
 Json Runtime::Complete(Work &work) {
   Require(operation_ == work.operation_id && phase_ == work.action);
+  if (work.action == "clone") vxm_import::ReleaseCloneBudget(fs::u8path(root_).parent_path().u8string());
   auto out = Result(work.action, operation_, work.code);
   out["executed"] = true; out["didCommit"] = work.did_commit != 0;
   if (work.lifecycle) {
@@ -512,6 +517,7 @@ void Runtime::Stop() noexcept {
 int32_t Runtime::Shutdown() noexcept {
   int32_t result = VXCORE_OK;
   try {
+    if (clone_ && !root_.empty()) vxm_import::ReleaseCloneBudget(fs::u8path(root_).parent_path().u8string());
     if (applied_ && !refreshed_) result = Refresh(operation_).at("code").get<int32_t>();
     if (!notebook_.empty()) {
       const auto code = vxcore_sync_set_apply_in_progress(context_, notebook_.c_str(), 0);

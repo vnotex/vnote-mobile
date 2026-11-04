@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path/path.dart' as p;
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
@@ -16,6 +17,7 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 import 'package:vnote_mobile/services/cohort_import.dart';
 import 'package:vnote_mobile/services/resource_transfer.dart';
 import 'package:vnote_mobile/services/notebook_session.dart';
+import 'package:vnote_mobile/services/share_inbox.dart';
 
 import 'notebook_session_test.dart' as protocol show ready, insert, answer;
 
@@ -308,6 +310,10 @@ Future<void> _copyTree(Directory source, Directory target) async {
 }
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+  const inboxChannel = MethodChannel('vnote.mobile/library-inbox-test');
+  const syncChannel = MethodChannel('vnote.mobile/sync_security');
+  final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
   late Directory temp;
   late ManagedNotebookStorage storage;
   late _Owners owners;
@@ -319,8 +325,10 @@ void main() {
     DocumentTransferPlatform? cohortPlatform,
     DocumentTransferPlatform? resourcePlatform,
     EditorDrafts Function(String root)? createDrafts,
+    ShareInbox? inbox,
   }) => NotebookLibrary(
     obtainStorage: () async => storage,
+    shareInbox: inbox,
     createDrafts: createDrafts,
     openCatalog: owners.open,
     openExportCatalog: owners.openExport,
@@ -373,7 +381,137 @@ void main() {
     await library.shutdown();
     library.dispose();
     expect(owners.active, 0);
+    messenger.setMockMethodCallHandler(inboxChannel, null);
+    messenger.setMockMethodCallHandler(syncChannel, null);
     await temp.delete(recursive: true);
+  });
+
+  test('resume waits for inbox reconciliation and a paused epoch cannot release writers', () async {
+    await library.shutdown();
+    library.dispose();
+    Completer<void>? gate;
+    Completer<void>? entered;
+    messenger.setMockMethodCallHandler(inboxChannel, (call) async {
+      if (call.method == 'list') {
+        if (entered != null && !entered.isCompleted) entered.complete();
+        await gate?.future;
+        return {'available': true, 'records': <Object?>[]};
+      }
+      return null;
+    });
+    library = makeLibrary(inbox: ShareInbox(channel: inboxChannel));
+    await library.initialize();
+    expect(await library.createNotebook('Resume target'), isTrue);
+    final workspace = library.value.workspace!;
+    entered = Completer<void>();
+    gate = Completer<void>();
+    final resume = library.refreshInbox();
+    expect(library.value.inboxReady, isFalse);
+    expect(workspace.value.canMutate, isFalse);
+    await entered.future;
+    expect(await workspace.createNote('blocked.md'), isNull);
+    library.setForeground(false);
+    gate.complete();
+    await resume;
+    expect(workspace.value.canMutate, isFalse);
+    expect(await File(p.join(workspace.notebookLocation, 'blocked.md')).exists(), isFalse);
+    gate = null;
+    final syncGate = Completer<void>();
+    final syncEntered = Completer<void>();
+    messenger.setMockMethodCallHandler(syncChannel, (call) async {
+      expect(call.method, 'vaultList');
+      if (!syncEntered.isCompleted) syncEntered.complete();
+      await syncGate.future;
+      return {'keys': <String>[]};
+    });
+    library.setForeground(true);
+    var settled = false;
+    final currentResume = library.refreshInbox().then((_) { settled = true; });
+    await syncEntered.future;
+    try {
+      await Future<void>.delayed(Duration.zero);
+      expect(workspace.value.syncBusy, isTrue);
+      expect(workspace.value.canMutate, isFalse);
+      expect(settled, isFalse);
+    } finally {
+      syncGate.complete();
+    }
+    await currentResume;
+    expect(library.value.inboxReady, isTrue);
+    expect(workspace.value.canMutate, isTrue);
+  });
+
+  test('committed inbox receipt consumes after target deletion without reopening or replaying', () async {
+    await library.shutdown();
+    library.dispose();
+    final delivery = 'a' * 32;
+    final source = await Directory(p.join(temp.path, 'share-source')).create();
+    await File(p.join(source.path, 'Shared text.md')).writeAsString('abc');
+    final capture = _ImportProvider(source.path, p.join(temp.path, 'cohorts'));
+    var status = 'ready';
+    String? operation;
+    Map<String, Object?>? target;
+    String? cohortId;
+    var allowConsume = false;
+    var stages = 0;
+    Map<String, Object?> record() => {
+      'id': delivery, 'fingerprint': 'f' * 64, 'state': status,
+      'bytes': 3, 'files': <Object?>[], 'payloadAvailable': status != 'consumed',
+      'duplicateAvailable': false,
+      'operationId': ?operation,
+      'target': ?target,
+      'cohortId': ?cohortId,
+    };
+    messenger.setMockMethodCallHandler(inboxChannel, (call) async {
+      final args = call.arguments is Map ? Map<String, Object?>.from(call.arguments as Map) : null;
+      switch (call.method) {
+        case 'list': return {'available': true, 'records': [record()]};
+        case 'activate': return null;
+        case 'claim':
+          expect(operation, isNull);
+          operation = args!['operationId'] as String;
+          target = Map<String, Object?>.from(args['target'] as Map);
+          status = 'importing';
+          return record();
+        case 'stage':
+          stages++;
+          final result = await capture.pickImport(operationId: operation!,
+            scope: DocumentTransferScope.cohort, kind: DocumentImportKind.folder);
+          return {'status': 'captured', 'sourceName': result.sourceName,
+            'bytes': result.bytes, 'entries': result.entries};
+        case 'consume':
+          expect(await File(p.join(temp.path, 'cohorts', operation!, 'committed.json')).exists(), isTrue);
+          if (!allowConsume) throw PlatformException(code: 'ledger_unavailable');
+          cohortId = args!['cohortId'] as String;
+          status = 'consumed';
+          return null;
+        default: throw StateError('Unexpected inbox call.');
+      }
+    });
+    library = makeLibrary(inbox: ShareInbox(channel: inboxChannel));
+    await library.initialize();
+    expect(await library.createNotebook('Share target'), isTrue);
+    final location = library.value.workspace!.notebookLocation;
+    final chosen = await library.shareTarget(folderName: 'Received', currentFolder: true);
+    expect(chosen, isNotNull);
+    await library.importShare(library.value.shareState.records.single, target: chosen);
+    expect(library.value.cohortState.current!.stage, TransferStage.committed);
+    expect(stages, 1);
+    expect(await Directory(p.join(location, 'Received')).exists(), isTrue);
+    final retainedId = library.value.cohortState.current!.cohortId;
+    await library.shutdown();
+    library.dispose();
+    await Directory(location).delete(recursive: true);
+    allowConsume = true;
+    owners.maximum = 0;
+    library = makeLibrary(inbox: ShareInbox(channel: inboxChannel));
+    await library.initialize();
+    expect(library.value.shareState.records.single.status, ShareInboxStatus.consumed);
+    expect(cohortId, retainedId);
+    expect(stages, 1);
+    expect(owners.maximum, 0, reason: 'A committed receipt cannot require a live notebook owner.');
+    expect(library.value.cohortState.attempts, isEmpty);
+    expect(await Directory(location).exists(), isFalse);
   });
 
   test('browser cohort groups raw assets, seals stable IDs, and leaves original nodes unchanged', () async {
@@ -465,6 +603,14 @@ void main() {
       await workspace.openNote(workspace.value.directory!.entries.single);
       final session = workspace.value.session!;
       final editor = session.value.editor!;
+      final syncGate = Completer<void>();
+      final syncEntered = Completer<void>();
+      messenger.setMockMethodCallHandler(syncChannel, (call) async {
+        expect(call.method, 'vaultList');
+        if (!syncEntered.isCompleted) syncEntered.complete();
+        await syncGate.future;
+        return {'keys': <String>[]};
+      });
       protocol.ready(editor);
       protocol.insert(editor, 'unsaved text');
       final sourcePath = p.join(
@@ -472,17 +618,29 @@ void main() {
         session.value.note!.path,
       );
       final savedBefore = await File(sourcePath).readAsBytes();
-      await library.changeResource(
+      await syncEntered.future;
+      var changed = false;
+      final changing = library.changeResource(
         workspace,
         session,
         ResourceOperation.image,
         'chosen.png',
-      );
+      ).then((_) { changed = true; });
+      try {
+        await Future<void>.delayed(Duration.zero);
+        expect(session.value.syncBusy, isTrue);
+        expect(changed, isFalse);
+        expect(library.value.resourceState.current, isNull);
+      } finally {
+        syncGate.complete();
+      }
+      await changing;
       expect(
         library.value.resourceState.current!.stage,
         TransferStage.committed,
         reason: '${library.value.error}; ${library.value.resourceState.error}',
       );
+      expect(workspace.value.session, same(session));
       final added = library.value.resourceState.listing!.entries.single;
       expect(added.name, 'chosen.png');
       expect(added.tracked, isFalse);

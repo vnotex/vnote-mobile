@@ -19,7 +19,8 @@ class NotebookSessionState {
     this.writing = false, this.transitioning = false, this.resourcesBusy = false,
     this.closed = false, this.recoveryRequired = false, this.durabilityError,
     this.error, this.syncBusy = false, this.syncReserved = false,
-    this.syncRecoveryRequired = false, this.syncError});
+    this.syncRecoveryRequired = false, this.syncError, this.inboxBlocked = false,
+    this.restartRequired = false});
   final EditorSession? editor;
   final CoreNote? note;
   final int? onDiskRevision;
@@ -40,12 +41,14 @@ class NotebookSessionState {
   final bool syncReserved;
   final bool syncRecoveryRequired;
   final String? syncError;
+  final bool inboxBlocked;
+  final bool restartRequired;
   bool get dirty => editor != null && (recoveryRequired || syncRecoveryRequired || durabilityError != null ||
     error != null || editor!.value.error != null ||
     editor!.value.pending || editor!.value.composing ||
     editor!.value.resyncCandidate != null || savedToken != editor!.generation ||
     editor!.value.revision != onDiskRevision);
-  bool get busy => loading || writing || transitioning || resourcesBusy || syncReserved;
+  bool get busy => loading || writing || transitioning || resourcesBusy || syncReserved || inboxBlocked || restartRequired;
 }
 
 class _SaveTarget {
@@ -87,6 +90,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   Map<String, Object?>? _candidate;
   Completer<void>? _resources;
   Completer<void>? _transition;
+  Completer<void>? _inboxBarrier;
   String? _resourceBlock;
   Timer? _idle;
   Timer? _ceiling;
@@ -94,9 +98,26 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   bool _foreground = true;
   bool _disposed = false;
   bool _stopping = false;
+  bool _restartRequired = false;
+  ({EditorSession editor, EditorDraftCapture capture, EditorSnapshot snapshot})? _terminalClose;
 
+  static const ownerRestartRequiredMessage = 'Notebook shutdown did not finish. Received source is retained. Copy it, then restart the app before reopening this notebook. This editor cannot be resumed.';
   String get nativeNotices => _core?.nativeNotices ?? '';
-  SyncCore? get synchronizationCore => _core;
+  SyncCore? get synchronizationCore => _restartRequired ? null : _core;
+
+  /// Only an acknowledged quiesce followed by an irreversible close attempt
+  /// permits replacement without asking a possibly closed page to resynchronize.
+  bool get canRecoverQuiescedView {
+    final proof = _terminalClose;
+    if (_restartRequired || proof == null || !identical(proof.editor, value.editor) ||
+        !identical(proof.capture, _capture) || proof.capture.retired) {
+      return false;
+    }
+    final source = proof.editor.value;
+    return source.quiesced && !source.pending && !source.composing &&
+      source.resyncCandidate == null && source.revision == proof.snapshot.revision &&
+      source.text == proof.snapshot.text;
+  }
 
   void setSyncActivity({required bool busy, required bool allowsLocalWrites}) {
     if (_syncBusy == busy && _syncAllowsWrites == allowsLocalWrites) return;
@@ -106,7 +127,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
 
   NotebookSyncReservation installSyncReservation(SyncReservationRequest request) {
-    if (_stopping || _syncReservation != null || value.transitioning || _core == null ||
+    if (_stopping || _restartRequired || _terminalClose != null || _inboxBarrier != null || _syncReservation != null || value.transitioning || _core == null ||
         _capture == null || _resourceBlock != null || (_syncRecovery?._abortPending ?? false)) {
       throw StateError('The note cannot reserve synchronization while another owner is active.');
     }
@@ -117,19 +138,20 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
 
   Future<bool> recoverSyncSources() async {
+    if (_restartRequired || _terminalClose != null || _inboxBarrier != null) return false;
     final retained = _syncRecovery;
     if (retained == null) return true;
     final current = _syncReservation;
     return current == null ? retained.recover() : current.recoverRetained(retained);
   }
 
-  void bindTransport(EditorSend send) { _send = send; _schedule(); }
+  void bindTransport(EditorSend send) { if (_restartRequired || _terminalClose != null) return; _send = send; _schedule(); }
   void unbindTransport(EditorSend send) {
     if (identical(_send, send)) { _send = null; _cancelTimers(); }
   }
   void setForeground(bool foreground) {
-    _foreground = foreground;
-    if (foreground) { _schedule(); } else {
+    _foreground = foreground && _inboxBarrier == null;
+    if (_foreground) { _schedule(); } else {
       _cancelTimers();
       final capture = _capture;
       if (capture != null) {
@@ -139,13 +161,54 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       }
     }
   }
+
+  /// Stops new notebook writes immediately, then joins admitted owners. Accepted
+  /// editor input continues into private drafts; no editor epoch is replaced.
+  Future<void> beginInboxBarrier() {
+    final existing = _inboxBarrier;
+    if (existing != null) return existing.future;
+    final barrier = Completer<void>();
+    _inboxBarrier = barrier;
+    _foreground = false;
+    _cancelTimers();
+    // A queued request has not dispatched. Refuse its receipt, not its source;
+    // resume may autosave the latest editor text after quarantine is known.
+    _pending?.completion.complete(false);
+    _pending = null;
+    _publish();
+    unawaited(_joinInboxWriters().then(barrier.complete, onError: barrier.completeError));
+    return barrier.future;
+  }
+
+  Future<void> _joinInboxWriters() async {
+    await _initialization;
+    await _transition?.future;
+    await _resources?.future;
+    await _saving;
+    await _syncRecovery?._aborting;
+    final capture = _capture;
+    if (capture != null && !capture.retired) await _flush(capture);
+  }
+
+  /// Releases only the transient inbox exclusion, never a resource quarantine.
+  void endInboxBarrier({required bool foreground}) {
+    final barrier = _inboxBarrier;
+    if (barrier == null) return;
+    if (!barrier.isCompleted) throw StateError('Join inbox writers before releasing the barrier.');
+    _inboxBarrier = null;
+    _publish();
+    setForeground(foreground);
+  }
   void setResourceBlock(String? message) {
     _resourceBlock = message;
+    if (message != null) _cancelTimers();
     _publish(error: message, clearError: message == null);
+    if (message == null) { _startSaving(); _schedule(); }
   }
-  Future<void> initialize() => _stopping ? Future.value() :
+  Future<void> initialize() => _stopping || _restartRequired || _inboxBarrier != null ? Future.value() :
       _initialization ??= _initialize();
-  Future<void> _initialize() async {
+  Future<void> _initialize({bool afterJoinedClose = false}) async {
+    if (_restartRequired && !afterJoinedClose) throw StateError(ownerRestartRequiredMessage);
     _publish(loading: true);
     try {
       _core = await _openCore();
@@ -174,11 +237,20 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     finally { _publish(loading: false); _onCoreChanged?.call(); }
   }
   Future<void> retryOpen() async {
-    if (_stopping || value.busy || value.editor != null) return;
-    await _beforeCoreClose?.call();
-    await _core?.close();
-    _core = null;
-    await (_initialization = _initialize());
+    if (_stopping || _restartRequired || value.busy || value.editor != null || _resourceBlock != null) return;
+    final transition = Completer<void>();
+    _transition = transition;
+    _publish(transitioning: true);
+    try {
+      await _beforeCoreClose?.call();
+      await _core?.close();
+      _core = null;
+      await (_initialization = _initialize());
+    } finally {
+      _transition = null;
+      transition.complete();
+      _publish(transitioning: false);
+    }
   }
 
   void _install(CoreNote note, {String? source, Map<String, Object?>? restored,
@@ -196,6 +268,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     previous?.removeListener(_editorChanged);
     final capture = drafts.attach(editor, note, notebookRelative, restored: restored);
     _capture = capture;
+    _terminalClose = null;
+    _restartRequired = false;
     editor.onEdit = (batch) => drafts.accept(capture, batch,
       durable: _durable, failed: _durabilityFailed);
     editor.addListener(_editorChanged);
@@ -204,6 +278,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     value = NotebookSessionState(editor: editor, note: note,
       onDiskRevision: saved ? 0 : null, savedToken: saved ? editor.generation : null,
       syncBusy: _syncBusy, syncReserved: _syncReservation != null,
+      inboxBlocked: _inboxBarrier != null,
       syncRecoveryRequired: _syncRecovery != null, syncError: _syncError);
     previous?.dispose();
     _schedule();
@@ -222,8 +297,12 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
   void _cancelTimers() { _idle?.cancel(); _ceiling?.cancel(); _idle = null; _ceiling = null; }
   void _schedule() {
-    if (_stopping || !_foreground || !_syncAllowsWrites || _syncReservation != null ||
-        _syncRecovery != null || _send == null || !value.dirty ||
+    if (!value.dirty) {
+      _cancelTimers();
+      return;
+    }
+    if (_stopping || _restartRequired || _terminalClose != null || _inboxBarrier != null || _resourceBlock != null || !_foreground || !_syncAllowsWrites || _syncReservation != null ||
+        _syncRecovery != null || _send == null ||
         value.editor?.value.ready != true || value.editor?.value.error != null ||
         value.error != null || value.recoveryRequired || value.durabilityError != null ||
         value.transitioning) {
@@ -260,7 +339,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
 
   Future<T> withResources<T>(Future<T> Function(ResourceCore core) action) async {
-    if (_stopping || _syncBusy || _syncReservation != null || _syncRecovery != null ||
+    if (_stopping || _restartRequired || _terminalClose != null || _inboxBarrier != null || _syncBusy || _syncReservation != null || _syncRecovery != null ||
         _resources != null || value.transitioning || _core == null) {
       throw StateError('The note is not available for a resource operation.');
     }
@@ -294,8 +373,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   Future<bool> write(EditorSend send) => _enqueue(send, explicit: true);
   Future<bool> _enqueue(EditorSend send, {required bool explicit}) {
     final editor = value.editor;
-    if (_stopping || editor == null || value.closed || value.transitioning ||
-        (!explicit && value.recoveryRequired)) {
+    if (_stopping || _restartRequired || _terminalClose != null || _inboxBarrier != null || _resourceBlock != null || editor == null || value.closed || value.transitioning ||
+        (!explicit && (!_foreground || value.recoveryRequired))) {
       return Future.value(false);
     }
     final target = _SaveTarget(editor, send, explicit);
@@ -306,7 +385,8 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     return target.completion.future;
   }
   void _startSaving() {
-    if (_saving != null || _pending == null || _resources != null || _stopping ||
+    if (_saving != null || _pending == null || _resources != null || _stopping || _restartRequired || _terminalClose != null ||
+        _inboxBarrier != null || _resourceBlock != null ||
         !_syncAllowsWrites || _syncReservation != null || _syncRecovery != null) { return; }
     final done = Completer<void>();
     _saving = done.future;
@@ -318,6 +398,7 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
   Future<void> _drainSaves() async {
     while (_pending != null && _resources == null && !_stopping &&
+        _inboxBarrier == null && _resourceBlock == null &&
         _syncAllowsWrites && _syncReservation == null && _syncRecovery == null) {
       final target = _pending!;
       _pending = null;
@@ -333,6 +414,9 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       EditorSnapshot? quiesced}) async {
     if (!identical(editor, value.editor) || _core == null || _syncRecovery != null) return false;
     if (_resourceBlock != null) { _publish(error: _resourceBlock); return false; }
+    // An automatic target can outlive the write that already saved its source.
+    // Explicit writes still require a fresh source barrier, even when clean.
+    if (!explicit && !value.dirty) return true;
     _cancelTimers();
     _publish(writing: true, clearError: true);
     try {
@@ -421,7 +505,10 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       _close(disposition, send, reopen: false);
   Future<bool> _close(NotebookDisposition disposition, EditorSend send,
       {required bool reopen}) async {
-    if (disposition == NotebookDisposition.cancel || _transition != null || _stopping) return false;
+    if (disposition == NotebookDisposition.cancel || _transition != null || _stopping || _restartRequired || _terminalClose != null || _inboxBarrier != null ||
+        (reopen && _resourceBlock != null)) {
+      return false;
+    }
     final editor = value.editor;
     if (editor == null) return false;
     final transition = Completer<void>();
@@ -430,13 +517,14 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
     _cancelTimers();
     _pending?.completion.complete(false);
     _pending = null;
+    var abandonView = disposition == NotebookDisposition.discard && editor.value.error != null;
     try {
       await _beforeCoreClose?.call();
       await _resources?.future;
       await _saving;
       // Explicit discard may abandon a failed view, but is never reported as a
       // successful flush/quiesce or as persistence of unreceived input.
-      final abandonView = disposition == NotebookDisposition.discard && editor.value.error != null;
+      abandonView = disposition == NotebookDisposition.discard && editor.value.error != null;
       final snapshot = abandonView || editor.value.quiesced
         ? EditorSnapshot(editor.value.text, editor.value.revision,
             documentId: editor.documentId, generation: editor.generation,
@@ -469,30 +557,39 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
         }
         _restored = await drafts.rebase(DraftRecoveryEntry(actual.record), newTransferId());
       }
-      if (disposition == NotebookDisposition.discard) {
-        await drafts.detach(_capture!, discard: true);
-      } else {
-        await _flush(_capture!);
-        if (_capture!.durableRevision < snapshot.revision) {
-          throw StateError('The final source prefix was not durably retained.');
-        }
-        await drafts.detach(_capture!);
+      await _flush(_capture!);
+      if (!abandonView && _capture!.durableRevision < snapshot.revision) {
+        throw StateError('The final source prefix was not durably retained.');
       }
       if (!abandonView) {
+        // Once sent, complete may close the page even if its reply times out.
+        // Keep the exact quiesced draft attached; this epoch must never abort.
+        _terminalClose = (editor: editor, capture: _capture!, snapshot: snapshot);
         await editor.completeClose(send, capture: snapshot,
           discard: disposition == NotebookDisposition.discard);
       }
       _send = null;
+      // close() retires native admission synchronously, before its future joins.
+      _restartRequired = true;
       await _core?.close();
       _core = null;
+      await drafts.detach(_capture!, discard: disposition == NotebookDisposition.discard);
       if (reopen) {
         await drafts.scan();
-        await (_initialization = _initialize());
+        await (_initialization = _initialize(afterJoinedClose: true));
         return value.editor != editor;
       }
+      _restartRequired = false;
+      _terminalClose = null;
       _publish(closed: true);
       return true;
     } on Object catch (error) {
+      if (_restartRequired || _terminalClose != null || abandonView) {
+        final message = _restartRequired ? ownerRestartRequiredMessage : _error(error);
+        editor.reportTransportError(message);
+        _publish(error: message);
+        return false;
+      }
       _publish(error: _error(error));
       if (_candidate != null && _capture != null && _core != null) {
         try { await _reconcile(_capture!); } on Object catch (receiptError) {
@@ -512,7 +609,11 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
   }
 
   Future<EditorSession> recoverWebView() async {
-    if (_send != null && value.editor?.value.ready == true && value.editor?.value.error == null) {
+    if (_restartRequired) throw StateError(ownerRestartRequiredMessage);
+    if (_terminalClose != null && !canRecoverQuiescedView) {
+      throw StateError('The final source capture changed. Received source and private drafts are retained.');
+    }
+    if (_send != null && value.editor?.value.ready == true && value.editor?.value.error == null && !canRecoverQuiescedView) {
       throw StateError('A live source view must resynchronize or retire before replacement.');
     }
     if (value.editor?.value.resyncCandidate != null) {
@@ -528,19 +629,34 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       head: useViewSource ? candidate.head : null);
   }
   Future<EditorSession> _replaceView({String? chosenSource, int? anchor, int? head}) async {
-    if (_stopping || _syncBusy || _syncReservation != null || _syncRecovery != null ||
+    if (_stopping || _restartRequired || _inboxBarrier != null || _syncBusy || _syncReservation != null || _syncRecovery != null ||
         value.transitioning || _resources != null || _capture == null) {
       throw StateError('The note cannot replace its source view during an operation.');
+    }
+    final terminal = _terminalClose;
+    if (terminal != null && (!canRecoverQuiescedView || chosenSource != null)) {
+      throw StateError('The final source capture changed. Received source and private drafts are retained.');
     }
     _cancelTimers();
     _send = null;
     _pending?.completion.complete(false);
     _pending = null;
+    final transition = Completer<void>();
+    _transition = transition;
     _publish(transitioning: true);
     try {
       await _saving;
       final previous = _capture!;
       await _flush(previous, ensure: true);
+      if (terminal != null) {
+        final retained = await drafts.readSource(DraftRecoveryEntry(previous.summary!));
+        if (terminal != _terminalClose || !canRecoverQuiescedView ||
+            previous.durableRevision != terminal.snapshot.revision ||
+            retained['revision'] != terminal.snapshot.revision ||
+            retained['source'] != terminal.snapshot.text) {
+          throw StateError('The final source capture changed. Received source and private drafts are retained.');
+        }
+      }
       final rebased = await drafts.rebase(DraftRecoveryEntry(previous.summary!),
         newTransferId(), chosenSource: chosenSource);
       final proof = (await _core!.reconcileDraft(draftsRoot: drafts.root,
@@ -553,8 +669,13 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       _install(value.note!, source: source['source'] as String, restored: proof,
         anchor: anchor ?? previous.editor.value.anchor,
         head: head ?? previous.editor.value.head);
+      if (terminal != null) _restored = null;
       return value.editor!;
-    } finally { _publish(transitioning: false); }
+    } finally {
+      _transition = null;
+      transition.complete();
+      _publish(transitioning: false);
+    }
   }
 
   Future<void> shutdown() => _shutdownFuture ??= _shutdown();
@@ -604,9 +725,9 @@ class NotebookSession extends ValueNotifier<NotebookSessionState> {
       resourcesBusy: resourcesBusy ?? value.resourcesBusy, closed: closed ?? value.closed,
       recoveryRequired: recoveryRequired ?? value.recoveryRequired,
       durabilityError: clearDurabilityError ? null : durabilityError ?? value.durabilityError,
-      error: clearError ? null : error ?? value.error, syncBusy: _syncBusy,
+      error: _restartRequired ? ownerRestartRequiredMessage : clearError ? null : error ?? value.error, syncBusy: _syncBusy,
       syncReserved: _syncReservation != null, syncRecoveryRequired: _syncRecovery != null,
-      syncError: _syncError);
+      syncError: _syncError, inboxBlocked: _inboxBarrier != null, restartRequired: _restartRequired);
   }
   static String _error(Object error) => error is CoreException
       ? 'Core error ${error.code}: ${error.message}' : error is StateError

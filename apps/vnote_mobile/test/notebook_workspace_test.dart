@@ -4,10 +4,14 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:vnote_mobile/app/vnote_app.dart';
+import 'package:vnote_mobile/features/editor/notebook_editor.dart';
 import 'package:vnote_mobile/features/library/notebook_browser.dart';
 import 'package:vnote_mobile/features/library/notebook_library_screen.dart';
+import 'package:vnote_mobile/l10n/app_strings.dart';
+import 'package:vnote_mobile/l10n/locale_settings.dart';
 import 'package:vnote_mobile/services/editor_drafts.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
@@ -22,7 +26,7 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 // Reuse the existing protocol driver, not a second editor implementation.
 import 'notebook_session_test.dart'
     as protocol
-    show ControlledCore, answer, insert, ready, reply, turn, presentationDrafts;
+    show ControlledCore, RetiringCloseCore, answer, insert, ready, reply, turn, presentationDrafts;
 import 'sync_credentials_test.dart' show TestSyncVault;
 
 const _note = CoreEntry(
@@ -120,18 +124,24 @@ class _Catalog implements CatalogCore {
   Completer<void>? closeGate;
   int closes = 0;
   Future<void>? _closing;
+  Future<CoreSyncFacts> Function()? onInspectSync;
+  final syncCancellations = <String>[];
+  final syncActions = <CoreSyncAction>[];
 
   @override
   String get nativeNotices => 'Catalog notices';
   @override
-  Future<CoreSyncFacts> inspectSync() async => CoreSyncFacts(notebookId: initialDirectory.notebookId, autoSyncEnabled: false);
+  Future<CoreSyncFacts> inspectSync() async => onInspectSync == null
+      ? CoreSyncFacts(notebookId: initialDirectory.notebookId, autoSyncEnabled: false)
+      : await onInspectSync!();
   @override
   Future<CoreSyncResult> sync(CoreSyncCommand command, {CoreSyncCredentials? credentials}) async {
+    syncActions.add(command.action);
     if (command.action != CoreSyncAction.unregister) throw StateError('This offline fixture has no sync backend.');
     return CoreSyncResult(operationId: command.operationId, action: command.action, code: 0, executed: true);
   }
   @override
-  void cancelSync(String operationId) {}
+  void cancelSync(String operationId) => syncCancellations.add(operationId);
 
 
   @override
@@ -447,6 +457,12 @@ class _Library extends NotebookLibrary {
   int refreshes = 0;
 
   @override
+  void setForeground(bool foreground) {
+    // This presentation driver owns its supplied snapshots. Inheriting the
+    // real resume scan would replace them and start unconfigured storage IO.
+  }
+
+  @override
   Future<void> initialize() async {}
 
   @override
@@ -477,7 +493,173 @@ class _Library extends NotebookLibrary {
   Future<void> shutdown() async {}
 }
 
+Future<void> _pumpVNoteApp(WidgetTester tester, NotebookLibrary library) async {
+  await tester.runAsync(() async {
+    // Mount the actual app and await its bundled resources in the same real IO
+    // zone; fake-clock frame pumping cannot finish ARB decoding in an isolate.
+    await tester.pumpWidget(VNoteApp(library: library));
+    await AppStrings.delegate.load(const Locale('en'));
+    final settings = tester.widget<LocaleSettingsScope>(
+      find.byType(LocaleSettingsScope)).notifier!;
+    await settings.initialize();
+    expect(settings.busy, isFalse);
+  });
+  // Resource/native initialization has completed explicitly. Render it without
+  // treating every ongoing application animation as a readiness condition.
+  await tester.pump();
+}
+
 void main() {
+  test('an inbox barrier before initialization defers rather than consumes owner admission', () async {
+    final harness = _Harness();
+    await harness.workspace.beginInboxBarrier();
+    await harness.workspace.initialize();
+    expect(harness.catalogs, isEmpty);
+    harness.workspace.endInboxBarrier(foreground: false);
+    await harness.workspace.initialize();
+    expect(harness.catalogs, hasLength(1));
+    expect(harness.workspace.value.directory!.notebookId, 'book-identity');
+  });
+
+  test('inbox barrier synchronously refuses catalog admission and joins mutation plus refresh', () async {
+    final harness = _Harness();
+    final workspace = harness.workspace;
+    await workspace.initialize();
+    final catalog = harness.catalogs.single;
+    final mutation = Completer<String>();
+    final refresh = Completer<CoreDirectory>();
+    catalog.onMutation = () => mutation.future;
+    catalog.onList = (_) => refresh.future;
+    final changing = workspace.createNote('started.md');
+    var joined = false;
+    final barrier = workspace.beginInboxBarrier();
+    expect(workspace.beginInboxBarrier(), same(barrier));
+    unawaited(barrier.then((_) { joined = true; }));
+    expect(workspace.value.canMutate, isFalse);
+    expect(await workspace.createFolder('blocked'), isNull);
+    expect(await workspace.renameNotebook('blocked'), isNull);
+    expect(await workspace.navigate(_folder.id), isFalse);
+    expect(await workspace.refresh(), isFalse);
+    expect(await workspace.openRecovered(_note.id, const {}), isFalse);
+    await expectLater(workspace.listDestination(), throwsStateError);
+    await protocol.turn();
+    expect(joined, isFalse);
+    mutation.complete('created-node');
+    await protocol.turn();
+    expect(catalog.lists, ['root-id']);
+    expect(joined, isFalse, reason: 'The post-write listing still owns the catalog.');
+    refresh.complete(_directory());
+    expect((await changing)!.applied, isTrue);
+    await barrier;
+    expect(workspace.value.busy, isTrue);
+    expect(catalog.changes, [['note', 'root-id', 'started.md']]);
+    workspace.setTransferBlock('Unresolved inbox target');
+    workspace.endInboxBarrier(foreground: false);
+    expect(workspace.value.busy, isFalse);
+    expect(workspace.value.canMutate, isFalse);
+    expect(await workspace.createNote('still blocked.md'), isNull);
+    expect(await workspace.openPreviewTarget(_note.id), isFalse);
+    expect(workspace.value.error, 'Unresolved inbox target');
+    workspace.setTransferBlock(null);
+    catalog.onMutation = null;
+    catalog.onList = null;
+    expect((await workspace.createNote('allowed.md'))!.applied, isTrue);
+  });
+
+  test('inbox barrier cancels and joins active sync before detaching its writer owner', () async {
+    final harness = _Harness();
+    final workspace = harness.workspace;
+    await workspace.initialize();
+    final catalog = harness.catalogs.single;
+    final inspecting = Completer<CoreSyncFacts>();
+    catalog.onInspectSync = () => inspecting.future;
+    final synchronization = workspace.synchronization;
+    final reconciling = synchronization.reconcile();
+    var joined = false;
+    final barrier = workspace.beginInboxBarrier();
+    unawaited(barrier.then((_) { joined = true; }));
+    expect(catalog.syncCancellations, isNotEmpty);
+    await protocol.turn();
+    expect(joined, isFalse);
+    expect(catalog.syncActions, isEmpty);
+    inspecting.complete(CoreSyncFacts(notebookId: workspace.notebookId, autoSyncEnabled: false));
+    await reconciling;
+    await barrier;
+    expect(catalog.syncActions, [CoreSyncAction.unregister]);
+    expect((await synchronization.syncNow()).success, isFalse);
+    workspace.setForeground(true);
+    expect((await synchronization.syncNow()).success, isFalse);
+    expect(catalog.syncActions, [CoreSyncAction.unregister]);
+    workspace.endInboxBarrier(foreground: false);
+    expect((await synchronization.syncNow()).success, isFalse);
+  });
+
+  test('a note installed during catalog retirement inherits the held inbox barrier', () async {
+    final harness = _Harness();
+    final workspace = harness.workspace;
+    await workspace.initialize();
+    final catalog = harness.catalogs.single..closeGate = Completer<void>();
+    final opening = workspace.openNote(_note);
+    await protocol.turn();
+    expect(catalog.closes, 1);
+    var joined = false;
+    final barrier = workspace.beginInboxBarrier();
+    unawaited(barrier.then((_) { joined = true; }));
+    await protocol.turn();
+    expect(joined, isFalse);
+    catalog.closeGate!.complete();
+    expect(await opening, isTrue);
+    await barrier;
+    final session = workspace.value.session!;
+    final editor = session.value.editor!;
+    protocol.ready(editor);
+    protocol.insert(editor, 'not lost');
+    void send(Map<String, Object?> message) => protocol.answer(editor, message);
+    session.bindTransport(send);
+    workspace.setForeground(true);
+    session.setForeground(true);
+    expect(session.value.inboxBlocked, isTrue);
+    expect(await session.write(send), isFalse);
+    expect(await workspace.returnToBrowser(session, NotebookDisposition.discard, send), isFalse);
+    expect(harness.notes.single.core.writes, isEmpty);
+    workspace.endInboxBarrier(foreground: false);
+    expect(session.value.inboxBlocked, isFalse);
+    expect(session.value.editor, same(editor));
+    expect(editor.value.text, contains('not lost'));
+    expect(harness.notes.single.core.writes, isEmpty);
+  });
+
+  test('workspace inbox scan joins the selected writer then preserves its quarantine', () async {
+    final harness = _Harness();
+    final workspace = harness.workspace;
+    final session = await harness.edit();
+    final editor = session.value.editor!;
+    final core = harness.notes.single.core;
+    void send(Map<String, Object?> message) => protocol.answer(editor, message);
+    protocol.insert(editor, 'first');
+    final writing = session.write(send);
+    await protocol.turn();
+    protocol.insert(editor, 'newest');
+    var joined = false;
+    final barrier = workspace.beginInboxBarrier();
+    unawaited(barrier.then((_) { joined = true; }));
+    expect(await session.write(send), isFalse);
+    await protocol.turn();
+    expect(joined, isFalse);
+    core.writes.single.completion.complete(CoreWriteResult(revision: 1, baseHash: 'b' * 64));
+    expect(await writing, isTrue);
+    await barrier;
+    expect(session.value.draftRevision, 2);
+    workspace.setTransferBlock('Unresolved inbox target');
+    workspace.endInboxBarrier(foreground: true);
+    expect(await session.write(send), isFalse);
+    expect(session.value.editor, same(editor));
+    expect(editor.value.text, contains('firstnewest'));
+    expect(session.value.dirty, isTrue);
+    expect(core.writes, hasLength(1));
+    expect(workspace.value.error, 'Unresolved inbox target');
+  });
+
   test(
     'resource ambiguity retires NOTE without opening a normal catalog',
     () async {
@@ -521,6 +703,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );
@@ -679,7 +862,7 @@ void main() {
       );
       final library = _Library()
         ..value = NotebookLibraryState(
-          stale: false,
+          stale: false, inboxReady: true,
           exportState: NotebookExportState(
             prepared: prepared,
             message: 'ZIP retained for retry.',
@@ -704,7 +887,7 @@ void main() {
       await tester.tap(find.text('Discard export'));
       await tester.pumpAndSettle();
       library.value = NotebookLibraryState(
-        stale: false,
+        stale: false, inboxReady: true,
         exportState: NotebookExportState(prepared: replacement),
       );
       await tester.tap(find.text('Discard'));
@@ -716,7 +899,7 @@ void main() {
         reason: 'Unrecognized export data.',
       );
       library.value = const NotebookLibraryState(
-        stale: false,
+        stale: false, inboxReady: true,
         exportState: NotebookExportState(leftovers: [leftover]),
       );
       await tester.pumpAndSettle();
@@ -725,7 +908,7 @@ void main() {
       );
       await tester.pumpAndSettle();
       library.value = NotebookLibraryState(
-        stale: false,
+        stale: false, inboxReady: true,
         exportState: NotebookExportState(
           phase: NotebookExportPhase.saving,
           prepared: replacement,
@@ -913,6 +1096,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () => returns++,
+            onShowInbox: () {},
           ),
         ),
       );
@@ -991,6 +1175,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () => returns++,
+            onShowInbox: () {},
           ),
         ),
       );
@@ -1188,7 +1373,7 @@ void main() {
       await first.workspace.initialize();
       await second.workspace.initialize();
       final library = _Library()..value = NotebookLibraryState(stale: false);
-      await tester.pumpWidget(VNoteApp(library: library));
+      await _pumpVNoteApp(tester, library);
       expect(find.byType(NotebookLibraryScreen), findsOneWidget);
       library.value = NotebookLibraryState(
         workspace: first.workspace,
@@ -1227,6 +1412,74 @@ void main() {
     },
   );
 
+  for (final locale in ['en', 'zh']) {
+    testWidgets('restart-required editor keeps only safe recovery actions in $locale', (tester) async {
+      tester.view.physicalSize = const Size(1200, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      const localeChannel = MethodChannel('vnote.mobile/share_inbox');
+      final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(localeChannel, (call) async => call.method == 'getLocale' ? locale : null);
+      String? copied;
+      messenger.setMockMethodCallHandler(SystemChannels.platform, (call) async {
+        if (call.method == 'Clipboard.setData') copied = (call.arguments as Map)['text'] as String;
+        return null;
+      });
+      addTearDown(() {
+        messenger.setMockMethodCallHandler(localeChannel, null);
+        messenger.setMockMethodCallHandler(SystemChannels.platform, null);
+      });
+      final failure = StateError('Native CLOSED failed');
+      final core = protocol.RetiringCloseCore(failure);
+      final harness = _Harness(widgetTest: true)..noteFactory = () async => core;
+      final session = await harness.edit();
+      final editor = session.value.editor!;
+      protocol.insert(editor, 'copyable restart source');
+      expect(await session.close(NotebookDisposition.retain,
+        (message) => protocol.answer(editor, message)), isFalse);
+      expect(core.retired, isTrue);
+      final library = _Library()..value = NotebookLibraryState(workspace: harness.workspace, stale: false);
+      addTearDown(library.dispose);
+      await tester.runAsync(() => AppStrings.delegate.load(Locale(locale)));
+      await _pumpVNoteApp(tester, library);
+      expect(find.byType(NotebookEditor), findsOneWidget);
+      final strings = AppStrings.of(tester.element(find.byType(NotebookEditor)));
+      final message = strings.message(NotebookSession.ownerRestartRequiredMessage);
+      if (locale == 'zh') expect(message, isNot(NotebookSession.ownerRestartRequiredMessage));
+      expect(find.text(message), findsOneWidget);
+      for (final action in ['Recover editor view', 'Retry save / reconcile', 'Retry open', 'Reopen', 'Save now', 'Save and close']) {
+        expect(find.text(strings.text(action)), findsNothing);
+      }
+      expect(find.byTooltip(strings.text('Return to notebook')), findsNothing);
+      expect(find.text(strings.text('Foreground autosave is enabled. Only acknowledged durable prefixes survive supported process restart.')), findsNothing);
+      final copy = find.text(strings.text('Copy received source'));
+      await tester.ensureVisible(copy);
+      await tester.tap(copy);
+      await tester.pump();
+      expect(copied, editor.value.text);
+      await tester.binding.handlePopRoute();
+      await tester.pump();
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(find.byType(NotebookEditor), findsOneWidget);
+      // Presentation errors may coexist, but may not hide the required action.
+      session.value = NotebookSessionState(editor: editor, note: session.value.note,
+        restartRequired: true, durabilityError: 'Other durability failure', syncError: 'Other sync failure');
+      editor.reportTransportError('Late transport failure');
+      await tester.pump();
+      expect(find.text(message), findsOneWidget);
+      expect(find.text('Other durability failure'), findsNothing);
+      expect(find.text('Other sync failure'), findsNothing);
+      expect(core.rejectedAdmissions, 0);
+      expect(harness.noteIds, hasLength(1));
+      expect(harness.workspace.value.session, same(session));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await expectLater(harness.workspace.shutdown(), throwsA(same(failure)));
+      session.dispose();
+      await harness.drafts.shutdown();
+    });
+  }
+
   testWidgets(
     'editor Cancel retains input and Discard returns to the browser before Notebooks',
     (tester) async {
@@ -1237,7 +1490,7 @@ void main() {
           workspace: harness.workspace,
           stale: false,
         );
-      await tester.pumpWidget(VNoteApp(library: library));
+      await _pumpVNoteApp(tester, library);
       final session = await harness.edit();
       protocol.insert(session.value.editor!, 'Retain on Cancel');
       await tester.pumpAndSettle();
@@ -2147,6 +2400,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );
@@ -2224,6 +2478,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );
@@ -2290,6 +2545,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );
@@ -2375,6 +2631,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );
@@ -2454,6 +2711,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );
@@ -2519,6 +2777,7 @@ void main() {
             dark: false,
             onThemeChanged: (_) {},
             onShowNotebooks: () {},
+            onShowInbox: () {},
           ),
         ),
       );

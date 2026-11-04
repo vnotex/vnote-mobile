@@ -224,6 +224,61 @@ void main() {
     await temp.delete(recursive: true);
   });
 
+  test('inbox mkdir interruption resumes the same operation without invoking a picker', () async {
+    final operation = 'a' * 32;
+    final inboxId = 'b' * 32;
+    await File(p.join(root, 'inbox-$operation.json')).writeAsString(jsonEncode({
+      'version': 1, 'id': operation, 'scope': 'cohort', 'inboxId': inboxId,
+      'target': target.marker(operation),
+    }), flush: true);
+    await Directory(p.join(root, operation)).create();
+    await importer.initialize();
+    expect(importer.value.current!.allocationComplete, isFalse);
+    final allocated = await importer.allocateInbox(inboxId: inboxId,
+      operationId: operation, target: target);
+    expect(allocated!.id, operation);
+    expect(allocated.allocationComplete, isTrue);
+    final captured = await importer.retry(allocated, build: build, apply: apply,
+      retained: () => copy(operation, DocumentImportKind.folder));
+    expect(captured!.id, operation);
+    expect(captured.stage, TransferStage.source);
+    expect(provider.picks, 0);
+    expect(await File(p.join(root, operation, 'source.json')).exists(), isTrue);
+  });
+
+  test('failed inbox disposition retains committed proof and generated cohort identity', () async {
+    final operation = 'c' * 32;
+    await importer.initialize();
+    var attempt = await importer.allocateInbox(inboxId: 'd' * 32,
+      operationId: operation, target: target);
+    attempt = await importer.retry(attempt!, build: build, apply: apply,
+      retained: () => copy(operation, DocumentImportKind.folder));
+    attempt = await importer.prepare(attempt!, build);
+    final cohortId = attempt!.cohortId;
+    await importer.apply(attempt, apply);
+    final committed = importer.value.current!;
+    expect(committed.stage, TransferStage.committed);
+    importer.authorizeDiscard = (_) async => throw StateError('Tombstone storage unavailable.');
+    await importer.discard(committed, recover: apply);
+    expect(await File(p.join(root, operation, 'committed.json')).exists(), isTrue);
+    expect(importer.value.current!.cohortId, cohortId);
+    expect(builds, 1);
+    expect(provider.picks, 0);
+    final restarted = controller();
+    await restarted.initialize();
+    expect(restarted.value.current!.stage, TransferStage.committed);
+    expect(restarted.value.current!.cohortId, cohortId);
+    var tombstones = 0;
+    restarted.authorizeDiscard = (proof) async {
+      expect(proof.stage, TransferStage.committed);
+      tombstones++;
+    };
+    await restarted.discard(restarted.value.current!, recover: apply);
+    expect(tombstones, 1);
+    expect(await Directory(p.join(root, operation)).exists(), isFalse);
+    expect(await Directory(p.join(book, target.folderName)).exists(), isTrue);
+  });
+
   test('real raw cohort retains full layout and sealed IDs across restart and commit', () async {
     final captured = await source();
     final prepared = await importer.prepare(captured, build);

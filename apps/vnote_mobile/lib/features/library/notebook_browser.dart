@@ -4,6 +4,8 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
+import '../../l10n/app_strings.dart';
+import '../../l10n/locale_settings.dart';
 import '../../services/notebook_workspace.dart';
 import '../../services/document_transfer_platform.dart';
 import '../about/license_sheet.dart';
@@ -13,6 +15,7 @@ import '../../services/notebook_sync.dart';
 class NotebookBrowser extends StatefulWidget {
   const NotebookBrowser({
     required this.workspace,
+    required this.onShowInbox,
     required this.dark,
     required this.onThemeChanged,
     required this.onShowNotebooks,
@@ -22,6 +25,7 @@ class NotebookBrowser extends StatefulWidget {
   });
 
   final NotebookWorkspace workspace;
+  final VoidCallback onShowInbox;
   final bool dark;
   final ValueChanged<bool> onThemeChanged;
   final VoidCallback onShowNotebooks;
@@ -65,7 +69,7 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
   Future<void> _create({required bool folder}) async {
     final directory = _workspace.value.directory!;
     final name = await _nameDialog(
-      title: folder ? 'New folder' : 'New note',
+      title: folder ? AppStrings.of(context).text('New folder') : AppStrings.of(context).text('New note'),
       note: !folder,
     );
     if (name == null || !_stillCurrent(directory)) return;
@@ -86,16 +90,11 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
     final name = await showDialog<String>(
       context: context,
       builder: (context) => _NameDialog(
-        title: 'Import into ${directory.path == '.' ? '/' : directory.path}',
-        initial: 'Imported files',
+        title: AppStrings.of(context).text('Import into {value}', {'value': (directory.path == '.' ? '/' : directory.path).toString()}),
+        initial: AppStrings.of(context).text('Imported files'),
         note: false,
         detail:
-            'Everything selected goes into one new child folder with this name. '
-            'Original paths and bytes are preserved; new node IDs are generated. '
-            'VNote-ID links are not rewritten and remote links are not fetched. '
-            'Choose a containing folder or ZIP for Markdown with sibling assets. '
-            'Notebook backups use Import notebook instead. The library will show '
-            'the retained source before you prepare and apply it.',
+            AppStrings.of(context).text('Everything selected goes into one new child folder with this name. Original paths and bytes are preserved; new node IDs are generated. VNote-ID links are not rewritten and remote links are not fetched. Choose a containing folder or ZIP for Markdown with sibling assets. Notebook backups use Import notebook instead. The library will show the retained source before you prepare and apply it.'),
       ),
     );
     if (name == null || !_stillCurrent(directory) || widget.transferReserved) {
@@ -107,7 +106,7 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
   Future<void> _renameNotebook(CoreDirectory directory) async {
     if (!_stillCurrent(directory)) return;
     final name = await _nameDialog(
-      title: 'Rename notebook',
+      title: AppStrings.of(context).text('Rename notebook'),
       initial: directory.notebookName,
       notebook: true,
     );
@@ -126,10 +125,10 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
         );
         if (saved == true && mounted) {
           ScaffoldMessenger.of(context)
-              .showSnackBar(const SnackBar(content: Text('Tags saved.')));
+              .showSnackBar(SnackBar(content: Text(AppStrings.of(context).text('Tags saved.'))));
         }
       case 'rename':
-        final name = await _nameDialog(title: 'Rename', initial: entry.name);
+        final name = await _nameDialog(title: AppStrings.of(context).text('Rename'), initial: entry.name);
         if (name != null && _stillCurrent(directory)) {
           await _workspace.rename(entry, name);
         }
@@ -148,21 +147,19 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
       case 'delete':
         final confirmed = await showDialog<bool>(
           context: context,
-          builder: (context) => AlertDialog(
-            title: Text('Delete “${entry.name}”?'),
+          builder: (context) => AlertDialog(scrollable: true, 
+            title: Text(AppStrings.of(context).text('Delete “{name}”?', {'name': (entry.name).toString()})),
             content: Text(
-              '${entry.isFolder ? 'This includes the folder and its contents. ' : ''}'
-              'The core tries to recycle deleted content, but may permanently '
-              'delete it if recycling fails. This app does not provide undo or restore.',
+              AppStrings.of(context).text('{value}The core tries to recycle deleted content, but may permanently delete it if recycling fails. This app does not provide undo or restore.', {'value': (entry.isFolder ? AppStrings.of(context).text('This includes the folder and its contents. ') : '').toString()}),
             ),
             actions: [
               TextButton(
                 onPressed: () => Navigator.pop(context, false),
-                child: const Text('Cancel'),
+                child: Text(AppStrings.of(context).text('Cancel')),
               ),
               FilledButton(
                 onPressed: () => Navigator.pop(context, true),
-                child: const Text('Delete'),
+                child: Text(AppStrings.of(context).text('Delete')),
               ),
             ],
           ),
@@ -184,11 +181,11 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
       final messages = <String>[
         if (state.error != null) state.error!,
         if (mutation != null && mutation.applied)
-          mutation.refreshError == null ? 'Change applied.' : 'Change applied, but the folder could not be refreshed. It was not rolled back.',
-        if (mutation?.error != null) 'Change failed: ${mutation!.error}',
+          mutation.refreshError == null ? AppStrings.of(context).text('Change applied.') : AppStrings.of(context).text('Change applied, but the folder could not be refreshed. It was not rolled back.'),
+        if (mutation?.error != null) AppStrings.of(context).text('Change failed: {error}', {'error': (AppStrings.of(context).message(mutation!.error)).toString()}),
         if (mutation?.refreshError != null)
-          'Refresh failed: ${mutation!.refreshError}',
-        if (state.stale && directory != null) 'This is the last known folder listing. Refresh before changing or opening notes.',
+          AppStrings.of(context).text('Refresh failed: {refreshError}', {'refreshError': (AppStrings.of(context).message(mutation!.refreshError)).toString()}),
+        if (state.stale && directory != null) AppStrings.of(context).text('This is the last known folder listing. Refresh before changing or opening notes.'),
       ];
       return PopScope<Object?>(
         canPop: !_showSearch && !state.busy && directory?.parentId == null,
@@ -202,32 +199,34 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
         },
         child: Scaffold(
           appBar: AppBar(
-            title: Text(directory?.notebookName ?? 'Notebook'),
+            title: Text(directory?.notebookName ?? AppStrings.of(context).text('Notebook')),
             leading: IconButton(
-              tooltip: 'Notebooks',
+              tooltip: AppStrings.of(context).text('Notebooks'),
               onPressed: !state.busy && !state.closed ? widget.onShowNotebooks : null,
               icon: const Icon(Icons.library_books_outlined),
             ),
             actions: [
-              IconButton(tooltip: 'WebDAV synchronization',
+              const LanguageMenu(),
+              SizedBox(width: 144, child: SingleChildScrollView(scrollDirection: Axis.horizontal, child: Row(children: [
+              IconButton(tooltip: AppStrings.of(context).text('WebDAV synchronization'),
                 onPressed: state.closed ? null : () => showNotebookSyncPanel(context, _workspace.synchronization),
                 icon: const Icon(Icons.sync)),
               IconButton(
-                tooltip: 'Rename notebook',
+                tooltip: AppStrings.of(context).text('Rename notebook'),
                 onPressed: state.canMutate
                     ? () => _renameNotebook(directory!)
                     : null,
                 icon: const Icon(Icons.drive_file_rename_outline),
               ),
               IconButton(
-                tooltip: 'Search notebook',
+                tooltip: AppStrings.of(context).text('Search notebook'),
                 onPressed: state.canMutate && !_showSearch
                     ? () => setState(() => _showSearch = true)
                     : null,
                 icon: const Icon(Icons.search),
               ),
               IconButton(
-                tooltip: widget.dark ? 'Use light theme' : 'Use dark theme',
+                tooltip: widget.dark ? AppStrings.of(context).text('Use light theme') : AppStrings.of(context).text('Use dark theme'),
                 onPressed: () => widget.onThemeChanged(!widget.dark),
                 icon: Icon(
                   widget.dark
@@ -236,22 +235,25 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                 ),
               ),
               IconButton(
-                tooltip: 'Legal notices',
+                tooltip: AppStrings.of(context).text('Legal notices'),
                 onPressed: () =>
                     showNotebookLicenses(context, _workspace.nativeNotices),
                 icon: const Icon(Icons.info_outline),
               ),
+              ]))),
             ],
           ),
           body: SafeArea(
-            child: Column(
+            child: LayoutBuilder(builder: (context, constraints) => Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
+                ConstrainedBox(constraints: BoxConstraints(maxHeight: constraints.maxHeight * 0.45),
+                  child: SingleChildScrollView(child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
                 if (state.busy) const LinearProgressIndicator(),
                 ValueListenableBuilder<NotebookSyncState>(valueListenable: _workspace.synchronization,
                   builder: (context, sync, _) => TextButton.icon(
                     onPressed: () => showNotebookSyncPanel(context, _workspace.synchronization),
-                    icon: const Icon(Icons.cloud_outlined), label: Text(notebookSyncStatus(sync)))),
+                    icon: const Icon(Icons.cloud_outlined), label: Text(notebookSyncStatus(context, sync)))),
                 if (!_showSearch)
                   Padding(
                     padding: const EdgeInsets.symmetric(
@@ -260,7 +262,7 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                     ),
                     child: SelectableText(
                       directory == null
-                          ? 'Managed notebook'
+                          ? AppStrings.of(context).text('Managed notebook')
                           : directory.path == '.'
                           ? '/'
                           : directory.path,
@@ -270,8 +272,13 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                   Wrap(
                     crossAxisAlignment: WrapCrossAlignment.center,
                     children: [
+                      TextButton.icon(
+                        onPressed: state.closed ? null : widget.onShowInbox,
+                        icon: const Icon(Icons.move_to_inbox_outlined),
+                        label: Text(AppStrings.of(context).text('Incoming shares')),
+                      ),
                       IconButton(
-                        tooltip: 'Up one folder',
+                        tooltip: AppStrings.of(context).text('Up one folder'),
                         onPressed:
                             state.canBrowse && directory?.parentId != null
                             ? () => _workspace.navigate(directory!.parentId)
@@ -282,10 +289,10 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                         onPressed: state.canBrowse
                             ? () => _workspace.navigate(null)
                             : null,
-                        child: const Text('Root'),
+                        child: Text(AppStrings.of(context).text('Root')),
                       ),
                       IconButton(
-                        tooltip: 'Refresh',
+                        tooltip: AppStrings.of(context).text('Refresh'),
                         onPressed: state.canBrowse ? _workspace.refresh : null,
                         icon: const Icon(Icons.refresh),
                       ),
@@ -294,36 +301,39 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                             ? () => _create(folder: false)
                             : null,
                         icon: const Icon(Icons.note_add_outlined),
-                        label: const Text('New note'),
+                        label: Text(AppStrings.of(context).text('New note')),
                       ),
                       TextButton.icon(
                         onPressed: state.canMutate
                             ? () => _create(folder: true)
                             : null,
                         icon: const Icon(Icons.create_new_folder_outlined),
-                        label: const Text('New folder'),
+                        label: Text(AppStrings.of(context).text('New folder')),
                       ),
                       PopupMenuButton<DocumentImportKind>(
-                        tooltip: 'Import files into this folder',
+                        tooltip: AppStrings.of(context).text('Import files into this folder'),
                         enabled: state.canMutate && !widget.transferReserved,
                         onSelected: _importFiles,
-                        itemBuilder: (_) => const [
+                        itemBuilder: (_) => [
                           PopupMenuItem(
                             value: DocumentImportKind.file,
-                            child: Text('Import file'),
+                            child: Text(AppStrings.of(context).text('Import file')),
                           ),
                           PopupMenuItem(
                             value: DocumentImportKind.zip,
-                            child: Text('Import files ZIP'),
+                            child: Text(AppStrings.of(context).text('Import files ZIP')),
                           ),
                           PopupMenuItem(
                             value: DocumentImportKind.folder,
-                            child: Text('Import files folder'),
+                            child: Text(AppStrings.of(context).text('Import files folder')),
                           ),
                         ],
-                        child: const Padding(
-                          padding: EdgeInsets.all(12),
-                          child: Text('Import files'),
+                        child: ConstrainedBox(
+                          constraints: const BoxConstraints(minHeight: 48, minWidth: 48),
+                          child: Padding(
+                          padding: const EdgeInsets.all(12),
+                          child: Text(AppStrings.of(context).text('Import files')),
+                          ),
                         ),
                       ),
                     ],
@@ -333,9 +343,10 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                     constraints: const BoxConstraints(maxHeight: 180),
                     child: SingleChildScrollView(
                       padding: const EdgeInsets.all(12),
-                      child: SelectableText(messages.join('\n')),
+                      child: SelectableText(messages.map(AppStrings.of(context).message).join('\n')),
                     ),
                   ),
+                ]))),
                 Expanded(
                   child: _showSearch
                       ? _SearchPanel(
@@ -346,19 +357,19 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                       : directory == null
                       ? Center(
                           child: Text(
-                            state.busy ? 'Opening managed notebook…' : 'The notebook could not open. Use Refresh to retry.',
+                            state.busy ? AppStrings.of(context).text('Opening managed notebook…') : AppStrings.of(context).text('The notebook could not open. Use Refresh to retry.'),
                           ),
                         )
                       : directory.entries.isEmpty
-                      ? const Center(child: Text('This folder is empty.'))
+                      ? Center(child: Text(AppStrings.of(context).text('This folder is empty.')))
                       : ListView.builder(
                           itemCount: directory.entries.length,
                           itemBuilder: (context, index) {
                             final entry = directory.entries[index];
                             final markers = <String>[
-                              if (!entry.exists) 'Missing content',
-                              if (entry.encrypted) 'Encrypted',
-                              if (entry.isFolder) 'Folder',
+                              if (!entry.exists) AppStrings.of(context).text('Missing content'),
+                              if (entry.encrypted) AppStrings.of(context).text('Encrypted'),
+                              if (entry.isFolder) AppStrings.of(context).text('Folder'),
                             ];
                             return ListTile(
                               key: ValueKey(entry.id),
@@ -383,26 +394,26 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                                       }
                                     },
                               trailing: PopupMenuButton<String>(
-                                tooltip: 'Actions for ${entry.name}',
+                                tooltip: AppStrings.of(context).text('Actions for {name}', {'name': (entry.name).toString()}),
                                 enabled: state.canMutate,
                                 onSelected: (action) => _action(entry, action),
                                 itemBuilder: (context) => [
                                   if (!entry.isFolder)
-                                    const PopupMenuItem(
+                                    PopupMenuItem(
                                       value: 'tags',
-                                      child: Text('Tags'),
+                                      child: Text(AppStrings.of(context).text('Tags')),
                                     ),
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'rename',
-                                    child: Text('Rename'),
+                                    child: Text(AppStrings.of(context).text('Rename')),
                                   ),
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'move',
-                                    child: Text('Move'),
+                                    child: Text(AppStrings.of(context).text('Move')),
                                   ),
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'delete',
-                                    child: Text('Delete'),
+                                    child: Text(AppStrings.of(context).text('Delete')),
                                   ),
                                 ],
                               ),
@@ -411,7 +422,7 @@ class _NotebookBrowserState extends State<NotebookBrowser> {
                         ),
                 ),
               ],
-            ),
+            )),
           ),
         ),
       );
@@ -520,8 +531,8 @@ class _SearchPanelState extends State<_SearchPanel> {
             leading: const Icon(Icons.description_outlined),
             title: Text(hit.path),
             subtitle: hit.line == 0
-                ? const Text('Matches selected tag')
-                : Text('Line ${hit.line}: ${hit.snippet}'),
+                ? Text(AppStrings.of(context).text('Matches selected tag'))
+                : Text(AppStrings.of(context).text('Line {line}: {snippet}', {'line': (hit.line).toString(), 'snippet': (hit.snippet).toString()})),
             onTap: state.canMutate
                 ? () => widget.workspace.openSearchHit(currentResult, hit)
                 : null,
@@ -530,9 +541,8 @@ class _SearchPanelState extends State<_SearchPanel> {
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            const Text(
-              'Search saved Markdown and text notes throughout this notebook. '
-              'Unsaved editor changes are not searched.',
+            Text(
+              AppStrings.of(context).text('Search saved Markdown and text notes throughout this notebook. Unsaved editor changes are not searched.'),
             ),
             const SizedBox(height: 12),
             TextField(
@@ -540,13 +550,13 @@ class _SearchPanelState extends State<_SearchPanel> {
               enabled: editable,
               autocorrect: false,
               textInputAction: TextInputAction.search,
-              decoration: const InputDecoration(labelText: 'Search text'),
+              decoration: InputDecoration(labelText: AppStrings.of(context).text('Search text')),
               onChanged: (_) => widget.workspace.clearSearch(),
               onSubmitted: (_) => _submit(),
             ),
             CheckboxListTile(
               contentPadding: EdgeInsets.zero,
-              title: const Text('Case sensitive'),
+              title: Text(AppStrings.of(context).text('Case sensitive')),
               value: _caseSensitive,
               onChanged: editable
                   ? (value) {
@@ -556,18 +566,18 @@ class _SearchPanelState extends State<_SearchPanel> {
                   : null,
             ),
             InputDecorator(
-              decoration: const InputDecoration(labelText: 'Filter by tag'),
+              decoration: InputDecoration(labelText: AppStrings.of(context).text('Filter by tag')),
               child: DropdownButtonHideUnderline(
                 child: DropdownButton<String>(
                   value: _tag ?? '',
                   isExpanded: true,
                   items: [
-                    const DropdownMenuItem(value: '', child: Text('Any tag')),
+                    DropdownMenuItem(value: '', child: Text(AppStrings.of(context).text('Any tag'))),
                     for (final tag in _tags?.tags ?? <CoreTag>[])
                       DropdownMenuItem(
                         value: tag.name,
                         child: Text(
-                          _tagLabel(tag),
+                          _tagLabel(context, tag),
                           overflow: TextOverflow.ellipsis,
                         ),
                       ),
@@ -581,12 +591,12 @@ class _SearchPanelState extends State<_SearchPanel> {
                 ),
               ),
             ),
-            if (_loadingTags) const Text('Loading tag filters…'),
+            if (_loadingTags) Text(AppStrings.of(context).text('Loading tag filters…')),
             if (_tagsError != null) ...[
-              SelectableText('Tag filters could not load: $_tagsError'),
+              SelectableText(AppStrings.of(context).text('Tag filters could not load: {_tagsError}', {'_tagsError': (AppStrings.of(context).message(_tagsError)).toString()})),
               TextButton(
                 onPressed: state.canMutate ? _loadTags : null,
-                child: const Text('Retry tag filters'),
+                child: Text(AppStrings.of(context).text('Retry tag filters')),
               ),
             ],
             Wrap(
@@ -595,48 +605,48 @@ class _SearchPanelState extends State<_SearchPanel> {
                 FilledButton.icon(
                   onPressed: state.canMutate && !_loadingTags ? _submit : null,
                   icon: const Icon(Icons.search),
-                  label: const Text('Search'),
+                  label: Text(AppStrings.of(context).text('Search')),
                 ),
                 if (state.searching)
                   TextButton(
                     onPressed: state.searchCancelled
                         ? null
                         : widget.workspace.cancelSearch,
-                    child: const Text('Cancel search'),
+                    child: Text(AppStrings.of(context).text('Cancel search')),
                   ),
                 TextButton(
                   onPressed: _clear,
-                  child: const Text('Clear search'),
+                  child: Text(AppStrings.of(context).text('Clear search')),
                 ),
                 TextButton(
                   onPressed: widget.onClose,
-                  child: const Text('Back to folders'),
+                  child: Text(AppStrings.of(context).text('Back to folders')),
                 ),
               ],
             ),
             if (state.searching)
               Text(
                 state.searchCancelled
-                    ? 'Cancelling search…'
-                    : 'Searching saved notes…',
+                    ? AppStrings.of(context).text('Cancelling search…')
+                    : AppStrings.of(context).text('Searching saved notes…'),
               )
             else if (state.searchCancelled)
-              const Text('Search cancelled.'),
+              Text(AppStrings.of(context).text('Search cancelled.')),
             if (state.searchError != null)
-              SelectableText('Search failed: ${state.searchError}'),
+              SelectableText(AppStrings.of(context).text('Search failed: {searchError}', {'searchError': (AppStrings.of(context).message(state.searchError)).toString()})),
             if (result != null) ...[
               Text(
                 result.matches.isEmpty
-                    ? 'No matching notes.'
-                    : '${result.matches.length} matching notes.',
+                    ? AppStrings.of(context).text('No matching notes.')
+                    : AppStrings.of(context).text('{length} matching notes.', {'length': (result.matches.length).toString()}),
               ),
               if (result.limited)
-                const Text(
-                  'Results are incomplete: the search limit was reached. Narrow your search.',
+                Text(
+                  AppStrings.of(context).text('Results are incomplete: the search limit was reached. Narrow your search.'),
                 ),
               if (result.skipped != 0)
                 Text(
-                  '${result.skipped} unsupported or unavailable notes were skipped.',
+                  AppStrings.of(context).text('{skipped} unsupported or unavailable notes were skipped.', {'skipped': (result.skipped).toString()}),
                 ),
             ],
           ],
@@ -646,8 +656,8 @@ class _SearchPanelState extends State<_SearchPanel> {
   }
 }
 
-String _tagLabel(CoreTag tag) =>
-    tag.parent.isEmpty ? tag.name : '${tag.name} (parent: ${tag.parent})';
+String _tagLabel(BuildContext context, CoreTag tag) =>
+    tag.parent.isEmpty ? tag.name : AppStrings.of(context).text('{name} (parent: {parent})', {'name': (tag.name).toString(), 'parent': (tag.parent).toString()});
 
 class _TagDialog extends StatefulWidget {
   const _TagDialog({required this.workspace, required this.entry});
@@ -703,7 +713,7 @@ class _TagDialogState extends State<_TagDialog> {
     final name = await showDialog<String>(
       context: context,
       builder: (context) =>
-          const _NameDialog(title: 'New tag', initial: '', note: false),
+          _NameDialog(title: AppStrings.of(context).text('New tag'), initial: '', note: false),
     );
     if (name == null || !mounted) return;
     await _write(createName: name);
@@ -756,9 +766,9 @@ class _TagDialogState extends State<_TagDialog> {
                   : '${createName == null ? 'Tags saved' : 'Tag created'}, but tags could not be refreshed. The change was not rolled back.'
             : null;
         final errors = [
-          if (result.error != null) 'Change failed: ${result.error}',
+          if (result.error != null) AppStrings.of(context).text('Change failed: {error}', {'error': (AppStrings.of(context).message(result.error)).toString()}),
           if (result.refreshError != null)
-            'Refresh failed: ${result.refreshError}',
+            AppStrings.of(context).text('Refresh failed: {refreshError}', {'refreshError': (AppStrings.of(context).message(result.refreshError)).toString()}),
         ];
         _error = errors.isEmpty ? null : errors.join('\n');
       });
@@ -793,8 +803,8 @@ class _TagDialogState extends State<_TagDialog> {
           !_busy && tags != null && _error == null && state.canMutate;
       return PopScope<Object?>(
         canPop: !_busy,
-        child: AlertDialog(
-          title: Text('Tags for “${widget.entry.name}”'),
+        child: AlertDialog(scrollable: true, 
+          title: Text(AppStrings.of(context).text('Tags for “{name}”', {'name': (widget.entry.name).toString()})),
           content: SizedBox(
             width: 420,
             height: 360,
@@ -807,7 +817,7 @@ class _TagDialogState extends State<_TagDialog> {
                     constraints: const BoxConstraints(maxHeight: 140),
                     child: SingleChildScrollView(
                       child: SelectableText(
-                        [_message, _error].whereType<String>().join('\n'),
+                        [_message, _error].whereType<String>().map(AppStrings.of(context).message).join('\n'),
                       ),
                     ),
                   ),
@@ -815,11 +825,11 @@ class _TagDialogState extends State<_TagDialog> {
                   children: [
                     TextButton(
                       onPressed: canSave ? _create : null,
-                      child: const Text('Create tag'),
+                      child: Text(AppStrings.of(context).text('Create tag')),
                     ),
                     TextButton(
                       onPressed: !_busy && state.canMutate ? _load : null,
-                      child: const Text('Reload tags'),
+                      child: Text(AppStrings.of(context).text('Reload tags')),
                     ),
                   ],
                 ),
@@ -827,11 +837,11 @@ class _TagDialogState extends State<_TagDialog> {
                   child: tags == null
                       ? Text(
                           _busy
-                              ? 'Loading tags…'
-                              : 'Complete tag data is required before saving.',
+                              ? AppStrings.of(context).text('Loading tags…')
+                              : AppStrings.of(context).text('Complete tag data is required before saving.'),
                         )
                       : names.isEmpty
-                      ? const Text('No tags yet. Create a tag to get started.')
+                      ? Text(AppStrings.of(context).text('No tags yet. Create a tag to get started.'))
                       : ListView.builder(
                           itemCount: names.length,
                           itemBuilder: (context, index) {
@@ -840,11 +850,11 @@ class _TagDialogState extends State<_TagDialog> {
                             return CheckboxListTile(
                               title: Text(name),
                               subtitle: definition == null
-                                  ? const Text(
-                                      'Existing assignment without a definition; kept unless unchecked.',
+                                  ? Text(
+                                      AppStrings.of(context).text('Existing assignment without a definition; kept unless unchecked.'),
                                     )
                                   : definition.parent.isNotEmpty
-                                  ? Text('Parent: ${definition.parent}')
+                                  ? Text(AppStrings.of(context).text('Parent: {parent}', {'parent': (definition.parent).toString()}))
                                   : null,
                               value: _selected.contains(name),
                               onChanged: canSave
@@ -868,11 +878,11 @@ class _TagDialogState extends State<_TagDialog> {
           actions: [
             TextButton(
               onPressed: _busy ? null : () => Navigator.pop(context),
-              child: const Text('Cancel'),
+              child: Text(AppStrings.of(context).text('Cancel')),
             ),
             FilledButton(
               onPressed: canSave ? () => _write() : null,
-              child: const Text('Save'),
+              child: Text(AppStrings.of(context).text('Save')),
             ),
           ],
         ),
@@ -917,7 +927,7 @@ class _NameDialogState extends State<_NameDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
+  Widget build(BuildContext context) => AlertDialog(scrollable: true, 
     title: Text(widget.title),
     content: SingleChildScrollView(
       child: Column(
@@ -935,16 +945,16 @@ class _NameDialogState extends State<_NameDialog> {
               autofocus: true,
               autocorrect: false,
               decoration: InputDecoration(
-                labelText: 'Name',
+                labelText: AppStrings.of(context).text('Name'),
                 helperMaxLines: widget.notebook ? 3 : null,
                 helperText: widget.note
-                    ? 'Include .md (Markdown) or .txt (plain text).'
+                    ? AppStrings.of(context).text('Include .md (Markdown) or .txt (plain text).')
                     : widget.notebook
-                    ? 'Display name only. The notebook folder is not renamed.'
+                    ? AppStrings.of(context).text('Display name only. The notebook folder is not renamed.')
                     : null,
               ),
               validator: (value) => value == null || value.trim().isEmpty
-                  ? 'Enter a name.'
+                  ? AppStrings.of(context).text('Enter a name.')
                   : null,
               onFieldSubmitted: (_) => _submit(),
             ),
@@ -955,9 +965,9 @@ class _NameDialogState extends State<_NameDialog> {
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
+        child: Text(AppStrings.of(context).text('Cancel')),
       ),
-      FilledButton(onPressed: _submit, child: const Text('Save')),
+      FilledButton(onPressed: _submit, child: Text(AppStrings.of(context).text('Save'))),
     ],
   );
 }
@@ -1022,8 +1032,8 @@ class _FolderPickerState extends State<_FolderPicker> {
     final folders =
         directory?.entries.where((entry) => entry.isFolder).toList() ??
         <CoreEntry>[];
-    return AlertDialog(
-      title: Text('Move “${widget.source.name}”'),
+    return AlertDialog(scrollable: true, 
+      title: Text(AppStrings.of(context).text('Move “{name}”', {'name': (widget.source.name).toString()})),
       content: SizedBox(
         width: 420,
         height: 360,
@@ -1038,23 +1048,23 @@ class _FolderPickerState extends State<_FolderPicker> {
               children: [
                 TextButton(
                   onPressed: _loading ? null : () => _load(null),
-                  child: const Text('Root'),
+                  child: Text(AppStrings.of(context).text('Root')),
                 ),
                 TextButton(
                   onPressed: !_loading && directory?.parentId != null
                       ? () => _load(directory!.parentId)
                       : null,
-                  child: const Text('Up'),
+                  child: Text(AppStrings.of(context).text('Up')),
                 ),
                 TextButton(
                   onPressed: _loading ? null : () => _load(_requestedFolder),
-                  child: const Text('Refresh'),
+                  child: Text(AppStrings.of(context).text('Refresh')),
                 ),
               ],
             ),
             if (_error != null)
               Flexible(
-                child: SingleChildScrollView(child: SelectableText(_error!)),
+                child: SingleChildScrollView(child: SelectableText(AppStrings.of(context).message(_error!))),
               ),
             Expanded(
               child: ListView.builder(
@@ -1070,10 +1080,10 @@ class _FolderPickerState extends State<_FolderPicker> {
                     title: Text(entry.name),
                     subtitle: Text(
                       excluded
-                          ? 'Cannot move into this folder or its descendants'
+                          ? AppStrings.of(context).text('Cannot move into this folder or its descendants')
                           : !entry.exists
-                          ? 'Missing content'
-                          : 'Folder',
+                          ? AppStrings.of(context).text('Missing content')
+                          : AppStrings.of(context).text('Folder'),
                     ),
                     onTap: _loading || _error != null || excluded
                         ? null
@@ -1088,7 +1098,7 @@ class _FolderPickerState extends State<_FolderPicker> {
       actions: [
         TextButton(
           onPressed: _loading ? null : () => Navigator.pop(context),
-          child: const Text('Cancel'),
+          child: Text(AppStrings.of(context).text('Cancel')),
         ),
         FilledButton(
           onPressed:
@@ -1098,7 +1108,7 @@ class _FolderPickerState extends State<_FolderPicker> {
                   !_excluded(directory.path)
               ? () => Navigator.pop(context, directory.folderId)
               : null,
-          child: const Text('Move here'),
+          child: Text(AppStrings.of(context).text('Move here')),
         ),
       ],
     );

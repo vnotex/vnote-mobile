@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="share_title">分享到 VNote</string>
+    <string name="share_receiving">正在将全部分享内容复制到私有存储空间…</string>
+    <string name="share_received">VNote 已接收。请打开应用，选择笔记本，将这些内容一起导入一个新文件夹。</string>
+    <string name="share_duplicate">VNote 已接收过这些内容，不会自动重复导入。请打开分享收件箱查看接收记录，或明确选择再导入一份副本。</string>
+    <string name="share_activation_required">请先打开 VNote，检查保留的传输并启用分享收件箱，然后重新分享。尚未接收任何内容。</string>
+    <string name="share_full">分享收件箱或去重历史记录已满。请打开 VNote 处理待办内容、移除重复副本、清理已完成的对外分享，或明确选择忘记已结束的历史记录。本次分享尚未接收。</string>
+    <string name="share_busy">分享收件箱正忙。请等待当前复制或存储操作完成后重新分享。本次分享尚未接收。</string>
+    <string name="share_limits">无法一起接收这些内容。最多允许 64 个文件，每个文件不超过 64 MiB，总计不超过 256 MiB，文本不超过 1 MiB。文件名必须安全且不存在歧义。未接收任何不完整的批次。</string>
+    <string name="share_corrupt">私有分享记录需要处理。请打开 VNote 查看保留的内容。未重复导入或替换任何内容。</string>
+    <string name="share_failed">无法安全复制全部分享内容。访问权限可能已失效，或存储空间不可用。发送方的原始内容未改变；请重新选择全部内容并再次分享。未接收任何不完整的批次。</string>
+    <string name="share_open_app">打开 VNote</string>
+    <string name="share_close">关闭</string>
+</resources>

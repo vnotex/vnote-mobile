@@ -234,7 +234,7 @@ final class CoreException implements Exception {
 
 const _maxSource = 4 * 1024 * 1024;
 const _maxCatalog = 8 * 1024 * 1024;
-const _maxExportStaging = 4 * 1024 * 1024 * 1024 - 128 * 1024;
+const _maxExportStaging = 3 * 1024 * 1024 * 1024 - 128 * 1024;
 const _maxInteger = 9007199254740991;
 const _invalid = native.VxCoreError.VXCORE_ERR_INVALID_PARAM;
 const _unusable = native.VxCoreError.VXCORE_ERR_INVALID_STATE;

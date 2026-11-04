@@ -5,6 +5,7 @@ import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
+import '../../l10n/app_strings.dart';
 import '../../services/editor_session.dart';
 import '../../services/notebook_library.dart';
 import '../../services/notebook_session.dart';
@@ -122,7 +123,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
   Future<void> _add({required bool image}) async {
     final editor = widget.session.value.editor;
     final name = await _name(
-      image ? 'Add image asset' : 'Add attachment',
+      image ? AppStrings.of(context).text('Add image asset') : AppStrings.of(context).text('Add attachment'),
       image ? 'image.png' : 'attachment.bin',
     );
     if (name == null ||
@@ -151,21 +152,21 @@ class _ResourcePanelState extends State<ResourcePanel> {
     String action,
   ) async {
     if (!_entryCurrent(listing, entry)) return;
+    final strings = AppStrings.of(context);
     if (action == 'link' || action == 'image') {
       await _insert(entry, image: action == 'image');
       return;
     }
     String? newName;
     if (action == 'rename') {
-      newName = await _name('Rename attachment', entry.name);
+      newName = await _name(AppStrings.of(context).text('Rename attachment'), entry.name);
       if (newName == null || !_entryCurrent(listing, entry)) return;
     }
     if (action == 'remove') {
       final confirmed = await _confirm(
-        'Remove “${entry.name}”?',
-        'Existing links may break. The core tries to recycle the file, but may permanently delete it if recycling fails. '
-            'No note source is rewritten and this app does not provide restore.',
-        'Remove',
+        strings.text('Remove “{name}”?', {'name': entry.name}),
+        strings.text('Existing links may break. The core tries to recycle the file, but may permanently delete it if recycling fails. No note source is rewritten and this app does not provide restore.'),
+        strings.text('Remove'),
       );
       if (!confirmed || !_entryCurrent(listing, entry)) return;
     }
@@ -225,17 +226,17 @@ class _ResourcePanelState extends State<ResourcePanel> {
   Future<bool> _confirm(String title, String detail, String action) async =>
       await showDialog<bool>(
         context: context,
-        builder: (context) => AlertDialog(
+        builder: (context) => AlertDialog(scrollable: true, 
           title: Text(title),
-          content: Text(detail),
+          content: Text(AppStrings.of(context).message(detail)),
           actions: [
             TextButton(
               onPressed: () => Navigator.pop(context, false),
-              child: const Text('Cancel'),
+              child: Text(AppStrings.of(context).text('Cancel')),
             ),
             FilledButton(
               onPressed: () => Navigator.pop(context, true),
-              child: Text(action),
+              child: Text(AppStrings.of(context).text(action)),
             ),
           ],
         ),
@@ -250,12 +251,12 @@ class _ResourcePanelState extends State<ResourcePanel> {
     if (discard) {
       final confirmed = await _confirm(
         abandon
-            ? 'Abandon private recovery records?'
-            : 'Discard private staging?',
+            ? AppStrings.of(context).text('Abandon private recovery records?')
+            : AppStrings.of(context).text('Discard private staging?'),
         abandon
-            ? 'The live outcome is ambiguous. Inspect the resource listing first. This abandons only the private source and recovery records; every live file, including an unexpected suffix copy, is preserved. No file is recopied and no link is inserted. Existing links may need manual repair.'
-            : 'Only private transfer staging is discarded. A committed attachment or image is not removed and note source is not changed.',
-        abandon ? 'Abandon private staging' : 'Discard staging',
+            ? AppStrings.of(context).text('The live outcome is ambiguous. Inspect the resource listing first. This abandons only the private source and recovery records; every live file, including an unexpected suffix copy, is preserved. No file is recopied and no link is inserted. Existing links may need manual repair.')
+            : AppStrings.of(context).text('Only private transfer staging is discarded. A committed attachment or image is not removed and note source is not changed.'),
+        abandon ? AppStrings.of(context).text('Abandon private staging') : AppStrings.of(context).text('Discard staging'),
       );
       if (!confirmed) return;
     }
@@ -301,28 +302,24 @@ class _ResourcePanelState extends State<ResourcePanel> {
       final canStart = _current && !busy && !library.transferReserved;
       return PopScope<Object?>(
         canPop: !busy,
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: [
+        child: CustomScrollView(
+          slivers: [
+                  SliverToBoxAdapter(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.stretch,
+                      children: [
             ListTile(
-              title: const Text('Attachments and images'),
-              subtitle: const Text(
-                'File changes commit separately. Inserted source uses draft recovery and autosave.',
+              title: Text(AppStrings.of(context).text('Attachments and images')),
+              subtitle: Text(
+                AppStrings.of(context).text('File changes commit separately. Inserted source uses draft recovery and autosave.'),
               ),
               trailing: IconButton(
-                tooltip: 'Close resources',
+                tooltip: AppStrings.of(context).text('Close resources'),
                 onPressed: busy ? null : () => Navigator.pop(context),
                 icon: const Icon(Icons.close),
               ),
             ),
             if (busy) const LinearProgressIndicator(),
-            Expanded(
-              child: CustomScrollView(
-                slivers: [
-                  SliverToBoxAdapter(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.stretch,
-                      children: [
                         Padding(
                           padding: const EdgeInsets.symmetric(horizontal: 16),
                           child: Wrap(
@@ -333,7 +330,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                     ? () => _add(image: false)
                                     : null,
                                 icon: const Icon(Icons.attach_file),
-                                label: const Text('Add attachment'),
+                                label: Text(AppStrings.of(context).text('Add attachment')),
                               ),
                               if (_markdown)
                                 TextButton.icon(
@@ -343,16 +340,16 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                   icon: const Icon(
                                     Icons.add_photo_alternate_outlined,
                                   ),
-                                  label: const Text('Add image'),
+                                  label: Text(AppStrings.of(context).text('Add image')),
                                 ),
                               TextButton(
                                 onPressed: !busy ? _refresh : null,
-                                child: const Text('Inspect / refresh'),
+                                child: Text(AppStrings.of(context).text('Inspect / refresh')),
                               ),
                               if (state.busy)
                                 TextButton(
                                   onPressed: widget.library.cancelResource,
-                                  child: const Text('Cancel transfer'),
+                                  child: Text(AppStrings.of(context).text('Cancel transfer')),
                                 ),
                             ],
                           ),
@@ -369,7 +366,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                 if (state.message != null) state.message!,
                                 if (library.error != null) library.error!,
                                 ?_message,
-                              ].join('\n'),
+                              ].map(AppStrings.of(context).message).join('\n'),
                             ),
                           ),
                         for (final attempt in attempts)
@@ -381,16 +378,22 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
                                   Text(
-                                    '${attempt.operation.name}: ${attempt.name} · ${attempt.stage.name}',
+                                    '${AppStrings.of(context).text(attempt.operation.name)}: ${attempt.name} · ${AppStrings.of(context).text(attempt.stage.name)}',
                                   ),
-                                  const Text(
-                                    'Finish or discard this private transaction before starting another file change.',
+                                  Text(
+                                    AppStrings.of(context).text('Finish or discard this private transaction before starting another file change.'),
                                   ),
                                   Wrap(
                                     spacing: 8,
                                     children: [
+                                      if (attempt.stage == TransferStage.exportReady)
+                                        TextButton.icon(
+                                          onPressed: busy ? null : () => widget.library.shareResource(attempt),
+                                          icon: const Icon(Icons.share_outlined),
+                                          label: Text(AppStrings.of(context).text('Share retained copy')),
+                                        ),
                                       if (attempt.stage == TransferStage.exportUnavailable)
-                                        const Text('The export source is unavailable; discard only private staging.'),
+                                        Text(AppStrings.of(context).text('The export source is unavailable; discard only private staging.')),
                                       if (attempt.stage != TransferStage.committed &&
                                           attempt.stage != TransferStage.exportUnavailable)
                                         TextButton(
@@ -400,8 +403,8 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                           child: Text(
                                             attempt.stage ==
                                                     TransferStage.exportReady
-                                                ? 'Save As again'
-                                                : 'Retry / recover',
+                                                ? AppStrings.of(context).text('Save As again')
+                                                : AppStrings.of(context).text('Retry / recover'),
                                           ),
                                         ),
                                       TextButton(
@@ -411,7 +414,7 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                                 attempt,
                                                 discard: true,
                                               ),
-                                        child: const Text('Discard staging'),
+                                        child: Text(AppStrings.of(context).text('Discard staging')),
                                       ),
                                       if (attempt.stage ==
                                               TransferStage.intent ||
@@ -425,8 +428,8 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                                   discard: true,
                                                   abandon: true,
                                                 ),
-                                          child: const Text(
-                                            'Abandon private staging',
+                                          child: Text(
+                                            AppStrings.of(context).text('Abandon private staging'),
                                           ),
                                         ),
                                     ],
@@ -436,24 +439,24 @@ class _ResourcePanelState extends State<ResourcePanel> {
                             ),
                           ),
                         if (state.externalMayBeIncomplete)
-                          const Padding(
-                            padding: EdgeInsets.all(16),
+                          Padding(
+                            padding: const EdgeInsets.all(16),
                             child: Text(
-                              'A provider destination may be incomplete, or a previous Save As may already exist. Verify the destination before saving again.',
+                              AppStrings.of(context).text('A provider destination may be incomplete, or a previous Save As may already exist. Verify the destination before saving again.'),
                             ),
                           ),
                         if (!matches)
-                          const Padding(
-                            padding: EdgeInsets.all(24),
+                          Padding(
+                            padding: const EdgeInsets.all(24),
                             child: Text(
-                              'No current resource listing. Use Inspect / refresh.',
+                              AppStrings.of(context).text('No current resource listing. Use Inspect / refresh.'),
                             ),
                           )
                         else if (listing.entries.isEmpty)
-                          const Padding(
-                            padding: EdgeInsets.all(24),
+                          Padding(
+                            padding: const EdgeInsets.all(24),
                             child: Text(
-                              'No tracked attachments or unindexed assets.',
+                              AppStrings.of(context).text('No tracked attachments or unindexed assets.'),
                             ),
                           ),
                       ],
@@ -475,11 +478,11 @@ class _ResourcePanelState extends State<ResourcePanel> {
                           ),
                           title: Text(entry.name),
                           subtitle: Text(
-                            '${entry.tracked ? 'Tracked attachment' : 'Unindexed asset'}${entry.exists ? ' · ${entry.bytes} bytes' : ' · Missing file'}',
+                            '${entry.tracked ? AppStrings.of(context).text('Tracked attachment') : AppStrings.of(context).text('Unindexed asset')}${entry.exists ? AppStrings.of(context).text(' · {bytes} bytes', {'bytes': (entry.bytes).toString()}) : AppStrings.of(context).text(' · Missing file')}',
                           ),
                           trailing: PopupMenuButton<String>(
                             enabled: !busy && _current,
-                            tooltip: 'Resource actions for ${entry.name}',
+                            tooltip: AppStrings.of(context).text('Resource actions for {name}', {'name': (entry.name).toString()}),
                             onSelected: (action) =>
                                 _entryAction(listing, entry, action),
                             itemBuilder: (_) => [
@@ -490,41 +493,41 @@ class _ResourcePanelState extends State<ResourcePanel> {
                                         attempt.stage !=
                                             TransferStage.quarantined,
                                   )) ...[
-                                const PopupMenuItem(
+                                PopupMenuItem(
                                   value: 'link',
-                                  child: Text('Insert link'),
+                                  child: Text(AppStrings.of(context).text('Insert link')),
                                 ),
                                 if (_markdown)
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'image',
-                                    child: Text('Insert image'),
+                                    child: Text(AppStrings.of(context).text('Insert image')),
                                   ),
                               ],
                               if (canStart) ...[
                                 if (entry.exists)
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'export',
-                                    child: Text('Save As'),
+                                    child: Text(AppStrings.of(context).text('Save As')),
                                   ),
                                 if (!entry.tracked && entry.exists)
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'track',
-                                    child: Text('Track attachment'),
+                                    child: Text(AppStrings.of(context).text('Track attachment')),
                                   ),
                                 if (entry.tracked)
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'untrack',
-                                    child: Text('Untrack (keep file)'),
+                                    child: Text(AppStrings.of(context).text('Untrack (keep file)')),
                                   ),
                                 if (entry.tracked && entry.exists)
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'rename',
-                                    child: Text('Rename attachment'),
+                                    child: Text(AppStrings.of(context).text('Rename attachment')),
                                   ),
                                 if (entry.exists)
-                                  const PopupMenuItem(
+                                  PopupMenuItem(
                                     value: 'remove',
-                                    child: Text('Remove file'),
+                                    child: Text(AppStrings.of(context).text('Remove file')),
                                   ),
                               ],
                             ],
@@ -534,9 +537,6 @@ class _ResourcePanelState extends State<ResourcePanel> {
                     ),
                 ],
               ),
-            ),
-          ],
-        ),
       );
     },
   );
@@ -564,7 +564,7 @@ class _ResourceNameDialogState extends State<_ResourceNameDialog> {
   }
 
   @override
-  Widget build(BuildContext context) => AlertDialog(
+  Widget build(BuildContext context) => AlertDialog(scrollable: true, 
     title: Text(widget.title),
     content: Form(
       key: _form,
@@ -572,9 +572,9 @@ class _ResourceNameDialogState extends State<_ResourceNameDialog> {
         controller: _name,
         autofocus: true,
         autocorrect: false,
-        decoration: const InputDecoration(
-          labelText: 'Exact destination filename',
-          helperText: 'Keep an appropriate extension. Bytes are copied unchanged; existing files are never overwritten.',
+        decoration: InputDecoration(
+          labelText: AppStrings.of(context).text('Exact destination filename'),
+          helperText: AppStrings.of(context).text('Keep an appropriate extension. Bytes are copied unchanged; existing files are never overwritten.'),
           helperMaxLines: 3,
         ),
         validator: (value) =>
@@ -586,7 +586,7 @@ class _ResourceNameDialogState extends State<_ResourceNameDialog> {
                 RegExp(r'[\\/:*?"<>|\x00-\x1f\x7f]').hasMatch(value) ||
                 value.endsWith('.') ||
                 value.endsWith(' ')
-            ? 'Enter a portable filename (at most 255 UTF-8 bytes).'
+            ? AppStrings.of(context).text('Enter a portable filename (at most 255 UTF-8 bytes).')
             : null,
         onFieldSubmitted: (_) => _submit(),
       ),
@@ -594,9 +594,9 @@ class _ResourceNameDialogState extends State<_ResourceNameDialog> {
     actions: [
       TextButton(
         onPressed: () => Navigator.pop(context),
-        child: const Text('Cancel'),
+        child: Text(AppStrings.of(context).text('Cancel')),
       ),
-      FilledButton(onPressed: _submit, child: const Text('Continue')),
+      FilledButton(onPressed: _submit, child: Text(AppStrings.of(context).text('Continue'))),
     ],
   );
 }

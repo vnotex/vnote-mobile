@@ -17,6 +17,7 @@ import 'notebook_session.dart';
 import 'cohort_import.dart';
 import 'resource_transfer.dart';
 import 'transfer_worker.dart';
+import 'share_inbox.dart';
 
 typedef LibraryOpenCatalog = Future<CatalogCore> Function(
   ManagedNotebookPaths paths,
@@ -86,6 +87,8 @@ class NotebookLibraryState {
     this.resourceState = const ResourceTransferState(),
     this.transferReserved = false,
     this.draftState = const EditorDraftsState(),
+    this.shareState = const ShareInboxState(),
+    this.inboxReady = false,
   });
   final NotebookExportState exportState;
   final NotebookImportState importState;
@@ -93,6 +96,8 @@ class NotebookLibraryState {
   final ResourceTransferState resourceState;
   final bool transferReserved;
   final EditorDraftsState draftState;
+  final ShareInboxState shareState;
+  final bool inboxReady;
   final List<ManagedNotebookEntry> entries;
   final NotebookWorkspace? workspace;
   final bool busy;
@@ -115,6 +120,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     LibraryCreateResourceTransfer? createResourceTransfer,
     EditorDrafts Function(String root)? createDrafts,
     SyncCredentials? syncCredentials,
+    ShareInbox? shareInbox,
   }) : _obtainStorage = obtainStorage ?? ManagedNotebookStorage.obtain,
        _openCatalog = openCatalog ?? _open,
        _createCatalog = createCatalog ?? _create,
@@ -126,10 +132,16 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
        _createResourceTransfer = createResourceTransfer ?? _resourceTransferFor,
        _createDrafts = createDrafts ?? _draftsFor,
        syncCredentials = syncCredentials ?? SyncCredentials(),
+       _shareInbox = shareInbox ?? ShareInbox(),
        super(const NotebookLibraryState());
 
   final SyncCredentials syncCredentials;
   bool _foreground = true;
+  final ShareInbox _shareInbox;
+  int _foregroundEpoch = 0;
+  bool _inboxReady = false;
+  bool _inboxScanning = false;
+  Future<void>? _resumeFuture;
   final Future<ManagedNotebookStorage> Function() _obtainStorage;
   final LibraryOpenCatalog _openCatalog;
   final LibraryCreateCatalog _createCatalog;
@@ -169,7 +181,62 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   void setForeground(bool foreground) {
     _foreground = foreground;
-    _workspace?.setForeground(foreground);
+    final epoch = ++_foregroundEpoch;
+    _workspace?.setForeground(false);
+    if (!foreground || _stopping) return;
+    _inboxReady = false;
+    _inboxScanning = true;
+    final barrier = _workspace?.beginInboxBarrier() ?? Future<void>.value();
+    final previous = _resumeFuture;
+    _publish();
+    _resumeFuture = _resumeInbox(epoch, barrier, previous);
+  }
+
+  Future<void> _resumeInbox(int epoch, Future<void> barrier, Future<void>? previous) async {
+    Future<void>? attachment;
+    try {
+      await previous;
+      await barrier;
+      await _active?.future;
+      await _transferLease?.future;
+      if (_stopping || epoch != _foregroundEpoch || !_foreground) return;
+      if (_storage == null) {
+        await _discover();
+      } else {
+        final scanning = _scanningTransfers;
+        _scanningTransfers = true;
+        try {
+          await _scanInbox();
+          await _cohortImporter?.rescan();
+          await _reconcileInbox();
+        } finally {
+          _scanningTransfers = scanning;
+        }
+      }
+      _transferChanged();
+      if (!_shareInbox.value.initialized) return;
+      if (!_stopping && epoch == _foregroundEpoch && _foreground) {
+        _inboxReady = true;
+        _workspace?.endInboxBarrier(foreground: true);
+        attachment = _workspace?.settleSyncAttachment();
+      }
+    } on Object catch (error) {
+      _error = _describe(error);
+    } finally {
+      if (epoch == _foregroundEpoch) _inboxScanning = false;
+      _settleTransfer();
+      _publish();
+    }
+    // Clear the external scan exclusion before joining readiness: attaching
+    // may itself need the normal sync lifecycle reservation after quarantine.
+    // No foreground state is changed after this await by an obsolete epoch.
+    await attachment;
+  }
+
+  Future<void> refreshInbox() {
+    if (_stopping) return Future.value();
+    setForeground(_foreground);
+    return _resumeFuture ?? Future.value();
   }
 
   Future<void> initialize() =>
@@ -179,7 +246,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   bool _admit() {
-    if (_stopping || _active != null) return false;
+    if (_stopping || _active != null || _inboxScanning) return false;
     _active = Completer<void>();
     _error = null;
     _publish();
@@ -195,11 +262,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   void _publish() {
     if (_disposed) return;
-    _workspace?.setExternalTransferBusy(_scanningTransfers || _transferCall != null);
+    _workspace?.setExternalTransferBusy(_scanningTransfers || _inboxScanning || _transferCall != null);
     value = NotebookLibraryState(
       entries: _entries,
       workspace: _workspace,
-      busy: _active != null,
+      busy: _active != null || _inboxScanning,
       stale: _stale || _stopping,
       closed: _stopping,
       error: _error,
@@ -207,8 +274,10 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       importState: _importer?.value ?? _importFallback,
       cohortState: _cohortImporter?.value ?? _cohortFallback,
       resourceState: _resourceTransfer?.value ?? _resourceFallback,
-      transferReserved: _transferOwner != null || _transferCall != null,
+      transferReserved: _transferOwner != null || _transferCall != null || _inboxScanning,
       draftState: _drafts?.value ?? const EditorDraftsState(),
+      shareState: _shareInbox.value,
+      inboxReady: _inboxReady,
     );
   }
 
@@ -238,11 +307,12 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     if (_stopping ||
         (!cleanup && (_workspace?.synchronization.value.busy ?? false)) ||
         _scanningTransfers ||
+        _inboxScanning ||
         _transferCall != null ||
         _transferOwner == 'checking' ||
         (_transferOwner != null &&
             _transferOwner != owner &&
-            !(cleanup && _transferOwner == 'blocked'))) {
+            !(cleanup && (_transferOwner == 'blocked' || owner == 'inbox')))) {
       return false;
     }
     _transferCall = owner;
@@ -255,6 +325,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   void _settleTransfer() {
     if (_transferCall != null) return;
     if (_scanningTransfers ||
+        _inboxScanning ||
         _exporter?.initialized != true ||
         _importer?.initialized != true ||
         _cohortImporter?.initialized != true ||
@@ -331,6 +402,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
         relative != p.basename(relative) || relative == '.' || relative == '..' ||
         relative.contains('/') || relative.contains('\\')) {
       throw StateError('The retained draft has no safe notebook identity.');
+    }
+    if (!_shareInbox.value.initialized || _shareInbox.value.records.any((item) =>
+        item.status == ShareInboxStatus.importing &&
+        (item.target?.notebookRelative == relative || item.target?.notebookId == entry.notebookId))) {
+      throw StateError('A shared item must be reconciled before this notebook can be opened.');
     }
     final paths = await _storage!.existing(p.join(_storage!.root, relative));
     // Inspection runtimes never live under the journal quota/authority tree and
@@ -437,6 +513,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
 
   Future<void> exportPreview(NotebookWorkspace workspace, NotebookSession session,
       CorePreviewSnapshot snapshot, String fileHandle) async {
+    await workspace.settleSyncAttachment();
     final target = resourceTarget(workspace, session);
     if (_resourceTransfer == null || !_claimTransfer('resource')) return;
     final requestId = newTransferId();
@@ -469,6 +546,251 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
   }
 
+  ShareInboxRecord? _shareForOperation(String id) => _shareInbox.value.records
+    .where((item) => item.operationId == id).firstOrNull;
+
+  Future<void> _scanInbox() async {
+    await _shareInbox.refresh();
+    _publish();
+    if (!_shareInbox.value.available || _storage == null || _stopping) return;
+    final root = await _storage!.obtainCohortRoot();
+    try {
+      final quota = await runTransferStore({'op': 'checkSpace', 'scope': 'cohort',
+        'root': root, 'notebooksRoot': _storage!.root,
+        'id': '00000000000000000000000000000000', 'requiredBytes': 0});
+      // Activation repeats this proof natively under the common admission lock.
+      // Historical over-cap staging is retained, not evicted to enable capture.
+      if (quota['stagedBytes'] is int && (quota['stagedBytes'] as int) <= (3 << 30)) {
+        await _shareInbox.activate();
+      } else {
+        _error = 'Incoming sharing is paused until retained staging is at most 3 GiB. Existing work is preserved.';
+      }
+    } on Object catch (error) {
+      _error = error is TransferFailure ? error.message
+        : error is StateError || error is CoreException ? _describe(error)
+        : 'Receiving shared items is unavailable until private staging can be reconciled.';
+    }
+  }
+
+  Future<void> _authorizeCohortDiscard(CohortAttempt attempt) async {
+    final record = _shareForOperation(attempt.id);
+    if (record == null || record.settled) return;
+    if (attempt.stage == TransferStage.committed) {
+      final cohortId = attempt.cohortId;
+      if (cohortId == null) throw StateError('The committed shared item has no receipt.');
+      await _shareInbox.consume(record, cohortId);
+    } else {
+      await _shareInbox.discard(record);
+    }
+    // A lost list result after successful tombstoning still holds private proof.
+    await _shareInbox.refresh();
+    if (_shareForOperation(attempt.id)?.settled != true) {
+      throw StateError('The shared item disposition is not yet durable.');
+    }
+  }
+
+  Future<void> _consumeSharedCohort(ShareInboxRecord record, CohortAttempt attempt) async {
+    if (attempt.stage != TransferStage.committed || attempt.cohortId == null) return;
+    // Native consume validates committed == outcome plus intent/target; it does
+    // not open a notebook, so a later user-deleted destination never reimports.
+    await _shareInbox.consume(record, attempt.cohortId!);
+    await _shareInbox.refresh();
+    if (_shareForOperation(attempt.id)?.status != ShareInboxStatus.consumed) {
+      throw StateError('The shared item receipt could not be settled.');
+    }
+    _cohortImporter!.select(attempt);
+    await _cohortImporter!.discard(attempt, recover: _applyCohort);
+  }
+
+  Future<void> _reconcileInbox() async {
+    final importer = _cohortImporter;
+    if (importer == null || !importer.initialized || !_shareInbox.value.initialized) return;
+    final scanning = _scanningTransfers;
+    _scanningTransfers = true;
+    try {
+      for (final record in List<ShareInboxRecord>.of(_shareInbox.value.records)) {
+        if (_stopping) return;
+        final operationId = record.operationId;
+        if (operationId == null) continue;
+        var attempt = importer.value.attempts.where((item) => item.id == operationId).firstOrNull;
+        try {
+          if (record.settled) {
+            // Kill after tombstone, before cleanup: never allocate another copy.
+            if (attempt != null || importer.value.leftovers.any((item) =>
+                const ['done-', 'inbox-'].any((prefix) =>
+                  p.basename(item.location) == '$prefix$operationId' ||
+                  p.basename(item.location) == '$prefix$operationId.json' ||
+                  p.basename(item.location) == '$prefix$operationId.json.tmp'))) {
+              await importer.discardSettledInbox(operationId, record.id);
+            }
+            continue;
+          }
+          if (record.status != ShareInboxStatus.importing) continue;
+          if (attempt == null || !attempt.allocationComplete) {
+            attempt = await importer.allocateInbox(inboxId: record.id,
+              operationId: operationId, target: record.target!);
+          }
+          if (attempt == null) continue;
+          if (attempt.stage == TransferStage.committed) {
+            await _consumeSharedCohort(record, attempt);
+          } else if (_workspace == null && (attempt.stage == TransferStage.intent ||
+              attempt.stage == TransferStage.quarantined)) {
+            importer.select(attempt);
+            await importer.recover(attempt, _applyCohort);
+            final recovered = importer.value.attempts.where((item) => item.id == operationId).firstOrNull;
+            if (recovered != null) await _consumeSharedCohort(record, recovered);
+          }
+        } on Object catch (error) {
+          _error = _describe(error);
+        }
+      }
+    } finally {
+      _scanningTransfers = scanning;
+      _transferChanged();
+    }
+  }
+
+  /// Target names/identities are never inferred from an incoming file name.
+  Future<CohortTarget?> shareTarget({ManagedNotebookEntry? notebook,
+      required String folderName, bool currentFolder = false}) async {
+    if (!ShareInbox.validName(folderName) || _stopping || _active != null || _inboxScanning) return null;
+    final workspace = _workspace;
+    CohortTarget? target;
+    if (workspace != null) {
+      final directory = workspace.value.directory;
+      if (workspace.value.session != null || directory == null || !workspace.value.canMutate) {
+        _error = 'Close the selected note before importing shared items.';
+        _publish();
+        return null;
+      }
+      if (currentFolder) {
+        target = CohortTarget(notebookId: directory.notebookId,
+          parentId: directory.folderId, notebookRelative: p.basename(workspace.notebookLocation),
+          folderName: folderName);
+      }
+      if (!await returnToLibrary(workspace)) return null;
+      if (target != null) return target;
+    }
+    if (notebook == null || notebook.notebookId == null || _stale ||
+        _blockedNotebook(notebook.location) || !_admit()) {
+      return null;
+    }
+    CatalogCore? core;
+    try {
+      final matches = _entries.where((item) => item.notebookId == notebook.notebookId &&
+        p.equals(item.location, notebook.location) && item.canOpen).toList();
+      if (matches.length != 1) return null;
+      final paths = await _storage!.existing(notebook.location);
+      core = await _openCatalog(paths, notebook.notebookId);
+      _temporary = core;
+      final directory = core.initialDirectory;
+      return CohortTarget(notebookId: directory.notebookId, parentId: directory.folderId,
+        notebookRelative: p.basename(notebook.location), folderName: folderName);
+    } on Object catch (error) {
+      _error = _describe(error);
+      return null;
+    } finally {
+      if (core != null) await _release(core);
+      _retire();
+    }
+  }
+
+  Future<void> importShare(ShareInboxRecord record, {CohortTarget? target}) async {
+    if (_workspace != null || _active != null || _cohortImporter == null ||
+        !_claimTransfer('cohort', cleanup: record.status == ShareInboxStatus.importing)) {
+      return;
+    }
+    if (!_admit()) { _finishTransferCall(); return; }
+    try {
+      await _shareInbox.refresh();
+      var current = _shareInbox.value.records.where((item) => item.id == record.id).firstOrNull;
+      if (current == null || current.settled) return;
+      if (current.status == ShareInboxStatus.ready) {
+        if (_cohortImporter!.hasStaging) {
+          throw StateError('Resolve the retained cohort staging first.');
+        }
+        if (target == null) throw StateError('Choose a notebook and child folder first.');
+        current = await _shareInbox.claim(current, operationId: newTransferId(), target: target);
+        // The claim is durable before mkdir. A lost reply can only be resumed
+        // with that exact operation ID, never with a newly generated one.
+        await _shareInbox.refresh();
+      }
+      if (current.status != ShareInboxStatus.importing) return;
+      final claimed = current;
+      _transferChanged();
+      final importer = _cohortImporter!;
+      var attempt = importer.value.attempts.where((item) => item.id == claimed.operationId).firstOrNull;
+      if (attempt == null || !attempt.allocationComplete) {
+        attempt = await importer.allocateInbox(inboxId: claimed.id,
+          operationId: claimed.operationId!, target: claimed.target!);
+      }
+      // Each existing state machine step advances immutable retained work. An
+      // unchanged phase/error stops immediately instead of replaying a failure.
+      for (var step = 0; step < 6 && attempt != null && !_stopping; step++) {
+        if (attempt.stage == TransferStage.committed) {
+          await _consumeSharedCohort(claimed, attempt);
+          break;
+        }
+        importer.select(attempt);
+        final before = attempt;
+        attempt = await importer.retry(attempt, build: _buildCohort, apply: _applyCohort,
+          retained: () async {
+            await importer.store('checkSpace', arguments: {'requiredBytes': claimed.bytes + (128 << 10)});
+            return _shareInbox.stage(claimed);
+          });
+        if (importer.value.error != null || attempt == null ||
+            attempt.stage == before.stage && attempt.built == before.built) {
+          break;
+        }
+      }
+      if (!_stopping) await _discover();
+    } on Object catch (error) {
+      _error = _describe(error);
+      try { await _shareInbox.refresh(); } on Object { /* Retain quarantine. */ }
+    } finally {
+      _retire();
+      _finishTransferCall();
+    }
+  }
+
+  Future<void> _inboxAction(Future<void> Function() action, {bool cohort = false}) async {
+    if (_active != null || _inboxScanning || _stopping ||
+        !_claimTransfer(cohort ? 'cohort' : 'inbox', cleanup: true)) {
+      return;
+    }
+    if (!_admit()) { _finishTransferCall(); return; }
+    try {
+      await action();
+      await _shareInbox.refresh();
+      _transferChanged();
+      if (_workspace == null) await _discover();
+    } on Object catch (error) { _error = _describe(error); }
+    finally { _retire(); _finishTransferCall(); }
+  }
+
+  Future<void> discardShare(ShareInboxRecord record) => _inboxAction(() async {
+    final attempt = _cohortImporter?.value.attempts
+      .where((item) => item.id == record.operationId).firstOrNull;
+    if (attempt != null) {
+      if (_workspace != null) throw StateError('Return to Notebooks before resolving this shared item.');
+      _cohortImporter!.select(attempt);
+      await _cohortImporter!.discard(attempt, recover: _applyCohort);
+    } else {
+      await _shareInbox.discard(record);
+    }
+  }, cohort: record.operationId != null);
+
+  Future<void> anotherShareCopy(ShareInboxRecord record) => _inboxAction(() async {
+    await _shareInbox.anotherCopy(record);
+  });
+  Future<void> dismissShareDuplicate(ShareInboxRecord record) =>
+    _inboxAction(() => _shareInbox.dismissDuplicate(record));
+  Future<void> forgetShareHistory() => _inboxAction(_shareInbox.forgetHistory);
+  Future<void> cleanupSharedExports() => _inboxAction(_shareInbox.cleanupExports);
+  Future<void> exportShare(ShareInboxRecord record) => _inboxAction(() async {
+    _shareInbox.reportShare(await _shareInbox.export(record));
+  });
+
   Future<void> _ensureOfflineTransfers() async {
     try {
       if (_cohortImporter == null) {
@@ -481,6 +803,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
           _releaseController,
         );
         _cohortImporter!.addListener(_transferChanged);
+        _cohortImporter!.authorizeDiscard = _authorizeCohortDiscard;
       }
       await _cohortImporter!.initialize();
     } on Object catch (error) {
@@ -505,6 +828,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   bool get _unknownTransferTarget =>
+      !_shareInbox.value.initialized ||
       _cohortImporter?.initialized != true ||
       _resourceTransfer?.initialized != true ||
       _cohortImporter!.value.blocksAllNotebooks ||
@@ -513,7 +837,9 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   bool _blockedNotebook(String location) {
     if (_unknownTransferTarget) return true;
     final relative = p.basename(location);
-    return _cohortImporter!.value.blockedNotebookRelatives.contains(relative) ||
+    return _shareInbox.value.records.any((item) =>
+        item.status == ShareInboxStatus.importing && item.target?.notebookRelative == relative) ||
+        _cohortImporter!.value.blockedNotebookRelatives.contains(relative) ||
         _resourceTransfer!.value.blockedNotebookRelatives.contains(relative);
   }
 
@@ -526,6 +852,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
             .firstOrNull;
         if (attempt == null) continue;
         if (_stopping) return;
+        if (_shareForOperation(id) != null) continue;
         if (attempt.stage != TransferStage.intent &&
             attempt.stage != TransferStage.quarantined) {
           continue;
@@ -861,6 +1188,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   Future<void> retryCohort(CohortAttempt attempt) async {
+    final share = _shareForOperation(attempt.id);
+    if (share != null && !share.settled) {
+      await importShare(share);
+      return;
+    }
     if (_transferOwner == 'blocked' &&
         attempt.stage != TransferStage.intent &&
         attempt.stage != TransferStage.quarantined) {
@@ -918,6 +1250,11 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   }
 
   Future<void> renameCohortTarget(CohortAttempt attempt, String name) async {
+    if (_shareForOperation(attempt.id) != null) {
+      _error = 'The destination of a claimed shared item is immutable.';
+      _publish();
+      return;
+    }
     if (_workspace != null ||
         _active != null ||
         _cohortImporter == null ||
@@ -959,6 +1296,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     NotebookWorkspace workspace,
     NotebookSession session,
   ) async {
+    await workspace.settleSyncAttachment();
     final target = resourceTarget(workspace, session);
     if (_resourceTransfer == null || !_claimTransfer('resource', cleanup: true)) {
       return;
@@ -990,6 +1328,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     String name, {
     String? newName,
   }) async {
+    await workspace.settleSyncAttachment();
     final target = resourceTarget(workspace, session);
     if (_resourceTransfer == null || !_claimTransfer('resource')) return;
     try {
@@ -1050,6 +1389,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     bool discard = false,
     bool abandon = false,
   }) async {
+    await workspace.settleSyncAttachment();
     final target = resourceTarget(workspace, session);
     if (attempt.target.notebookId != target.notebookId ||
         attempt.target.nodeId != target.nodeId ||
@@ -1111,6 +1451,15 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     } finally {
       _finishTransferCall();
     }
+  }
+
+  Future<void> shareResource(ResourceAttempt attempt) async {
+    if (_resourceTransfer == null || !_claimTransfer('resource')) return;
+    try {
+      _resourceTransfer!.select(attempt);
+      await _resourceTransfer!.share(attempt, _shareInbox);
+    } on Object catch (error) { _error = _describe(error); }
+    finally { _finishTransferCall(); }
   }
 
   Future<void> retryResource(ResourceAttempt attempt) async {
@@ -1802,6 +2151,13 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
   }
 
+  Future<void> shareExport(PreparedNotebookExport prepared) async {
+    if (_exporter == null || !_claimTransfer('export')) return;
+    try { await _exporter!.share(prepared, _shareInbox); }
+    on Object catch (error) { _error = _describe(error); }
+    finally { _finishTransferCall(); }
+  }
+
   Future<void> saveExport(PreparedNotebookExport prepared) async {
     if (!_claimTransfer('export')) return;
     try {
@@ -1840,6 +2196,8 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     _stale = true;
     _storage ??= await _obtainStorage();
     if (_stopping) return;
+    // Platform claims quarantine their targets before even metadata discovery.
+    await _scanInbox();
     // Reconcile all acknowledged source prefixes before admitting ordinary
     // catalog/body writers or transfer recovery mutations.
     Object? draftFailure;
@@ -1858,6 +2216,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     // even if the original draft namespace is unavailable; no writer is admitted.
     if (draftFailure != null) throw draftFailure;
     if (_stopping) return;
+    await _reconcileInbox();
     await _recoverOfflineTransfers();
     if (_stopping) return;
     await _recoverPublishedImport();
@@ -1947,6 +2306,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
       return names == 0 ? a.location.compareTo(b.location) : names;
     });
     _entries = List.unmodifiable(entries);
+    _inboxReady = _shareInbox.value.initialized && !_inboxScanning;
     _stale = false;
   }
 
@@ -1980,7 +2340,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     final workspace = _createWorkspace(paths, id);
     workspace.attachDrafts(_drafts!);
     workspace.attachSyncCredentials(syncCredentials);
-    workspace.setForeground(_foreground);
+    workspace.setForeground(_foreground && _inboxReady && !_inboxScanning);
     _workspace = workspace;
     await workspace.initialize();
     if (_stopping) return false;
@@ -2080,6 +2440,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
   Future<void> shutdown() => _shutdownFuture ??= _shutdown();
   Future<void> _shutdown() async {
     _stopping = true;
+    ++_foregroundEpoch;
     _exporter?.cancel();
     _importer?.cancel();
     _cohortImporter?.cancel();
@@ -2099,6 +2460,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
     }
     await _transferLease?.future;
     await _active?.future;
+    await _resumeFuture;
     try {
       await _workspace?.shutdown();
     } finally {
@@ -2137,6 +2499,7 @@ class NotebookLibrary extends ValueNotifier<NotebookLibraryState> {
           _cohortImporter?.removeListener(_transferChanged);
           _cohortImporter?.dispose();
           _resourceTransfer?.removeListener(_transferChanged);
+          _shareInbox.dispose();
           _resourceTransfer?.dispose();
         }
       }

@@ -1,13 +1,28 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import 'dart:convert';
+import 'dart:ffi';
 import 'dart:io';
 import 'dart:isolate';
 
 import 'package:crypto/crypto.dart';
+import 'package:ffi/ffi.dart';
 import 'package:test/test.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 Matcher get _failure => isA<CoreException>();
+
+@Native<Int32 Function(Pointer<Char>, Pointer<Char>, Pointer<Char>)>(
+  symbol: 'vxm_share_inbox_prove',
+  assetId: 'package:vxcore_bridge/src/generated/vxcore_host_bindings.dart',
+)
+external int _nativeProve(Pointer<Char> root, Pointer<Char> claim, Pointer<Char> disposition);
+
+int _prove(_Fixture fixture, Map<String, Object?> claim, String disposition) =>
+    using((arena) => _nativeProve(
+      fixture.root.path.toNativeUtf8(allocator: arena).cast(),
+      jsonEncode(claim).toNativeUtf8(allocator: arena).cast(),
+      disposition.toNativeUtf8(allocator: arena).cast(),
+    ));
 
 Future<Map<String, Object?>> _runTransfer(
   Map<String, Object?> request, {
@@ -134,6 +149,18 @@ final class _Fixture {
     });
     return id;
   }
+
+  Map<String, Object?> inboxClaim(String id, {String? cohortId}) => {
+    'id': 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 'operationId': id,
+    'target': {'notebookId': notebookId, 'parentId': parentId,
+      'notebookRelative': 'book', 'folderName': 'Inbox'},
+    if (cohortId != null) 'cohortId': cohortId,
+  };
+
+  Future<Map<String, Object?>> allocateInbox(String id) => run('cohort', id, 'allocateInbox', {
+    'kind': 'folder', 'inboxId': inboxClaim(id)['id'],
+    'target': {'version': 1, 'id': id, ...(inboxClaim(id)['target']! as Map<String, Object?>)},
+  });
 
   Future<void> source(
     String scope,
@@ -454,6 +481,150 @@ void main() {
       ...command, 'version': 2, 'origin': 'asset', 'binding': {'name': 'different.bin'},
     }), throwsA(_failure));
     expect(await File('${fixture.transaction('resource', id)}/resource.json').exists(), isFalse);
+  });
+
+  test('inbox allocation repairs every owned pre-request kill window with one scan identity', () async {
+    for (final boundary in ['owner', 'mkdir', 'request', 'target-temp']) {
+      final id = fixture.nextId();
+      final first = await fixture.allocateInbox(id);
+      final transaction = fixture.transaction('cohort', id);
+      final target = await File('$transaction/target.json').readAsString();
+      await File('$transaction/target.json').delete();
+      if (boundary == 'owner' || boundary == 'mkdir') await File('$transaction/request.json').delete();
+      if (boundary == 'owner') await Directory(transaction).delete();
+      if (boundary == 'target-temp') await File('$transaction/target.json.tmp').writeAsString(target.substring(0, 15), flush: true);
+      final entries = (await fixture.run('cohort', id, 'scan'))['entries']! as List;
+      final pending = entries.cast<Map>().singleWhere((entry) => entry['id'] == id);
+      expect(pending['allocationComplete'], false);
+      expect(_prove(fixture, fixture.inboxClaim(id), 'consume'), isNot(0));
+      expect((await fixture.allocateInbox(id))['target'], first['target']);
+      expect((await fixture.run('cohort', id, 'scan'))['entries'], contains(isA<Map>().having((v) => v['id'], 'id', id).having((v) => v['allocationComplete'], 'allocationComplete', true)));
+      expect(_prove(fixture, fixture.inboxClaim(id), 'discard'), 0);
+      await fixture.run('cohort', id, 'discard');
+      expect(await File('${fixture.namespace('cohort')}/inbox-$id.json').exists(), false);
+    }
+  });
+
+  test('inbox owner temporary publication repairs without borrowing an existing transaction', () async {
+    final id = fixture.nextId(); await fixture.allocateInbox(id);
+    final transaction = fixture.transaction('cohort', id);
+    final marker = File('${fixture.namespace('cohort')}/inbox-$id.json');
+    final encoded = await marker.readAsString();
+    await Directory(transaction).delete(recursive: true);
+    final temporary = await marker.rename('${marker.path}.tmp');
+    final entries = (await fixture.run('cohort', id, 'scan'))['entries']! as List;
+    expect(entries.cast<Map>().singleWhere((entry) => entry['id'] == id)['allocationComplete'], false);
+    await temporary.writeAsString(encoded.substring(0, 20), flush: true);
+    await fixture.allocateInbox(id);
+    expect(await marker.readAsString(), encoded);
+    expect(await temporary.exists(), false);
+    await fixture.run('cohort', id, 'discard', {'inboxId': fixture.inboxClaim(id)['id']});
+
+    final ordinary = await fixture.allocate('cohort', kind: 'folder');
+    await expectLater(fixture.allocateInbox(ordinary), throwsA(_failure));
+    expect(await File('${fixture.namespace('cohort')}/inbox-$ordinary.json').exists(), false);
+  });
+
+  test('settled inbox cleanup resumes retired directory and is idempotent only with inbox binding', () async {
+    final id = fixture.nextId(); await fixture.allocateInbox(id);
+    final claim = fixture.inboxClaim(id);
+    await expectLater(fixture.run('cohort', id, 'discard', {'inboxId': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}), throwsA(_failure));
+    expect(_prove(fixture, claim, 'discard'), 0);
+    final retired = '${fixture.namespace('cohort')}/done-$id';
+    await Directory(fixture.transaction('cohort', id)).rename(retired);
+    expect(_prove(fixture, claim, 'discard'), isNot(0));
+    await expectLater(fixture.allocateInbox(id), throwsA(_failure));
+    await fixture.run('cohort', id, 'discard', {'inboxId': claim['id']});
+    await fixture.run('cohort', id, 'discard', {'inboxId': claim['id']});
+    expect(await Directory(retired).exists(), false);
+    await expectLater(fixture.run('cohort', id, 'discard'), throwsA(_failure));
+  });
+
+  test('inbox ownership rejects collisions retargeting and unexplained allocation files', () async {
+    final id = fixture.nextId(); await fixture.allocateInbox(id);
+    final transaction = fixture.transaction('cohort', id);
+    final marker = File('${fixture.namespace('cohort')}/inbox-$id.json');
+    final original = await marker.readAsBytes();
+    final claim = fixture.inboxClaim(id);
+    await expectLater(fixture.run('cohort', id, 'allocateInbox', {
+      'kind': 'folder', 'inboxId': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      'target': {'version': 1, 'id': id, ...(claim['target']! as Map<String, Object?>)},
+    }), throwsA(_failure));
+    await expectLater(fixture.run('cohort', id, 'resetWork', {'folderName': 'Changed'}), throwsA(_failure));
+    await File('$transaction/unexplained').writeAsString('keep me');
+    await expectLater(fixture.allocateInbox(id), throwsA(_failure));
+    expect(_prove(fixture, claim, 'discard'), isNot(0));
+    expect(await marker.readAsBytes(), original);
+    expect(await File('$transaction/unexplained').readAsString(), 'keep me');
+  });
+
+  test('committed inbox proof survives target deletion and rejects different receipts or claims', () async {
+    final id = fixture.nextId(); await fixture.allocateInbox(id);
+    await fixture.source('cohort', id, {'note.md': utf8.encode('# exact input\n')});
+    final transaction = fixture.transaction('cohort', id);
+    final builder = await CoreNotebook.createCohortBuilder(transaction); fixture.owners.add(builder);
+    final built = await builder.build(); await builder.close();
+    await fixture.run('cohort', id, 'sealCohort');
+    // Match the library's joined transaction-owned publication/recovery owner.
+    final engine = '$transaction/recovery/cccccccccccccccccccccccccccccccc';
+    final core = await CoreNotebook.openCatalog(
+      appDataPath: '$engine/app', localDataPath: '$engine/local',
+      notebookPath: fixture.notebook, expectedNotebookId: fixture.notebookId,
+    );
+    fixture.owners.add(core);
+    expect((await core.applyCohort(transaction)).committed, true); await core.close();
+    final claim = fixture.inboxClaim(id, cohortId: built.cohortId);
+    expect(_prove(fixture, claim, 'consume'), 0);
+    final unexplained = await Directory('$transaction/unexplained-owner').create();
+    expect(_prove(fixture, claim, 'consume'), isNot(0));
+    await unexplained.delete();
+    expect(_prove(fixture, claim, 'consume'), 0);
+    expect(_prove(fixture, claim, 'discard'), isNot(0));
+    await Directory(fixture.notebook).delete(recursive: true);
+    expect(_prove(fixture, claim, 'consume'), 0);
+    await Directory(fixture.notebooks).delete();
+    expect(_prove(fixture, claim, 'consume'), 0);
+    expect(_prove(fixture, {...claim, 'cohortId': 'foreign'}, 'consume'), isNot(0));
+    expect(_prove(fixture, {...claim, 'id': 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb'}, 'consume'), isNot(0));
+    final receipt = File('$transaction/committed.json');
+    final original = await receipt.readAsString();
+    final changed = jsonDecode(original) as Map<String, dynamic>; changed['path'] = 'different';
+    await receipt.writeAsString(jsonEncode(changed), flush: true);
+    expect(_prove(fixture, claim, 'consume'), isNot(0));
+    await receipt.writeAsString(original, flush: true);
+    expect(_prove(fixture, claim, 'consume'), 0);
+    await Directory(fixture.notebooks).create();
+    await fixture.run('cohort', id, 'discard');
+  });
+
+  test('discard uses current rollback and permits its retained matching dispatch', () async {
+    final id = fixture.nextId(); await fixture.allocateInbox(id);
+    await fixture.source('cohort', id, {'note.md': utf8.encode('# never attached\n')});
+    final transaction = fixture.transaction('cohort', id);
+    final builder = await CoreNotebook.createCohortBuilder(transaction); fixture.owners.add(builder);
+    final built = await builder.build(); await builder.close();
+    await fixture.run('cohort', id, 'sealCohort');
+    await fixture.run('cohort', id, 'prepareAttempt');
+    final claim = fixture.inboxClaim(id, cohortId: built.cohortId);
+    expect(_prove(fixture, claim, 'discard'), isNot(0));
+    final core = await fixture.catalog();
+    expect((await core.recoverCohort(transaction)).status, CoreCohortStatus.absent); await core.close();
+    expect(_prove(fixture, claim, 'discard'), 0);
+    // Model a crash after durable dispatch but before rename: the real recovery
+    // above proved the exact intact private attempt and retained generation.
+    final dispatch = {'version': 1, 'id': id, 'scope': 'cohort', 'generation': 1,
+      'parentPath': '', 'parentBefore': {'device': 1, 'low': 1, 'high': 0, 'bytes': 1,
+        'links': 1, 'seconds': 1, 'nanos': 0, 'directory': false, 'sha256': '0' * 64}};
+    await File('$transaction/dispatch-1.json').writeAsString(jsonEncode(dispatch), flush: true);
+    expect(_prove(fixture, claim, 'discard'), 0);
+    await File('$transaction/dispatch-2.json').writeAsString(jsonEncode({...dispatch, 'generation': 2}), flush: true);
+    expect(_prove(fixture, claim, 'discard'), isNot(0));
+    await File('$transaction/dispatch-2.json').delete();
+    final absent = File('$transaction/absent-1.json'); final bytes = await absent.readAsBytes();
+    await absent.delete(); expect(_prove(fixture, claim, 'discard'), isNot(0));
+    await absent.writeAsBytes(bytes, flush: true);
+    await Directory(fixture.notebook).rename('${fixture.notebook}-removed');
+    expect(_prove(fixture, claim, 'discard'), isNot(0));
   });
 
   test('cohort private build preserves raw wrapper layout and sealed IDs across apply/recovery', () async {

@@ -41,12 +41,29 @@ FetchContent_MakeAvailable(vxm_utf8proc)
 # Notices come from the exact built dependency sources, not a hand-maintained
 # description of their licenses. Missing notices fail packaging.
 set(NATIVE_NOTICES "VNote Mobile native host — GNU LGPL version 3\nApplication license texts are bundled separately.\n\n")
+set(NATIVE_NOTICE_RECORDS "")
+function(notice_json_string output text)
+  string(REPLACE "\\" "\\\\" value "${text}")
+  string(REPLACE "\"" "\\\"" value "${value}")
+  string(REPLACE "\n" "\\n" value "${value}")
+  string(REPLACE "\r" "\\r" value "${value}")
+  string(REPLACE "\t" "\\t" value "${value}")
+  set(${output} "\"${value}\"" PARENT_SCOPE)
+endfunction()
 function(append_notice label path)
   if(NOT EXISTS "${path}")
     message(FATAL_ERROR "Missing native dependency license: ${label}: ${path}")
   endif()
   file(READ "${path}" text)
   set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${path}")
+  file(SHA256 "${path}" license_sha256)
+  notice_json_string(json_label "${label}")
+  notice_json_string(json_path "${path}")
+  if(NATIVE_NOTICE_RECORDS)
+    string(APPEND NATIVE_NOTICE_RECORDS ",\n")
+  endif()
+  string(APPEND NATIVE_NOTICE_RECORDS "{\"label\":${json_label},\"path\":${json_path},\"sha256\":\"${license_sha256}\"}")
+  set(NATIVE_NOTICE_RECORDS "${NATIVE_NOTICE_RECORDS}" PARENT_SCOPE)
   string(APPEND NATIVE_NOTICES "\n===== ${label} =====\n${text}\n")
   set(NATIVE_NOTICES "${NATIVE_NOTICES}" PARENT_SCOPE)
 endfunction()
@@ -84,7 +101,30 @@ if(NOT json_license_hash STREQUAL "86b998c792894ccb911a1cb7994f7a9652894e7a094c0
   message(FATAL_ERROR "Native JSON license hash mismatch")
 endif()
 append_notice("nlohmann/json 3.11.3 (MIT); header copyright 2013-2023 Niels Lohmann" "${VXM_JSON_LICENSE}")
-string(APPEND NATIVE_NOTICES "\nSQLite: the authors disclaim copyright.\nMay you do good and not evil.\nMay you find forgiveness for yourself and forgive others.\nMay you share freely, never taking more than you give.\n")
+# The thread-pool header carries attribution but omits the MIT grant. Retrieve
+# the matching release's real grant, checking immutable content before use.
+set(thread_pool_license "${CMAKE_CURRENT_BINARY_DIR}/thread-pool-LICENSE.txt")
+if(NOT EXISTS "${thread_pool_license}")
+  file(DOWNLOAD "https://raw.githubusercontent.com/bshoshany/thread-pool/v5.1.0/LICENSE.txt"
+    "${thread_pool_license}" TLS_VERIFY ON
+    EXPECTED_HASH SHA256=712a867cc12ebfcdecf6cea097f5aa7ec5acaa435a8f818c9f370960df35acbf)
+endif()
+file(SHA256 "${thread_pool_license}" thread_pool_license_hash)
+if(NOT thread_pool_license_hash STREQUAL "712a867cc12ebfcdecf6cea097f5aa7ec5acaa435a8f818c9f370960df35acbf")
+  message(FATAL_ERROR "Native thread-pool license hash mismatch")
+endif()
+append_notice("BS::thread_pool 5.1.0 (MIT); https://github.com/bshoshany/thread-pool" "${thread_pool_license}")
+# Preserve SQLite's actual source notice rather than a paraphrase.
+file(STRINGS "${VXM_CORE_ROOT}/third_party/sqlite/sqlite3.c" sqlite_header LIMIT_COUNT 39)
+string(REPLACE ";" "\n" sqlite_header "${sqlite_header}")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/sqlite-NOTICE.txt" "${sqlite_header}\n")
+append_notice("SQLite 3.47.2 (public-domain source notice)" "${CMAKE_CURRENT_BINARY_DIR}/sqlite-NOTICE.txt")
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-NOTICE.txt" "${NATIVE_NOTICES}")
+# Build-local paths are consumed by dependency_notices.mjs, never distributed.
+file(SHA256 "${CMAKE_CURRENT_LIST_FILE}" native_builder_sha256)
+file(SHA256 "${VXM_CORE_ROOT}/third_party/CMakeLists.txt" native_dependencies_sha256)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/native-dependencies.json"
+  "{\"schema\":1,\"producerSha256\":\"${native_builder_sha256}\",\"declarationsSha256\":\"${native_dependencies_sha256}\",\"system\":\"${CMAKE_SYSTEM_NAME}\",\"architecture\":\"${CMAKE_SYSTEM_PROCESSOR}\",\"notices\":[\n${NATIVE_NOTICE_RECORDS}\n]}\n")
 # Hex bytes avoid raw-string delimiter collisions and MSVC's string-literal
 # length limit. Storage is read-only and requires no startup allocation.
 string(HEX "${NATIVE_NOTICES}" notice_hex)
@@ -92,7 +132,7 @@ string(REGEX REPLACE "([0-9a-f][0-9a-f])" "0x\\1," NATIVE_NOTICE_BYTES "${notice
 string(REGEX REPLACE "(0x..,0x..,0x..,0x..,0x..,0x..,0x..,0x..,)" "\\1\n" NATIVE_NOTICE_BYTES "${NATIVE_NOTICE_BYTES}")
 configure_file(licenses.cpp.in "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp" @ONLY)
 
-add_library(vnote_host SHARED vxcore_host.cpp notebook_import.cpp notebook_transfers.cpp editor_drafts.cpp notebook_preview.cpp notebook_sync.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
+add_library(vnote_host SHARED vxcore_host.cpp notebook_import.cpp notebook_transfers.cpp editor_drafts.cpp notebook_preview.cpp notebook_sync.cpp share_inbox_activation.cpp "${CMAKE_CURRENT_BINARY_DIR}/licenses.cpp")
 target_compile_definitions(vnote_host PRIVATE VXM_HOST_BUILD)
 if(ANDROID)
   target_sources(vnote_host PRIVATE sync_tls_android.cpp)

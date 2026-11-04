@@ -20,6 +20,7 @@ import 'package:path/path.dart' as p;
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'document_transfer_platform.dart';
+import 'share_inbox.dart';
 
 enum NotebookExportPhase { idle, reconciling, preparing, archiving, saving }
 
@@ -108,7 +109,9 @@ typedef ExportSnapshotCapture = Future<CoreExportSnapshot> Function(
   ExportCancellation cancellation,
 );
 
-const _stagingBudget = 4 * 1024 * 1024 * 1024;
+const _stagingBudget = 3 * 1024 * 1024 * 1024;
+// Old receipts remain inspectable even when they exceed new admission capacity.
+const _legacyStagingBudget = 4 * 1024 * 1024 * 1024;
 const _markerAllowance = 128 * 1024;
 const _sourceLimit = 1024 * 1024 * 1024;
 const _entryLimit = 100000;
@@ -423,6 +426,30 @@ class NotebookExporter extends ValueNotifier<NotebookExportState> {
       } finally {
         _providerId = null;
       }
+    });
+  }
+
+  Future<ShareExportStatus> share(PreparedNotebookExport prepared, ShareInbox inbox) {
+    _admit();
+    _requirePrepared(prepared);
+    return _operation(() async {
+      final previous = value;
+      _publish(NotebookExportState(phase: NotebookExportPhase.saving,
+        prepared: prepared, leftovers: previous.leftovers));
+      ShareExportStatus result;
+      try {
+        await _job('verify', arguments: _preparedMap(prepared));
+        result = await inbox.shareExport(operationId: prepared.id,
+          scope: DocumentTransferScope.notebook, path: prepared.path,
+          suggestedName: prepared.format == CoreExportFormat.filesAndAssets
+            ? 'vnote-files-assets-${prepared.id}.zip' : 'vnote-${prepared.id}.zip');
+      } catch (_) {
+        result = ShareExportStatus.failed;
+      }
+      // Share-to-system never consumes the original or becomes Save As success.
+      _publish(NotebookExportState(prepared: prepared, leftovers: previous.leftovers,
+        message: inbox.value.error ?? shareExportMessage(result)));
+      return result;
     });
   }
 
@@ -788,14 +815,14 @@ class _ExportStore {
         'Ready export marker is invalid or unsupported.',
       );
     }
-    _summary(marker);
+    _summary(marker, historical: true);
     if ((marker['bytes'] as int) > (marker['archiveLimit'] as int)) {
       throw const _ExportFailure('Ready export exceeds its reserved size.');
     }
     return marker;
   }
 
-  void _summary(Map<String, Object?> summary) {
+  void _summary(Map<String, Object?> summary, {bool historical = false}) {
     for (final name in [
       'sourceBytes',
       'files',
@@ -813,7 +840,7 @@ class _ExportStore {
     if (bytes > _sourceLimit ||
         files + directories > _entryLimit ||
         archiveLimit < 22 ||
-        bytes + archiveLimit > _stagingBudget - _markerAllowance) {
+        bytes + archiveLimit > (historical ? _legacyStagingBudget : _stagingBudget) - _markerAllowance) {
       throw const _ExportFailure(
         'The snapshot exceeds the export resource limits.',
       );

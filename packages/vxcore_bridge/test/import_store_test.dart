@@ -290,6 +290,41 @@ void main() {
     },
   );
 
+  test('legacy retained bytes above 3 GiB scan without underflow but refuse every positive admission', () async {
+    await fixture.start();
+    final before = await fixture.run('checkSpace', {'requiredBytes': 0});
+    final retained = File('${fixture.transaction}/legacy-retained.bin');
+    await retained.writeAsBytes(const [], flush: true);
+    if (Platform.isWindows) {
+      final sparse = await Process.run('fsutil', ['sparse', 'setflag', retained.path]);
+      expect(sparse.exitCode, 0, reason: '${sparse.stdout}\n${sparse.stderr}');
+    }
+    final file = await retained.open(mode: FileMode.append);
+    const legacy = 3 * 1024 * 1024 * 1024 + 128 * 1024;
+    try { await file.truncate(legacy); } finally { await file.close(); }
+    final space = await fixture.run('checkSpace', {'requiredBytes': 0});
+    expect(space.keys.toSet(), {'stagedBytes', 'remainingBytes', 'availableBytes'});
+    expect(space['stagedBytes'], (before['stagedBytes']! as int) + legacy);
+    expect(space['remainingBytes'], 0);
+    await expectLater(fixture.run('checkSpace', {'requiredBytes': 1}), throwsA(_failure));
+    expect(await retained.length(), legacy);
+    await retained.delete();
+    expect((await fixture.run('checkSpace', {'requiredBytes': 1}))['remainingBytes'],
+      3 * 1024 * 1024 * 1024 - (before['stagedBytes']! as int));
+  });
+
+  test('no-group outgoing snapshots and partial ledgers share the core admission ledger', () async {
+    await fixture.start();
+    final before = await fixture.run('checkSpace', {'requiredBytes': 0});
+    final outgoing = Directory('${fixture.root.path}/outgoing-shares/readers/receipt');
+    await outgoing.create(recursive: true);
+    await File('${outgoing.path}/partial.bin').writeAsBytes(List.filled(4096, 7), flush: true);
+    await File('${outgoing.parent.parent.path}/ledger.json.tmp').writeAsString('partial', flush: true);
+    final after = await fixture.run('checkSpace', {'requiredBytes': 0});
+    expect(after['stagedBytes'], (before['stagedBytes']! as int) + 4103);
+    expect(after['remainingBytes'], (before['remainingBytes']! as int) - 4103);
+  });
+
   for (final wrapper in [false, true]) {
     test(
       'strict import preserves opaque bytes and IDs, wrapper=$wrapper',

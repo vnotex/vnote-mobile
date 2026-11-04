@@ -4,6 +4,7 @@
 
 #include <cstdint>
 #include <atomic>
+#include <mutex>
 #include <nlohmann/json.hpp>
 #include <filesystem>
 #include <string>
@@ -12,6 +13,17 @@
 
 struct VxmImportCancel;
 namespace vxm_import {
+// One process-wide gate for filesystem admission, export work and activation.
+// Recursive because owner jobs reuse TransferRun while holding this gate.
+std::recursive_mutex &AdmissionMutex();
+// Historical scans/intent schemas remain bounded at 4 GiB. Only new positive
+// admission is capped here; zero scans above this ceiling return remaining=0.
+constexpr uint64_t kAdmissionBytes = 3ULL * 1024 * 1024 * 1024;
+int32_t CheckAdmission(const std::filesystem::path &support_root, uint64_t required) noexcept;
+int32_t CheckShareExport(const char *support_root, uint64_t required) noexcept;
+int32_t ActivateInbox(const char *support_root, const char *inbox_root) noexcept;
+int32_t ProveInbox(const char *support_root, const char *claim_json, const char *disposition) noexcept;
+void ReleaseCloneBudget(const std::string &transaction_root) noexcept;
 // These are host-internal; no filesystem command can mint a clone permit.
 int32_t PreflightClone(const std::string &transaction_root, nlohmann::json &options) noexcept;
 // The requested maximum is reduced to current capacity after private owner creation.

@@ -4,8 +4,21 @@ import 'dart:io';
 
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:vnote_mobile/services/transfer_worker.dart';
 import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/managed_notebook_storage.dart';
+
+class _PersistentPaths extends PathProviderPlatform {
+  _PersistentPaths(this.root);
+  final String root;
+  @override
+  Future<String?> getApplicationSupportPath() async => '$root/support/';
+  @override
+  Future<String?> getTemporaryPath() async => '$root/cache/';
+  @override
+  Future<String?> getApplicationCachePath() async => '$root/cache/';
+}
 
 Future<void> _link(String path, String target) async {
   if (Platform.isWindows) {
@@ -44,6 +57,34 @@ void main() {
       if (entity is Link) await entity.delete();
     }
     await temp.delete(recursive: true);
+  });
+
+  test('obtained URI roots admit native transfers on creation and populated reopen', () async {
+    final directory = await Directory('.dart_tool').create();
+    final owned = await directory.createTemp('persistent-root-');
+    final previous = PathProviderPlatform.instance;
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    const channel = MethodChannel('vnote.mobile/document_transfer');
+    PathProviderPlatform.instance = _PersistentPaths(await owned.resolveSymbolicLinks());
+    messenger.setMockMethodCallHandler(channel, (_) async => null);
+    try {
+      final obtained = await ManagedNotebookStorage.obtain();
+      final keep = File('${obtained.root}/untouched.bin');
+      await keep.writeAsBytes([0, 255, 17], flush: true);
+      Future<Map<String, Object?>> admit(ManagedNotebookStorage value) async => runTransferStore({
+        'op': 'checkSpace', 'scope': 'cohort', 'root': await value.obtainCohortRoot(),
+        'notebooksRoot': value.root, 'id': '00000000000000000000000000000000', 'requiredBytes': 0,
+      });
+      expect((await admit(obtained))['stagedBytes'], 0);
+      final reopened = await ManagedNotebookStorage.obtain();
+      expect((await admit(reopened))['stagedBytes'], 0);
+      expect(await FileSystemEntity.identical(obtained.root, reopened.root), isTrue);
+      expect(await keep.readAsBytes(), [0, 255, 17]);
+    } finally {
+      PathProviderPlatform.instance = previous;
+      messenger.setMockMethodCallHandler(channel, null);
+      await owned.delete(recursive: true);
+    }
   });
 
   test('export staging is a separate persistent sibling and rejects a linked replacement', () async {

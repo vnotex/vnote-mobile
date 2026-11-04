@@ -134,6 +134,7 @@ export interface Envelope {
   revision: number;
   requestId: string;
 }
+export type EditorLocale = 'en' | 'zh';
 export type HostMessage = Envelope & (
   | { type: 'load'; text: string; language: 'markdown' | 'text'; baseVersion: string; lineEndingPolicy: 'preserve'; reason: 'open'; selection: Selection }
   | { type: 'ack'; stage: 'received' | 'draftDurable' | 'saved' | 'rejected'; throughRevision: number; error?: string }
@@ -142,7 +143,7 @@ export type HostMessage = Envelope & (
   | { type: 'insert'; text: string; anchor: number; head: number }
   | { type: 'format'; action: FormatAction; level?: number; destination?: string; anchor: number; head: number }
   | { type: 'command'; command: 'undo' | 'redo' }
-  | { type: 'preferences'; dark: boolean; highContrast: boolean; fontScale: number; reducedMotion: boolean }
+  | { type: 'preferences'; dark: boolean; highContrast: boolean; fontScale: number; reducedMotion: boolean; locale: EditorLocale }
   | { type: 'flush'; mode: 'request' }
   | { type: 'resync'; mode: 'request' | 'resume' }
   | { type: 'close'; mode: 'quiesce' | 'abort' }
@@ -224,10 +225,11 @@ export function validateHostMessage(value: unknown): HostMessage {
       requireThat(value.command === 'undo' || value.command === 'redo', 'Unknown command.');
       break;
     case 'preferences':
-      keys(value, [...HEADER, 'dark', 'highContrast', 'fontScale', 'reducedMotion']);
+      keys(value, [...HEADER, 'dark', 'highContrast', 'fontScale', 'reducedMotion', 'locale']);
       requireThat(typeof value.dark === 'boolean' && typeof value.highContrast === 'boolean'
         && typeof value.reducedMotion === 'boolean' && typeof value.fontScale === 'number'
-        && Number.isFinite(value.fontScale) && value.fontScale >= 0.5 && value.fontScale <= 3, 'Invalid editor preferences.');
+        && Number.isFinite(value.fontScale) && value.fontScale >= 0.5 && value.fontScale <= 3
+        && (value.locale === 'en' || value.locale === 'zh'), 'Invalid editor preferences.');
       break;
     case 'flush':
       keys(value, [...HEADER, 'mode']);

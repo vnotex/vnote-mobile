@@ -54,6 +54,7 @@ class CohortAttempt {
     this.cohortId,
     this.built = false,
     this.canApply = false,
+    this.allocationComplete = true,
   });
   final String id;
   final CohortTarget target;
@@ -66,6 +67,7 @@ class CohortAttempt {
   final String? cohortId;
   final bool built;
   final bool canApply;
+  final bool allocationComplete;
 }
 
 @immutable
@@ -104,6 +106,8 @@ typedef CohortApplyCallback = Future<CoreCohortOutcome> Function(
   TransferCancellation cancellation,
   bool recover,
 );
+typedef CohortRetainedCapture = Future<DocumentImportResult> Function();
+
 
 /// Private source/attempt ownership. Callbacks own and JOIN core hosts; no core
 /// handle crosses a filesystem isolate and no widget callback is retained.
@@ -115,6 +119,33 @@ class CohortImporter extends TransferController<CohortImportState> {
     required super.releaseTransfer,
     super.platform,
   }) : super(const CohortImportState(), scope: DocumentTransferScope.cohort);
+
+  /// Inbox tombstones must become durable before any private proof is removed.
+  Future<void> Function(CohortAttempt attempt)? authorizeDiscard;
+
+  Future<void> rescan() => operation(() async {
+    await _scan();
+  }, scanning: true);
+
+  /// Only a library-verified settled inbox receipt authorizes this cleanup.
+  Future<void> discardSettledInbox(String operationId, String inboxId) => operation(() async {
+    await store('discard', id: operationId, arguments: {'inboxId': inboxId});
+    await _scan();
+  });
+
+  /// Only the inbox allocator repairs a mkdir-before-request interruption.
+  /// Its native immutable ownership record pins this ID and target forever.
+  Future<CohortAttempt?> allocateInbox({required String inboxId,
+      required String operationId, required CohortTarget target}) {
+    return operation(() async {
+      await store('allocateInbox', id: operationId, arguments: {
+        'inboxId': inboxId, 'kind': DocumentImportKind.folder.name,
+        'target': target.marker(operationId),
+      });
+      await _scan(preferredId: operationId);
+      return value.current;
+    }, scanning: true);
+  }
 
   @override
   bool get hasStaging => value.hasStaging;
@@ -259,6 +290,7 @@ class CohortImporter extends TransferController<CohortImportState> {
       cohortId: record['cohortId'] as String?,
       built: record['phase'] == 'built',
       canApply: record['canApply'] == true,
+      allocationComplete: record['allocationComplete'] != false,
     );
   }
 
@@ -333,9 +365,9 @@ class CohortImporter extends TransferController<CohortImportState> {
     });
   }
 
-  Future<void> _capture(CohortAttempt attempt) async {
+  Future<void> _capture(CohortAttempt attempt, {CohortRetainedCapture? retained}) async {
     _state(phase: CohortImportPhase.receiving);
-    final result = await pick(attempt.id, attempt.kind);
+    final result = await (retained == null ? pick(attempt.id, attempt.kind) : retained());
     if (result.status == DocumentImportStatus.cancelled) {
       throw const TransferCancelled();
     }
@@ -543,6 +575,7 @@ class CohortImporter extends TransferController<CohortImportState> {
     CohortAttempt attempt, {
     required CohortBuildCallback build,
     required CohortApplyCallback apply,
+    CohortRetainedCapture? retained,
   }) {
     admit();
     _require(attempt);
@@ -554,7 +587,7 @@ class CohortImporter extends TransferController<CohortImportState> {
         switch (current.stage) {
           case TransferStage.receiving:
             await store('resetWork', id: current.id);
-            await _capture(current);
+            await _capture(current, retained: retained);
           case TransferStage.captured:
             await _source(current.id, current.kind);
           case TransferStage.source:
@@ -588,6 +621,8 @@ class CohortImporter extends TransferController<CohortImportState> {
             attempt.stage == TransferStage.quarantined) {
           await _apply(attempt, recover, recover: true);
         }
+        final current = value.attempts.where((item) => item.id == attempt.id).firstOrNull;
+        await authorizeDiscard?.call(current ?? attempt);
         await store('discard', id: attempt.id);
         await _scan(
           message: 'Private cohort staging discarded. Any committed live folder is unchanged.',

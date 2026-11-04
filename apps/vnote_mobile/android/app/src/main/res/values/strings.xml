@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="share_title">Share to VNote</string>
+    <string name="share_receiving">Copying all shared items into private storage…</string>
+    <string name="share_received">Received by VNote. Open the app to choose a notebook and import these items together into a new folder.</string>
+    <string name="share_duplicate">Already received by VNote. Nothing will be imported again automatically. Open the share inbox to review the receipt or deliberately import another copy.</string>
+    <string name="share_activation_required">Open VNote once to check retained transfers and enable the share inbox, then share again. Nothing has been received yet.</string>
+    <string name="share_full">The share inbox or duplicate history is full. Open VNote to settle pending items, dismiss duplicate copies, clean up finished outgoing shares, or explicitly forget settled history. Nothing from this delivery has been received.</string>
+    <string name="share_busy">The share inbox is busy. Wait for active copies or storage operations to finish, then share again. This delivery has not been received.</string>
+    <string name="share_limits">These items cannot be received together. Use at most 64 files, 64 MiB per file, 256 MiB in total, and 1 MiB of text. File names must be safe and unambiguous. No partial delivery was accepted.</string>
+    <string name="share_corrupt">The private share records need attention. Open VNote to review retained content. Nothing was replayed or replaced.</string>
+    <string name="share_failed">The complete delivery could not be copied safely. Access may have expired or storage may be unavailable. The sender’s originals are unchanged; select all items and share again. No partial delivery was accepted.</string>
+    <string name="share_open_app">Open VNote</string>
+    <string name="share_close">Close</string>
+</resources>

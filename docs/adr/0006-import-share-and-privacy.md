@@ -1,6 +1,6 @@
 # ADR 0006: Managed import, share transactions and privacy
 
-Status: whole-notebook import/export, standalone file/ZIP/folder cohorts, ordinary-note attachment/image operations and retained transfer recovery are implemented. Executed platform and interruption cases are recorded in [verification](../verification.md); iOS build/runtime and actual backup/transfer artifacts remain unverified. The stopped-app share inbox remains a selected design, not an implemented receiver.
+Status: whole-notebook import/export, standalone file/ZIP/folder cohorts, ordinary-note attachment/image operations and retained transfer recovery are implemented. Executed platform and interruption cases are recorded in [verification](../verification.md); iOS build/runtime and actual backup/transfer artifacts remain unverified. Native stopped-app receivers, deduplicated inbox/cohort integration and explicit share-out leases are implemented; owner App Group authorization and iOS execution remain gates.
 
 Scope: [mobile plan sections 5.3 and 5.7](../mobile-client-plan.md). Retain the full first-release import/export/share boundary, including opaque content preservation. Related boundaries: editor drafts in [ADR 0003](0003-editor-protocol-and-durability.md), preview resources in [ADR 0004](0004-rendering-security.md), and the native host's owner-thread/notebook gate.
 
@@ -13,7 +13,7 @@ At core pin `c3319ca9a7dfd5432cad1f7c35de6be099fc87bf`:
 - `vxcore_folder_attach_imported` accepts staged `content/` and `metadata/` trees with final IDs/name and journals their publication. Its documented commit point is replacement of the destination parent's `vx.json`; recovery runs before metadata-cache rebuild. ID collection walks authoritative JSON rather than the incomplete lazy SQLite index.
 - `vxcore_file_import`/`vxcore_folder_import` copy and can generate unique destination names. They are not documented as an idempotent, atomic multi-item share transaction. Repeating them blindly after an ambiguous crash is therefore not selected.
 
-The application services own incoming transactions, quotas, permissions and recovery. Core owns notebook metadata and mutation. The extension/intent receiver may write only the incoming inbox; **it never opens or writes the live notebook**. Implemented whole-notebook, standalone-cohort and resource states are described below; the extension/share-inbox contract remains proposed.
+The application services own incoming transactions, quotas, permissions and recovery. Core owns notebook metadata and mutation. The extension/intent receiver may write only the incoming inbox; **it never opens or writes the live notebook**. Implemented whole-notebook, standalone-cohort and resource states are described below; the extension/share-inbox implementation follows the receipt contract below; platform execution evidence remains separate.
 
 ## Managed copies, import and export
 
@@ -109,7 +109,7 @@ inherit a Windows MAX_PATH ceiling. See ADR 0005 for transaction/trust details.
 
 ### Markdown/assets cohorts into an existing notebook
 
-Publish each incoming cohort as **one newly named child folder** at the user-selected destination, showing this grouping before acceptance. The browser selects File, ZIP or Folder and captures the notebook/parent UUIDs before leaving its catalog. Raw ZIP wrappers are retained, unlike bundled-notebook root selection. The future share receiver will use the same grouping; it does not authorize appending to a dirty editor.
+Publish each incoming cohort as **one newly named child folder** at the user-selected destination, showing this grouping before acceptance. The browser selects File, ZIP or Folder and captures the notebook/parent UUIDs before leaving its catalog. Raw ZIP wrappers are retained, unlike bundled-notebook root selection. The share receiver uses the same grouping; it does not authorize appending to a dirty editor.
 
 Build the cohort with existing core notebook/folder/file/attachment APIs in an isolated temporary bundled notebook under approved persistent staging. Core generates final new IDs for newly created material; imported VNote folder bundles retain their existing IDs. Obtain the staged folder's paths via `vxcore_folder_get_share_paths`, then close the temporary notebook and arrange the final `content/` and `metadata/` staging pair. Do not synthesize a parallel `vx.json` serializer in Dart. Opaque files not indexed by core must still be copied unchanged as part of the subtree. Assets escaping that subtree must be accounted for and preserved safely; reject a cohort whose layout cannot be transplanted intact rather than rewrite links or lose assets.
 
@@ -129,7 +129,7 @@ Resources distinguish tracked, unindexed and missing files. Listing never create
 
 Resource-only recovery refuses encrypted metadata, protected suffixes/signatures and persisted buffer restoration before opening a buffer. It neither reloads nor decodes the body. An active editor reuses its NOTE owner; its resource barrier joins before Write/switch/close. Export streams a verified immutable snapshot, up to 1 GiB, into `resources/<id>/output/<name>` before provider Save As. File/image inputs are bounded to 256 MiB and retain provider bytes. Cancelled or ambiguous external writes retain the snapshot for verified retry. Asset commit and volatile Markdown insertion are separate receipts; insertion uses the revision/selection barrier in ADR 0003 and still requires explicit Write.
 
-One synchronous application reservation covers all four transfer domains before awaits. The native 4 GiB ledger counts private bytes and still-owned attempts moved into notebooks, including children moved before parent publication. Charges remain until a verified receipt or rollback; invalid ownership records block new allocation. Reservations include inventory/metadata/copy overhead and 64 MiB free-space headroom, not only file bodies. Conflicting retained transactions require explicit settlement.
+One synchronous application reservation covers ordinary transfer domains before awaits. Native positive allocation is limited to 3 GiB, reserving 1 GiB of the combined 4 GiB budget for the independently receiving inbox. Accounting includes private outgoing snapshots and still-owned attempts moved into notebooks, including children moved before parent publication. Charges remain until a verified receipt or rollback; invalid ownership records block new allocation. Reservations include inventory/metadata/copy overhead and 64 MiB free-space headroom, not only file bodies. Conflicting retained transactions require explicit settlement.
 
 ### Export
 
@@ -339,6 +339,39 @@ The selected inbox is an app-owned persistent directory plus a small transaction
 7. Failed/ready acknowledged content never expires automatically. Provide retry, system export and explicit discard. Disk full stops new acceptance rather than deleting prior acknowledged items. A removed destination notebook is not permission to replay a consumed delivery elsewhere.
 
 Before other startup/resume notebook writers or sync run, reconcile `importing` leases against core recovery and stable IDs. Expired leases do not by themselves authorize a second writer. Corrupt ledgers/manifests quarantine the item and report it; do not attempt a best-guess reimport. Inbox acceptance, notebook commit and system share-out completion are distinct user-visible states.
+
+### Implemented receipt and lifecycle boundaries
+
+The separate `vnote.mobile/share_inbox` channel validates native records and keeps
+provider URLs out of Dart. A durable claim binds the delivery, operation and
+selected target before allocation. `allocateInbox` repairs only the exact owned
+mkdir/request crash window; ordinary allocator collision checks remain strict.
+The cohort source, generated IDs, prepared inventory and publication journal are
+reused across retries. A native consumption proof matches the committed receipt,
+outcome and intent before reclaiming payload bytes. A rollback disposition needs
+the current generation's rollback/absence proof and an accessible matching target
+with no moved wrapper; a matched retained dispatch marker is valid proof history,
+not something to erase. Uncertain claims remain quarantined and exportable.
+
+A duplicate of a consumed, payload-less receipt can retain one bounded candidate.
+It is not a new import and becomes another copy only after explicit confirmation.
+Forgetting settled history does not remove pending, failed or importing obligations.
+Resume holds the actual save/sync writer barrier until reconciliation settles;
+merely setting foreground false is not that barrier.
+
+Existing 4 GiB staging records remain inspectable after the 3 GiB admission split.
+A native scan must prove the old charges fit before inbox capture is activated.
+Over-cap or corrupt retained work is preserved and blocks new admission, never
+automatically evicted. Android/iOS ordinary outgoing snapshots are charged under
+`outgoing-shares` to the 3 GiB side; raw inbox export/reader metadata remains under
+the 1 GiB inbox cap.
+
+`Share to system UI` retains verified immutable reader snapshots independently
+of Save As and Flutter attachment. Exact-file grants never expose the notebook
+root. Explicit outgoing cleanup requires confirmation that recipients finished;
+known active or uncertain leases refuse cleanup. A delayed recipient read is not
+proved complete by chooser dismissal. iOS ordinary main-app share-out does not
+require an App Group; incoming extension storage does, with no fallback group.
 
 ## Platform permission ownership
 

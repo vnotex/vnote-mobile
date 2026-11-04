@@ -50,6 +50,9 @@ class MainActivity : FlutterActivity() {
         if (!flutterEngine.plugins.has(SyncPlatformPlugin::class.java)) {
             flutterEngine.plugins.add(SyncPlatformPlugin())
         }
+        if (!flutterEngine.plugins.has(ShareInboxPlugin::class.java)) {
+            flutterEngine.plugins.add(ShareInboxPlugin())
+        }
     }
 }
 

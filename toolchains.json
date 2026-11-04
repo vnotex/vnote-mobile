@@ -10,7 +10,7 @@
   "ninja": "1.12.0",
   "core": {
     "repository": "https://github.com/vnotex/vxcore.git",
-    "revision": "c7ea3454edbe1bb2b3bde7e964b6d999bb9fcb77",
+    "revision": "3828e7a07a51a55dd24e38b3146c61db639bd62d",
     "desktopReference": "f8026adb4c43f78d90251148e24b6e72ca28f3d7"
   },
   "android": {

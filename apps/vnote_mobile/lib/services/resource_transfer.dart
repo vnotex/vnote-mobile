@@ -5,6 +5,7 @@ import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 import 'document_transfer_platform.dart';
 import 'transfer_worker.dart';
+import 'share_inbox.dart';
 
 export 'transfer_worker.dart'
     show TransferCancellation, TransferStage, TransferLeftover;
@@ -869,6 +870,32 @@ class ResourceTransfer extends TransferController<ResourceTransferState> {
               ? _externalWarning
               : 'No completed external copy was reported. The private snapshot is retained.',
         );
+        return result;
+      } catch (error) {
+        await _failure(error, id: attempt.id);
+        return null;
+      }
+    });
+  }
+
+  Future<ShareExportStatus?> share(ResourceAttempt attempt, ShareInbox inbox) {
+    admit();
+    _require(attempt);
+    if (attempt.operation != ResourceOperation.export ||
+        attempt.stage != TransferStage.exportReady) {
+      throw StateError('Capture a complete resource snapshot first.');
+    }
+    return operation(() async {
+      _state(phase: ResourceTransferPhase.saving);
+      try {
+        final snapshot = _export(await store('verifyExport', id: attempt.id), attempt);
+        cancellation.check();
+        final result = await inbox.shareExport(operationId: attempt.id,
+          scope: DocumentTransferScope.resource, path: snapshot.path,
+          suggestedName: snapshot.name);
+        // Chooser completion cannot erase a previous ambiguous Save As result.
+        await _scan(preferredId: attempt.id, snapshot: snapshot,
+          message: inbox.value.error ?? shareExportMessage(result));
         return result;
       } catch (error) {
         await _failure(error, id: attempt.id);

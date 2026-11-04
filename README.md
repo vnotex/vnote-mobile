@@ -2,7 +2,7 @@
 
 Flutter iOS/Android client for VNote. Implementation follows the [mobile plan](docs/mobile-client-plan.md).
 
-The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export either a complete saved notebook backup or a files-and-assets ZIP from its library row through system Save As. The editor now has durable private drafts, bounded foreground autosave, source-preserving formatting and isolated Markdown/math/diagram preview. **Save** commits a captured revision plus its receipt; newer input remains dirty. Closing offers Save and close, Keep draft, Discard or Cancel. Library discovery, catalog and editor owners never overlap. WebDAV uses core-owned phased synchronization and native secure credentials. Share-in and full device/iOS release gates remain open; see [verification and blockers](docs/verification.md) for exact execution evidence.
+The app opens a managed **notebook library** through the real native core. Existing Personal data is discovered in place; a fresh installation starts with an empty library and explicit **New notebook**. Create, select and rename notebooks without changing their storage roots or UUIDs. Inside each notebook, create Markdown/plain-text notes and folders, rename/move/delete nodes, search saved text and manage tags. Import a bundled notebook from a ZIP or system-selected folder, preserving its original identities and portable bytes. Export either a complete saved notebook backup or a files-and-assets ZIP from its library row through system Save As. The editor now has durable private drafts, bounded foreground autosave, source-preserving formatting and isolated Markdown/math/diagram preview. **Save** commits a captured revision plus its receipt; newer input remains dirty. Closing offers Save and close, Keep draft, Discard or Cancel. Library discovery, catalog and editor owners never overlap. WebDAV uses core-owned phased synchronization and native secure credentials. Android share-in/out is exercised; iOS execution, owner-signed release and physical-device gates remain open; see [verification and blockers](docs/verification.md) for exact execution evidence.
 
 ## Development
 
@@ -178,6 +178,39 @@ Logical notebook close can retire credentials; note/browser transitions and app
 shutdown do not. Missing/locked/corrupt storage blocks sync, not offline access.
 See [ADR 0005](docs/adr/0005-webdav-coordination.md) for the transaction contract and
 [verification](docs/verification.md) for exercised platforms and remaining gates.
+
+## Mobile integration
+
+The library and notebook browser expose **Shared items**. Android receives text,
+URLs, images and multiple files in a native activity even when Flutter is stopped.
+The iOS Share Extension uses an owner-authorized App Group; without one, incoming
+sharing is visibly unavailable, not redirected into an unprotected fallback.
+Received means complete private bytes and a durable receipt, not notebook import.
+Choose a notebook/folder and a new child-folder name to import through the existing
+core cohort transaction. Repeated deliveries are deduplicated; another copy,
+discard, history reset and outgoing-file cleanup are explicit decisions.
+
+**Share to system UI** is distinct from **Save As**: it does not prove a recipient
+saved the data. Immutable outgoing snapshots remain until explicit reader-safe
+cleanup. Pending incoming data never expires automatically. The 4 GiB transfer
+budget reserves 1 GiB for inbox data/receipts and 3 GiB for ordinary transfer and
+outgoing-share staging; historical larger staging is retained for settlement.
+See [ADR 0006](docs/adr/0006-import-share-and-privacy.md) for quotas and recovery.
+
+English and Simplified Chinese follow the system by default. The language menu
+persists an explicit choice for Flutter and native receivers. Notebook names,
+source bytes, identities and license texts are not translated. Wide layouts keep
+fixed editor/view slots; resizing, locale and theme changes do not create another
+native notebook owner or reload the editor. Source and preview can share the wide
+editor area. Actual platform/accessibility limits are recorded in
+[verification](docs/verification.md).
+
+[Release packaging](docs/mobile-release.md) separates unsigned validation from
+owner-signed APK/AAB and iOS app/archive/export gates. Development installs retain
+their identities. No command uploads or submits a build. Missing owner IDs,
+credentials, App Group authorization, Apple execution and physical-device evidence
+remain explicit release blockers. [Dependency notices](docs/dependency-notices.md)
+describes the locked runtime inventory, SBOM and corresponding-source obligations.
 
 ## License
 

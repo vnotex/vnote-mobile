@@ -31,6 +31,7 @@
 #endif
 #if defined(__APPLE__)
 #include <stdio.h>
+#include <TargetConditionals.h>
 #endif
 #endif
 #include <nlohmann/json.hpp>
@@ -49,6 +50,11 @@ using Json = nlohmann::json;
 constexpr size_t kRequest = 16384, kResponse = 8 * 1024 * 1024;
 constexpr size_t kEntries = 100000, kChunk = 256 * 1024, kLine = 8192;
 constexpr uint64_t kFile = 256ULL * 1024 * 1024, kTree = 2ULL * 1024 * 1024 * 1024;
+std::recursive_mutex admission_mutex;
+// A clone runs on a separate worker. Charge its full ceiling until completion;
+// its files replace this reservation as they become durable, never add to it.
+struct CloneReservation { uint64_t ceiling, scanned = 0; };
+std::map<fs::path, CloneReservation> clone_reservations;
 using Failure = vxm_import::StorageFailure;
 void require(bool condition, int32_t code = VXCORE_ERR_INVALID_PARAM) {
   if (!condition) throw Failure{code};
@@ -1341,25 +1347,40 @@ Json prepare_clone(Store &store, const std::string &operation) {
 }
 constexpr uint64_t kStagingHeadroom = 64ULL * 1024 * 1024;
 Json quota(const fs::path &base, uint64_t required, const VxmImportCancel *cancel) {
+  std::lock_guard<std::recursive_mutex> lock(admission_mutex);
   constexpr uint64_t maximum = 4ULL * 1024 * 1024 * 1024;
   absolute(base.u8string());
   uint64_t bytes = 0;
   size_t entries = 0;
-  for (const auto *group : {"imports", "exports", "cohorts", "resources"}) {
+  for (auto &reservation : clone_reservations) reservation.second.scanned = 0;
+  for (const auto *group : {"imports", "exports", "cohorts", "resources", "outgoing-shares"}) {
     const auto root = base / group;
     no_link(root);
     if (!present(root)) continue;
     require(identity(root).directory, VXCORE_ERR_UNSUPPORTED);
+    CloneReservation *active_clone = nullptr;
     for (fs::recursive_directory_iterator it(root), end; it != end; ++it) {
       cancelled(cancel);
       require(it.depth() <= 40 && ++entries <= 12 * kEntries, VXCORE_ERR_UNSUPPORTED);
+      if (it.depth() == 0) {
+        const auto reserved = clone_reservations.find(it->path());
+        active_clone = reserved == clone_reservations.end() ? nullptr : &reserved->second;
+      }
       no_link(it->path());
       const auto item = identity(it->path());
       if (!item.directory) {
         require(item.size <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
         bytes += item.size;
+        if (active_clone) active_clone->scanned += item.size;
       }
     }
+  }
+  for (const auto &reservation : clone_reservations) {
+    if (reservation.first.parent_path().parent_path() != base) continue;
+    const auto &charge = reservation.second;
+    const auto outstanding = charge.ceiling > charge.scanned ? charge.ceiling - charge.scanned : 0;
+    require(outstanding <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
+    bytes += outstanding;
   }
   const auto cohorts = base / "cohorts";
   if (present(cohorts)) for (const auto &entry : fs::directory_iterator(cohorts)) {
@@ -1422,10 +1443,11 @@ Json quota(const fs::path &base, uint64_t required, const VxmImportCancel *cance
     require(charge <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
     bytes += charge;
   }
-  require(required <= maximum - bytes, VXCORE_ERR_UNSUPPORTED);
+  const auto remaining = bytes < vxm_import::kAdmissionBytes ? vxm_import::kAdmissionBytes - bytes : 0;
+  require(required == 0 || required <= remaining, VXCORE_ERR_UNSUPPORTED);
   const auto available = fs::space(base).available;
-  require(required <= UINT64_MAX - kStagingHeadroom && available >= required + kStagingHeadroom, VXCORE_ERR_IO);
-  return {{"availableBytes", available}, {"stagedBytes", bytes}, {"remainingBytes", maximum - bytes}};
+  require(required == 0 || (required <= UINT64_MAX - kStagingHeadroom && available >= required + kStagingHeadroom), VXCORE_ERR_IO);
+  return {{"availableBytes", available}, {"stagedBytes", bytes}, {"remainingBytes", remaining}};
 }
 Json check_space(const Store &store, uint64_t required) {
   return quota(store.imports.parent_path(), required, store.cancel);
@@ -1453,7 +1475,7 @@ struct TransferStore {
   fs::path root, notebooks, transaction;
   std::string id, scope;
   const VxmImportCancel *cancel;
-  TransferStore(const Json &request, const VxmImportCancel *token) : cancel(token) {
+  TransferStore(const Json &request, const VxmImportCancel *token, bool require_notebooks = true) : cancel(token) {
     scope = text(request.at("scope"));
     require(scope == "cohort" || scope == "resource");
     root = absolute(text(request.at("root")));
@@ -1461,7 +1483,7 @@ struct TransferStore {
     id = text(request.at("id"), 32);
     require(hex(id, 32) && root.filename() == (scope == "cohort" ? "cohorts" : "resources") &&
             notebooks.filename() == "notebooks" && root.parent_path() == notebooks.parent_path());
-    require(identity(root).directory && identity(notebooks).directory, VXCORE_ERR_UNSUPPORTED);
+    require(identity(root).directory && (!require_notebooks || identity(notebooks).directory), VXCORE_ERR_UNSUPPORTED);
     transaction = root / id;
   }
   void owned() const {
@@ -1749,10 +1771,174 @@ struct TransferStore {
     return {{"name", name}, {"path", file.u8string()}, {"bytes", ready.at("bytes")}, {"sha256", ready.at("sha256")}};
   }
 };
+std::string inbox_owner_name(const std::string &id) { return "inbox-" + id + ".json"; }
+Json inbox_owner(const TransferStore &store, bool temporary = false) {
+  const auto owner = read_json(store.root / (inbox_owner_name(store.id) + (temporary ? ".tmp" : "")));
+  keys(owner, {"version", "id", "scope", "inboxId", "target"});
+  require(owner.at("version") == 1 && owner.at("id") == store.id && owner.at("scope") == "cohort" &&
+          store.scope == "cohort" && hex(text(owner.at("inboxId"), 32), 32), VXCORE_ERR_INVALID_STATE);
+  store.target(owner.at("target"));
+  return owner;
+}
+Json inbox_request(const TransferStore &store) {
+  return {{"version", 2}, {"id", store.id}, {"scope", "cohort"}, {"kind", "folder"}};
+}
+// Only exact allocation bytes may be repaired under durable ownership.
+void inbox_partial(const TransferStore &store, const Json &owner, bool repair) {
+  if (!present(store.transaction)) return;
+  store.owned();
+  for (const auto &entry : fs::directory_iterator(store.transaction)) {
+    const auto name = entry.path().filename().u8string();
+    const bool request = name == "request.json" || name == "request.json.tmp";
+    require(request || name == "target.json" || name == "target.json.tmp", VXCORE_ERR_INVALID_STATE);
+    const auto expected = request ? inbox_request(store) : owner.at("target");
+    if (name == "request.json" || name == "target.json") {
+      require(read_json(entry.path()) == expected, VXCORE_ERR_INVALID_STATE);
+    } else {
+      const auto bytes = read_bytes(entry.path(), kRequest), encoded = expected.dump();
+      require(bytes.size() <= encoded.size() && encoded.compare(0, bytes.size(), bytes) == 0, VXCORE_ERR_INVALID_STATE);
+      if (repair) Store::remove_private(entry.path());
+    }
+  }
+}
+Json inbox_allocated_state(const TransferStore &store, const Json &owner) {
+  return {{"id", store.id}, {"scope", "cohort"}, {"kind", "folder"}, {"phase", "allocated"},
+      {"target", owner.at("target")}, {"captured", false}, {"source", false}, {"prepared", false},
+      {"intent", false}, {"committed", false}, {"canApply", false}, {"bytes", 0}, {"entries", 0}, {"allocationComplete", false}};
+}
+uint64_t inbox_generation(const std::string &name, const char *prefix) {
+  const std::string start = std::string(prefix) + "-";
+  require(name.rfind(start, 0) == 0 && name.size() > start.size() + 5 &&
+          name.substr(name.size() - 5) == ".json", VXCORE_ERR_INVALID_STATE);
+  const auto digits = name.substr(start.size(), name.size() - start.size() - 5);
+  require(digits.size() <= 5 && digits.front() != '0', VXCORE_ERR_INVALID_STATE);
+  uint64_t generation = 0;
+  for (const auto c : digits) { require(c >= '0' && c <= '9', VXCORE_ERR_INVALID_STATE); generation = generation * 10 + c - '0'; }
+  require(generation > 0 && generation <= 10000, VXCORE_ERR_INVALID_STATE);
+  return generation;
+}
+void inbox_intent(const TransferStore &store, const Json &intent, const Json &target, const Json &prepared,
+                  const std::string &prepared_hash) {
+  keys(intent, {"version", "id", "scope", "target", "cohortId", "preparedHash", "charge", "generation",
+                "attemptIdentity", "contentIdentity", "metadataIdentity", "movedRelative"});
+  require(intent.at("version") == 1 && intent.at("id") == store.id && intent.at("scope") == "cohort" &&
+      intent.at("target") == target && intent.at("cohortId") == prepared.at("cohortId") &&
+      intent.at("movedRelative") == "vx_notebook/vx_import/vnote-" + store.id &&
+      intent.at("preparedHash") == prepared_hash, VXCORE_ERR_INVALID_STATE);
+  number(intent.at("charge"), 4ULL * 1024 * 1024 * 1024); // Historical schema, not admission.
+  require(number(intent.at("generation"), 10000) > 0, VXCORE_ERR_INVALID_STATE);
+  for (const auto *key : {"attemptIdentity", "contentIdentity", "metadataIdentity"}) {
+    keys(intent.at(key), {"device", "low", "high"});
+    for (const auto *part : {"device", "low", "high"}) number(intent.at(key).at(part), UINT64_MAX);
+  }
+}
+void inbox_absent(const TransferStore &store, const Json &intent) {
+  const auto suffix = std::to_string(number(intent.at("generation"), 10000)) + ".json";
+  const auto rollback = read_json(store.transaction / ("rollback-" + suffix));
+  keys(rollback, {"version", "id", "scope", "intent", "status"});
+  require(rollback.at("version") == 1 && rollback.at("id") == store.id && rollback.at("scope") == "cohort" &&
+          rollback.at("intent") == intent && rollback.at("status") == "absent", VXCORE_ERR_INVALID_STATE);
+  const auto absent = read_json(store.transaction / ("absent-" + suffix));
+  keys(absent, {"version", "id", "scope", "status", "cohortId", "preparedHash"});
+  require(absent.at("version") == 1 && absent.at("id") == store.id && absent.at("scope") == "cohort" &&
+          absent.at("status") == "absent" && absent.at("cohortId") == intent.at("cohortId") &&
+          absent.at("preparedHash") == intent.at("preparedHash"), VXCORE_ERR_INVALID_STATE);
+}
+// Every top-level object must belong to this transaction. Retained dispatch
+// records are valid evidence, not something to delete to manufacture absence.
+void inbox_files(const TransferStore &store, const Json &target, const Json &prepared, const Json &intent, bool committed) {
+  static const std::set<std::string> files{"request.json", "target.json", "captured.json", "source.json",
+      "accepted.jsonl", "inventory.jsonl", "build.json", "prepared.json", "ids.json", "preflight.json", "intent.json",
+      "committed.json", "outcome.json"};
+  // The library creates joined publication/recovery contexts below recovery/.
+  static const std::set<std::string> directories{"unpacked", "workbook", "engine", "recovery", "prepared", "attempt"};
+  size_t count = 0;
+  for (const auto &entry : fs::directory_iterator(store.transaction)) {
+    const auto name = entry.path().filename().u8string();
+    const auto info = identity(entry.path());
+    if (info.directory) {
+      require(directories.count(name), VXCORE_ERR_INVALID_STATE);
+      for (fs::recursive_directory_iterator it(entry.path()), end; it != end; ++it) {
+        require(it.depth() <= 40 && ++count <= 12 * kEntries, VXCORE_ERR_UNSUPPORTED);
+        identity(it->path());
+      }
+      continue;
+    }
+    if (files.count(name)) continue;
+    const char *prefix = name.rfind("dispatch-", 0) == 0 ? "dispatch" : name.rfind("rollback-", 0) == 0 ? "rollback" : "absent";
+    const auto generation = inbox_generation(name, prefix);
+    require(!intent.is_null() && generation <= number(intent.at("generation"), 10000), VXCORE_ERR_INVALID_STATE);
+    Json previous;
+    const Json *proved = &intent;
+    if (generation != number(intent.at("generation"), 10000)) {
+      previous = read_json(store.transaction / ("rollback-" + std::to_string(generation) + ".json"));
+      proved = &previous.at("intent");
+      inbox_intent(store, *proved, target, prepared, text(intent.at("preparedHash"), 64));
+      require(proved->at("generation") == generation, VXCORE_ERR_INVALID_STATE);
+    }
+    if (!committed || generation != number(intent.at("generation"), 10000) || std::string_view(prefix) != "dispatch") inbox_absent(store, *proved);
+    if (std::string_view(prefix) == "dispatch") {
+      const auto dispatch = read_json(entry.path());
+      keys(dispatch, {"version", "id", "scope", "generation", "parentPath", "parentBefore"});
+      require(dispatch.at("version") == 1 && dispatch.at("id") == store.id && dispatch.at("scope") == "cohort" &&
+              dispatch.at("generation") == generation, VXCORE_ERR_INVALID_STATE);
+      const auto parent = text(dispatch.at("parentPath"), 1024, true);
+      if (!parent.empty()) relative(parent);
+      const auto &before = dispatch.at("parentBefore");
+      keys(before, {"device", "low", "high", "bytes", "links", "seconds", "nanos", "directory", "sha256"});
+      require(before.at("directory") == false && hex(text(before.at("sha256"), 64), 64), VXCORE_ERR_INVALID_STATE);
+      for (const auto *key : {"device", "low", "high", "bytes", "links"}) number(before.at(key), UINT64_MAX);
+      require(before.at("seconds").is_number_integer() && before.at("nanos").is_number_integer(), VXCORE_ERR_INVALID_STATE);
+    }
+  }
+}
+std::string_view inbox_argument(const char *value) {
+  require(value, VXCORE_ERR_NULL_POINTER);
+  size_t length = 0; while (length <= kRequest && value[length]) ++length;
+  require(length > 0 && length <= kRequest);
+  return {value, length};
+}
+void inbox_private_directory(const fs::path &path) {
+  require(identity(path).directory, VXCORE_ERR_UNSUPPORTED);
+#if !defined(_WIN32)
+  struct stat info{};
+  require(::lstat(path.c_str(), &info) == 0 && info.st_uid == ::geteuid() &&
+          (info.st_mode & 0077) == 0, VXCORE_ERR_INVALID_STATE);
+#endif
+}
+void inbox_platform_roots(const fs::path &support, const fs::path &inbox) {
+  require(inbox.filename() == "inbox", VXCORE_ERR_INVALID_PARAM);
+  inbox_private_directory(support); inbox_private_directory(inbox);
+#if defined(__ANDROID__)
+  require(support.filename() == "files" && inbox.parent_path() == support, VXCORE_ERR_INVALID_PARAM);
+  const auto app_parent = support.parent_path().parent_path();
+  const auto data = app_parent.parent_path().generic_u8string();
+  // Context canonicalization inside the app namespace can yield /data/data,
+  // while adb/run-as observes /data/user/0 for the same owned directory.
+  require(app_parent == fs::path("/data/data") || data == "/data/user" || data == "/data/user_de",
+          VXCORE_ERR_INVALID_PARAM);
+  struct stat app{};
+  require(::lstat(support.parent_path().c_str(), &app) == 0 && app.st_uid == ::geteuid() &&
+          (app.st_mode & 0002) == 0, VXCORE_ERR_INVALID_STATE);
+#elif defined(__APPLE__) && TARGET_OS_IPHONE
+  const auto application = support.parent_path().parent_path();
+  const auto group = inbox.parent_path();
+  require(support.filename() == "Application Support" && support.parent_path().filename() == "Library" &&
+      application.parent_path().filename() == "Application" && application.parent_path().parent_path().filename() == "Data" &&
+      group.parent_path().filename() == "AppGroup" && group.parent_path().parent_path().filename() == "Shared" &&
+      group.parent_path().parent_path().parent_path() == application.parent_path().parent_path().parent_path(), VXCORE_ERR_INVALID_PARAM);
+  inbox_private_directory(inbox.parent_path());
+#else
+  // Desktop host regression fixtures use the same private-root relationship.
+  require(inbox.parent_path() == support, VXCORE_ERR_INVALID_PARAM);
+#endif
+}
 Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
+  std::lock_guard<std::recursive_mutex> lock(admission_mutex);
   const auto op = text(request.at("op"));
   std::set<std::string> required{"scope", "root", "notebooksRoot", "id", "op"}, optional;
   if (op == "allocate") required.insert({"kind", "target"});
+  else if (op == "allocateInbox") required.insert({"kind", "target", "inboxId"});
   else if (op == "capture") required.insert({"sourceName", "bytes", "entries"});
   else if (op == "source") required.insert({"treeRelative", "inventoryHash", "bytes", "entries"});
   else if (op == "resetWork") optional.insert("folderName");
@@ -1761,7 +1947,7 @@ Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
     if (request.value("operation", std::string()) == "export") required.insert({"version", "origin", "binding"});
   }
   else if (op == "checkSpace") required.insert("requiredBytes");
-  else if (op == "discard") optional.insert("abandon");
+  else if (op == "discard") optional.insert({"abandon", "inboxId"});
   else require(op == "scan" || op == "sealCohort" || op == "prepareAttempt" || op == "recoverAttempt" ||
                op == "writeReceipt" || op == "inspectResource" || op == "finishResource" ||
                op == "exportReady" || op == "verifyExport" || op == "discardExport");
@@ -1779,10 +1965,35 @@ Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
       const auto id = entry.path().filename().u8string();
       Json state;
       try {
-        require(hex(id, 32), VXCORE_ERR_INVALID_STATE);
-        auto args = request;
-        args["id"] = id;
-        state = TransferStore(args, cancel).state();
+        if (store.scope == "cohort" && id.rfind("inbox-", 0) == 0) {
+          const bool temporary = id.size() == 47 && id.substr(38) == ".json.tmp";
+          require((temporary || (id.size() == 43 && id.substr(38) == ".json")) && hex(id.substr(6, 32), 32), VXCORE_ERR_INVALID_STATE);
+          auto args = request; args["id"] = id.substr(6, 32);
+          TransferStore owned(args, cancel); const auto owner = inbox_owner(owned, temporary);
+          if (temporary) {
+            if (present(owned.root / inbox_owner_name(owned.id))) {
+              require(inbox_owner(owned) == owner, VXCORE_ERR_INVALID_STATE); continue;
+            }
+            require(!present(owned.transaction), VXCORE_ERR_INVALID_STATE);
+          }
+          if (present(owned.transaction)) continue;
+          require(!present(owned.root / ("done-" + owned.id)), VXCORE_ERR_INVALID_STATE);
+          state = inbox_allocated_state(owned, owner);
+        } else {
+          require(hex(id, 32), VXCORE_ERR_INVALID_STATE);
+          auto args = request; args["id"] = id;
+          TransferStore owned(args, cancel);
+          if (owned.scope == "cohort" && present(owned.root / inbox_owner_name(owned.id))) {
+            const auto owner = inbox_owner(owned);
+            if (!present(owned.transaction / "request.json") || !present(owned.transaction / "target.json")) {
+              inbox_partial(owned, owner, false); state = inbox_allocated_state(owned, owner);
+            } else {
+              require(read_json(owned.transaction / "request.json") == inbox_request(owned) &&
+                  read_json(owned.transaction / "target.json") == owner.at("target"), VXCORE_ERR_INVALID_STATE);
+              state = owned.state(); state["allocationComplete"] = true;
+            }
+          } else state = owned.state();
+        }
       } catch (const Failure &error) {
         if (error.code == VXCORE_ERR_CANCELLED) throw;
         state = {{"id", id}, {"scope", store.scope}, {"phase", "quarantined"}, {"errorCode", error.code}};
@@ -1795,7 +2006,33 @@ Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
     }
     return {{"entries", std::move(entries)}};
   }
+  if (op == "allocateInbox") {
+    require(!present(store.root / ("done-" + store.id)), VXCORE_ERR_INVALID_STATE);
+    require(store.scope == "cohort" && request.at("kind") == "folder" && hex(text(request.at("inboxId"), 32), 32));
+    store.target(request.at("target"));
+    const Json owner{{"version", 1}, {"id", store.id}, {"scope", "cohort"},
+        {"inboxId", request.at("inboxId")}, {"target", request.at("target")}};
+    const auto marker = store.root / inbox_owner_name(store.id);
+    const auto temporary = store.root / (inbox_owner_name(store.id) + ".tmp");
+    if (!present(marker) && present(temporary)) {
+      require(!present(store.transaction), VXCORE_ERR_INVALID_STATE);
+      const auto bytes = read_bytes(temporary, kRequest), encoded = owner.dump();
+      require(bytes.size() <= encoded.size() && encoded.compare(0, bytes.size(), bytes) == 0, VXCORE_ERR_INVALID_STATE);
+      Store::remove_private(temporary);
+    }
+    if (!present(marker)) require(!present(store.transaction), VXCORE_ERR_ALREADY_EXISTS);
+    else require(inbox_owner(store) == owner, VXCORE_ERR_INVALID_STATE);
+    inbox_partial(store, owner, false);
+    quota(store.root.parent_path(), 128 * 1024, cancel);
+    durable_json(store.root, inbox_owner_name(store.id), owner);
+    if (!present(store.transaction)) { require(fs::create_directory(store.transaction), VXCORE_ERR_IO); directory_flush(store.root); }
+    inbox_partial(store, owner, true);
+    durable_json(store.transaction, "request.json", inbox_request(store));
+    durable_json(store.transaction, "target.json", owner.at("target"));
+    return store.state();
+  }
   if (op == "allocate") {
+    require(!present(store.root / inbox_owner_name(store.id)), VXCORE_ERR_ALREADY_EXISTS);
     const auto kind = text(request.at("kind"));
     require(store.scope == "cohort" ? (kind == "file" || kind == "zip" || kind == "folder") :
             (kind == "file" || kind == "image"));
@@ -1824,6 +2061,27 @@ Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
     return {{"discarded", true}};
   }
   if (op == "exportReady" || op == "verifyExport") return store.export_ready();
+  if (op == "discard" && request.contains("inboxId")) {
+    require(store.scope == "cohort" && hex(text(request.at("inboxId"), 32), 32) && !request.contains("abandon"));
+    if (!present(store.root / inbox_owner_name(store.id))) {
+      require(!present(store.transaction) && !present(store.root / ("done-" + store.id)) &&
+          !present(store.root / (inbox_owner_name(store.id) + ".tmp")), VXCORE_ERR_INVALID_STATE);
+      return {{"discarded", true}};
+    }
+    require(inbox_owner(store).at("inboxId") == request.at("inboxId"), VXCORE_ERR_INVALID_STATE);
+  }
+  if (op == "discard" && store.scope == "cohort" && present(store.root / inbox_owner_name(store.id)) &&
+      (!present(store.transaction / "request.json") || !present(store.transaction / "target.json"))) {
+    const auto owner = inbox_owner(store); inbox_partial(store, owner, false);
+    const auto retired = store.root / ("done-" + store.id);
+    if (present(retired)) {
+      require(!present(store.transaction), VXCORE_ERR_INVALID_STATE);
+      Store::remove_private(retired);
+    }
+    if (present(store.transaction)) Store::remove_private(store.transaction);
+    Store::remove_private(store.root / inbox_owner_name(store.id)); directory_flush(store.root);
+    return {{"discarded", true}};
+  }
   auto current = store.state();
   if (op == "recoverAttempt") return current;
   if (op == "capture") {
@@ -1858,6 +2116,7 @@ Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
     return store.state();
   }
   if (op == "resetWork") {
+    require(!request.contains("folderName") || !present(store.root / inbox_owner_name(store.id)), VXCORE_ERR_INVALID_STATE);
     require(current.at("prepared") == false && current.at("intent") == false && !present(store.transaction / "dispatch.json"), VXCORE_ERR_INVALID_STATE);
     for (const auto *name : {"workbook", "engine", "prepared", "build.json", "build.json.tmp", "ids.json", "ids.json.tmp", "preflight.json", "preflight.json.tmp"})
       if (present(store.transaction / name)) Store::remove_private(store.transaction / name);
@@ -1924,10 +2183,15 @@ Json transfer_run(const Json &request, const VxmImportCancel *cancel) {
   const auto retired = store.root / ("done-" + store.id);
   rename_new(store.transaction, retired);
   Store::remove_private(retired);
+  if (store.scope == "cohort" && present(store.root / inbox_owner_name(store.id))) {
+    inbox_owner(store);
+    Store::remove_private(store.root / inbox_owner_name(store.id));
+  }
   directory_flush(store.root);
   return {{"discarded", true}};
 }
 Json run(const Json &request, VxmImportCancel *cancel) {
+  std::lock_guard<std::recursive_mutex> lock(admission_mutex);
   const auto op = text(request.at("op"));
   const std::set<std::string> base{"op", "importsRoot", "notebooksRoot", "id"};
   std::set<std::string> allowed = base;
@@ -1965,7 +2229,11 @@ Json run(const Json &request, VxmImportCancel *cancel) {
   if (op == "inspect") return store.inspect(request);
   if (op == "publish") return store.publish(request);
   if (op == "recover") return store.state();
-  if (op == "writeMarker") return store.write_marker(request);
+  if (op == "writeMarker") {
+    if (request.at("marker") == "request" && !present(store.transaction / "request.json"))
+      quota(store.imports.parent_path(), 128 * 1024, cancel);
+    return store.write_marker(request);
+  }
   if (request.contains("allowPublished")) require(request.at("allowPublished").is_boolean());
   return store.discard(request.value("allowPublished", false));
 }
@@ -1980,8 +2248,119 @@ int32_t import_exception_code() noexcept {
 }  // namespace
 
 namespace vxm_import {
+std::recursive_mutex &AdmissionMutex() { return admission_mutex; }
+int32_t CheckAdmission(const fs::path &support_root, uint64_t required) noexcept {
+  try { quota(support_root, required, nullptr); return VXCORE_OK; }
+  catch (...) { return import_exception_code(); }
+}
+int32_t CheckShareExport(const char *support_root, uint64_t required) noexcept {
+  try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    require(required > 0 && required <= kAdmissionBytes);
+    const auto support = absolute(std::string(inbox_argument(support_root)));
+    inbox_private_directory(support);
+    quota(support, required, nullptr);
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+int32_t ActivateInbox(const char *support_root, const char *inbox_root) noexcept {
+  try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    const auto support = absolute(std::string(inbox_argument(support_root)));
+    const auto inbox = absolute(std::string(inbox_argument(inbox_root)));
+    inbox_platform_roots(support, inbox);
+    const auto space = quota(support, 0, nullptr);
+    require(number(space.at("stagedBytes"), 4ULL * 1024 * 1024 * 1024) <= kAdmissionBytes, VXCORE_ERR_UNSUPPORTED);
+    require(fs::space(inbox).available >= kStagingHeadroom + kRequest, VXCORE_ERR_IO);
+    durable_json(inbox, "activation.json", {{"version", 1}, {"coreStagingBytes", kAdmissionBytes},
+        {"inboxBytes", 1024ULL * 1024 * 1024}});
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+int32_t ProveInbox(const char *support_root, const char *claim_json, const char *disposition) noexcept {
+  try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    const auto support = absolute(std::string(inbox_argument(support_root)));
+    inbox_private_directory(support);
+    const auto claim = parse(inbox_argument(claim_json), kRequest);
+    const auto action = inbox_argument(disposition);
+    require(action == "consume" || action == "discard");
+    if (claim.contains("cohortId")) keys(claim, {"id", "operationId", "target", "cohortId"});
+    else keys(claim, {"id", "operationId", "target"});
+    require(hex(text(claim.at("id"), 32), 32) && hex(text(claim.at("operationId"), 32), 32));
+    keys(claim.at("target"), {"notebookId", "parentId", "notebookRelative", "folderName"});
+    auto target = claim.at("target"); target["version"] = 1; target["id"] = claim.at("operationId");
+    TransferStore store({{"scope", "cohort"}, {"root", (support / "cohorts").u8string()},
+        {"notebooksRoot", (support / "notebooks").u8string()}, {"id", claim.at("operationId")}}, nullptr, false);
+    store.target(target);
+    const Json expected{{"version", 1}, {"id", store.id}, {"scope", "cohort"}, {"inboxId", claim.at("id")}, {"target", target}};
+    require(!present(store.root / ("done-" + store.id)), VXCORE_ERR_INVALID_STATE);
+    if (!present(store.root / inbox_owner_name(store.id))) {
+      // The platform's locked immutable claim predates native allocation. Pin
+      // its unused ID before proving this never-dispatched kill window.
+      require(action == "discard" && !present(store.transaction), VXCORE_ERR_INVALID_STATE);
+      const auto temporary = store.root / (inbox_owner_name(store.id) + ".tmp");
+      if (present(temporary)) {
+        const auto bytes = read_bytes(temporary, kRequest), encoded = expected.dump();
+        require(bytes.size() <= encoded.size() && encoded.compare(0, bytes.size(), bytes) == 0, VXCORE_ERR_INVALID_STATE);
+        Store::remove_private(temporary);
+      }
+      durable_json(store.root, inbox_owner_name(store.id), expected);
+    }
+    require(inbox_owner(store) == expected, VXCORE_ERR_INVALID_STATE);
+    if (!present(store.transaction / "request.json") || !present(store.transaction / "target.json")) {
+      require(action == "discard", VXCORE_ERR_INVALID_STATE); inbox_partial(store, expected, false); return VXCORE_OK;
+    }
+    require(read_json(store.transaction / "request.json") == inbox_request(store) &&
+        read_json(store.transaction / "target.json") == target, VXCORE_ERR_INVALID_STATE);
+    const bool committed = present(store.transaction / "committed.json");
+    Json intent = nullptr, prepared = nullptr;
+    if (present(store.transaction / "intent.json")) {
+      prepared = store.marker("prepared");
+      keys(prepared, {"version", "id", "scope", "target", "privateNotebookId", "cohortId", "contentRelative", "metadataRelative",
+          "contentHash", "metadataHash", "idsHash", "assetLayout", "bytes", "entries"});
+      require(prepared.at("target") == target && prepared.at("contentRelative") == "prepared/content" &&
+          prepared.at("metadataRelative") == "prepared/metadata", VXCORE_ERR_INVALID_STATE);
+      basename(text(prepared.at("cohortId"), 127));
+      basename(text(prepared.at("privateNotebookId"), 127));
+      relative(text(prepared.at("assetLayout"), 1024));
+      for (const auto *key : {"contentHash", "metadataHash", "idsHash"}) require(hex(text(prepared.at(key), 64), 64), VXCORE_ERR_JSON_PARSE);
+      number(prepared.at("bytes"), kTree + 128ULL * 1024 * 1024);
+      number(prepared.at("entries"), 3 * kEntries);
+      intent = store.marker("intent");
+      inbox_intent(store, intent, target, prepared, hash_file(store.transaction / "prepared.json",
+          identity(store.transaction / "prepared.json").size, nullptr, false, kRequest));
+      if (claim.contains("cohortId")) require(claim.at("cohortId") == prepared.at("cohortId"), VXCORE_ERR_INVALID_STATE);
+    }
+    inbox_files(store, target, prepared, intent, committed);
+    if (action == "consume") {
+      require(committed && !intent.is_null() && claim.contains("cohortId"), VXCORE_ERR_INVALID_STATE);
+      const auto receipt = store.marker("committed");
+      keys(receipt, {"version", "id", "scope", "status", "cohortId", "preparedHash", "path"});
+      require(receipt == store.marker("outcome") && receipt.at("status") == "committed" &&
+          receipt.at("cohortId") == claim.at("cohortId") && receipt.at("preparedHash") == intent.at("preparedHash"), VXCORE_ERR_INVALID_STATE);
+      relative(text(receipt.at("path"), 1024));
+      return VXCORE_OK; // Receipt authority survives deletion of the live notebook.
+    }
+    require(!committed && !present(store.transaction / "outcome.json"), VXCORE_ERR_INVALID_STATE);
+    if (intent.is_null()) { store.state(); return VXCORE_OK; }
+    inbox_absent(store, intent);
+    const auto notebook = absolute((store.notebooks / fs::u8path(text(target.at("notebookRelative")))).u8string());
+    storage::Inspect(notebook, text(target.at("notebookId"), 127));
+    confined(notebook, text(intent.at("movedRelative")));
+    require(!present(notebook / fs::u8path(text(intent.at("movedRelative")))), VXCORE_ERR_INVALID_STATE);
+    return VXCORE_OK;
+  } catch (...) { return import_exception_code(); }
+}
+void ReleaseCloneBudget(const std::string &transaction_root) noexcept {
+  try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    clone_reservations.erase(fs::u8path(transaction_root));
+  } catch (...) { /* Destruction must not escape the owner tail. */ }
+}
 int32_t PreflightClone(const std::string &transaction_root, Json &options) noexcept {
   try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
     const auto root = storage::Absolute(transaction_root);
     Store store({{"importsRoot", root.parent_path().u8string()},
         {"notebooksRoot", (root.parent_path().parent_path() / "notebooks").u8string()},
@@ -1990,6 +2369,7 @@ int32_t PreflightClone(const std::string &transaction_root, Json &options) noexc
     store.validate_marker("request", request, "folder");
     require(request.value("origin", "") == "webdavClone", VXCORE_ERR_INVALID_STATE);
     for (const auto &entry : fs::directory_iterator(root)) require(entry.path().filename() == "request.json", VXCORE_ERR_INVALID_STATE);
+    quota(root.parent_path().parent_path(), 128 * 1024, nullptr);
     require(fs::create_directory(root / "unpacked") && fs::create_directory(root / "runtime") &&
         fs::create_directory(root / "runtime/app") && fs::create_directory(root / "runtime/local"), VXCORE_ERR_IO);
     durable_json(root, "clone-started.json", {{"version", 1}, {"request", request},
@@ -2001,6 +2381,8 @@ int32_t PreflightClone(const std::string &transaction_root, Json &options) noexc
 }
 int32_t CheckClone(const std::string &transaction_root, const std::string &operation_id, uint64_t &budget) noexcept {
   try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
+    require(budget > 0 && budget <= kAdmissionBytes);
     const auto root = storage::Absolute(transaction_root);
     Store store({{"importsRoot", root.parent_path().u8string()},
         {"notebooksRoot", (root.parent_path().parent_path() / "notebooks").u8string()},
@@ -2014,15 +2396,23 @@ int32_t CheckClone(const std::string &transaction_root, const std::string &opera
         identity(root / "unpacked").matches(started.at("treeIdentity")) && fs::is_empty(root / "unpacked"), VXCORE_ERR_INVALID_STATE);
     // The earlier UI snapshot is an upper bound, not an exact reservation:
     // creating this private context has already consumed quota and disk blocks.
-    const auto space = check_space(store, 0);
+    const auto space = check_space(store, 1);
+    const auto available = space.at("availableBytes").get<uint64_t>();
     budget = std::min({budget, space.at("remainingBytes").get<uint64_t>(),
-        space.at("availableBytes").get<uint64_t>() - kStagingHeadroom});
+        available > kStagingHeadroom ? available - kStagingHeadroom : 0});
+    uint64_t existing = 0;
+    for (const auto &entry : fs::recursive_directory_iterator(root)) {
+      const auto item = identity(entry.path());
+      if (!item.directory) { require(item.size <= kAdmissionBytes - existing, VXCORE_ERR_UNSUPPORTED); existing += item.size; }
+    }
+    require(clone_reservations.emplace(root, CloneReservation{existing + budget}).second, VXCORE_ERR_INVALID_STATE);
     return VXCORE_OK;
   } catch (...) { return import_exception_code(); }
 }
 int32_t SealClone(const std::string &transaction_root, const std::string &operation_id,
                   const std::string &notebook_id, bool auto_sync_enabled) noexcept {
   try {
+    std::lock_guard<std::recursive_mutex> lock(admission_mutex);
     const auto root = storage::Absolute(transaction_root);
     const auto started = read_json(root / "clone-started.json");
     const auto request = read_json(root / "request.json");

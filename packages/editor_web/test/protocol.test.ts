@@ -1,8 +1,9 @@
 // SPDX-License-Identifier: LGPL-3.0-only
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { EditorState, Text } from '@codemirror/state';
+import { Compartment, EditorState, Text } from '@codemirror/state';
 import { history, historyField, isolateHistory, undo, redo, undoDepth } from '@codemirror/commands';
+import { editorPresentation, editorText } from '../src/localization';
 import {
   applyChanges, assertCredits, assertDurableCredits, decodeHostMessage, encodeMessage, insertionTransaction, LIMITS, ProtocolError, trimHistory, prepareHistoryPrune,
   preferredLineEnding, RequestCache, stringSource, utf8Length, validBoundary,
@@ -131,7 +132,7 @@ test('encoded limits include JSON escaping and multibyte data', () => {
 });
 
 test('session checks reject unknown generation, future controls and stale exact-revision data', () => {
-  const control = validateHostMessage(envelope('preferences', { dark: true, highContrast: false, fontScale: 1, reducedMotion: false, revision: 2 }));
+  const control = validateHostMessage(envelope('preferences', { dark: true, highContrast: false, fontScale: 1, reducedMotion: false, locale: 'en', revision: 2 }));
   validateSession(control, documentId, generation, 3);
   assert.throws(() => validateSession(control, documentId, 'f'.repeat(32), 3), ProtocolError);
   assert.throws(() => validateSession(control, documentId, generation, 1), ProtocolError);
@@ -170,14 +171,14 @@ test('receipt releases large transfer payloads while repeated resyncs retain bou
 
 test('exact request replay is bounded; changed and evicted requests cannot be reapplied', () => {
   const cache = new RequestCache();
-  const first = validateHostMessage(envelope('preferences', { dark: true, highContrast: true, fontScale: 2, reducedMotion: true }));
+  const first = validateHostMessage(envelope('preferences', { dark: true, highContrast: true, fontScale: 2, reducedMotion: true, locale: 'zh' }));
   const fingerprint = encodeMessage(first);
   assert.equal(cache.begin(first, fingerprint), undefined);
   cache.complete(first, 'response');
   assert.equal(cache.begin(first, fingerprint)?.response, 'response');
   assert.throws(() => cache.begin(first, fingerprint + ' '), ProtocolError);
   for (let i = 2; i <= LIMITS.replayEntries + 1; i++) {
-    const next = validateHostMessage(envelope('preferences', { dark: false, highContrast: false, fontScale: 1, reducedMotion: false, requestId: `host-${i}` }));
+    const next = validateHostMessage(envelope('preferences', { dark: false, highContrast: false, fontScale: 1, reducedMotion: false, locale: 'en', requestId: `host-${i}` }));
     cache.begin(next, encodeMessage(next));
   }
   assert.throws(() => cache.begin(first, fingerprint), ProtocolError);
@@ -207,10 +208,52 @@ test('close is two-phase and preferences are closed bounded data', () => {
   for (const fields of [{ mode: 'request', disposition: 'written' }, { mode: 'complete' }, { mode: 'quiesce', disposition: 'discard' }]) {
     assert.throws(() => validateHostMessage(envelope('close', fields)), ProtocolError);
   }
-  const preferences = { dark: true, highContrast: true, fontScale: 3, reducedMotion: true };
+  const preferences = { dark: true, highContrast: true, fontScale: 3, reducedMotion: true, locale: 'zh' };
   assert.equal(validateHostMessage(envelope('preferences', preferences)).type, 'preferences');
+  assert.equal(validateHostMessage(envelope('preferences', { ...preferences, locale: 'en' })).type, 'preferences');
+  for (const locale of [undefined, null, '', 'system', 'zh-CN', 'en-US', 'ZH', 'fr', 'zh\n', {}, ['en']]) {
+    assert.throws(() => validateHostMessage(envelope('preferences', { ...preferences, locale })), ProtocolError);
+  }
+  for (const extra of [{ phrases: {} }, { language: 'markdown' }, { text: 'replacement' }, { localeScript: 'zh-Hans' }]) {
+    assert.throws(() => validateHostMessage(envelope('preferences', { ...preferences, ...extra })), ProtocolError);
+  }
   for (const fontScale of [0, Infinity, NaN, 3.01]) assert.throws(() => validateHostMessage(envelope('preferences', { ...preferences, fontScale })), ProtocolError);
   assert.throws(() => validateHostMessage(envelope('theme', { theme: 'dark' })), ProtocolError);
+});
+
+test('locale reconfiguration preserves exact source, directed selection and usable undo/redo', () => {
+  const presentation = new Compartment();
+  const original = '\ufeff原文\r\nCafe\u0301 😀';
+  let state = EditorState.create({
+    doc: Text.of(original.split('\n')),
+    extensions: [EditorState.lineSeparator.of('\n'), history(), presentation.of(editorPresentation('en', 'markdown'))],
+  });
+  state = state.update({ changes: { from: 1, insert: '新增' }, selection: { anchor: 5, head: 1 },
+    annotations: isolateHistory.of('full') }).state;
+  const edited = state.doc;
+  const selection = state.selection;
+  const depth = undoDepth(state);
+  for (const locale of ['zh', 'en', 'zh'] as const) {
+    const transaction = state.update({ effects: presentation.reconfigure(editorPresentation(locale, 'markdown')) });
+    assert.equal(transaction.docChanged, false);
+    state = transaction.state;
+    assert.equal(state.doc, edited);
+    assert.equal(state.selection, selection);
+    assert.equal(undoDepth(state), depth);
+  }
+  const dispatch = (transaction) => { state = transaction.state; };
+  assert.equal(undo({ state, dispatch }), true);
+  assert.equal(state.doc.toString(), original);
+  assert.equal(redo({ state, dispatch }), true);
+  assert.equal(state.doc.toString(), edited.toString());
+});
+
+test('localized diagnostics preserve opaque data without reinterpreting placeholders', () => {
+  const unknown = 'Opaque provider diagnostic: 原文 <a> {error} {revision}';
+  assert.equal(editorText('zh', unknown), unknown);
+  assert.equal(editorText('en', unknown), unknown);
+  const localized = editorText('zh', 'Host rejected editor data: {error}', { error: unknown, revision: 7 });
+  assert.equal(localized.slice(-unknown.length), unknown);
 });
 
 test('pruning old history keeps recent undo/redo and allows continued editing', () => {

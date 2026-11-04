@@ -305,7 +305,14 @@ class _LibraryClone {
   }
 }
 
+class _RealHttpBinding extends AutomatedTestWidgetsFlutterBinding {
+  // Native channels need a binding; the owned HTTPS fixture needs real sockets.
+  @override
+  bool get overrideHttpClient => false;
+}
+
 void main() {
+  _RealHttpBinding();
   group('real app coordinator/core HTTPS boundary', () {
     late SyncFixture fixture;
     late _Notebook notebook;

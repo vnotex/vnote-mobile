@@ -1374,14 +1374,26 @@ void main() {
     });
 
     test('preferences never reload or modify source, revision or directed selection', () {
-      final session = sessionWith('base');
+      final session = sessionWith('base 中文');
       open(session);
+      deliver(session, edit(from: 4, to: 4, insert: '!', anchor: 5, head: 1));
       final before = session.value;
-      final preferences = session.preferences(dark: true, highContrast: true, fontScale: 2, reducedMotion: true)!;
+      final preferences = session.preferences(dark: true, locale: 'zh', highContrast: true, fontScale: 2, reducedMotion: true)!;
       expect(preferences['type'], 'preferences');
       expect(preferences['fontScale'], 2);
+      expect(preferences['locale'], 'zh');
+      expect(preferences['revision'], 1);
+      expect(preferences['generation'], generation);
       expect(session.value, same(before));
-      expect(() => session.preferences(dark: true, fontScale: double.nan), throwsArgumentError);
+      final english = session.preferences(dark: true, locale: 'en', highContrast: true, fontScale: 2, reducedMotion: true)!;
+      expect(english['locale'], 'en');
+      expect(english['requestId'], isNot(preferences['requestId']));
+      expect(session.value, same(before));
+      expect(() => session.preferences(dark: true, locale: 'en', fontScale: double.nan), throwsArgumentError);
+      for (final locale in ['', 'system', 'zh-CN', 'ZH', 'en-US', 'fr', 'zh\n']) {
+        expect(() => session.preferences(dark: true, locale: locale), throwsArgumentError);
+        expect(session.value, same(before));
+      }
     });
 
     test('a superseded abort reply cannot unfreeze a newer quiesce', () async {

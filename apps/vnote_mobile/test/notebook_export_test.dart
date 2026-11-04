@@ -13,6 +13,7 @@ import 'package:vnote_mobile/services/managed_notebook_storage.dart';
 import 'package:vnote_mobile/services/notebook_library.dart';
 import 'package:vnote_mobile/services/document_transfer_platform.dart';
 import 'package:vnote_mobile/services/notebook_export.dart';
+import 'package:vnote_mobile/services/share_inbox.dart';
 import 'package:vxcore_bridge/vxcore_bridge.dart';
 
 class _Platform implements DocumentTransferPlatform {
@@ -73,6 +74,18 @@ class _Platform implements DocumentTransferPlatform {
   }
 }
 
+class _OutgoingShare extends ShareInbox {
+  final entered = Completer<String>();
+  final result = Completer<ShareExportStatus>();
+  @override
+  Future<ShareExportStatus> shareExport({required String operationId,
+      required DocumentTransferScope scope, required String path, required String suggestedName}) async {
+    expect(scope, DocumentTransferScope.notebook);
+    entered.complete(path);
+    return result.future;
+  }
+}
+
 Future<void> _directoryLink(String path, String target) async {
   if (Platform.isWindows) {
     final result = await Process.run('cmd', [
@@ -127,6 +140,7 @@ Future<Map<String, Object>> _zipSnapshot(String path) async => {
 };
 
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
   late Directory temp;
   late String root;
   late _Platform platform;
@@ -167,6 +181,9 @@ void main() {
     NotebookLibrary library,
     Finder action,
   ) async {
+    await tester.ensureVisible(action);
+    await tester.pumpAndSettle();
+    expect(action.hitTestable(), findsOneWidget);
     await tester.runAsync(() async {
       // The completion must belong to the real IO zone too; a fake-zone
       // Completer schedules its completion on microtasks that runAsync pauses.
@@ -317,6 +334,26 @@ void main() {
     await temp.delete(recursive: true);
   });
 
+  test('system sharing joins its capture and retains the ZIP for later Save As', () async {
+    final outgoing = _OutgoingShare();
+    addTearDown(outgoing.dispose);
+    final prepared = await prepare(format: CoreExportFormat.notebook);
+    final before = await File(prepared.path).readAsBytes();
+    final sharing = exporter.share(prepared, outgoing);
+    expect(await outgoing.entered.future, prepared.path);
+    expect(() => exporter.discard(prepared), throwsStateError);
+    outgoing.result.complete(ShareExportStatus.shared);
+    expect(await sharing, ShareExportStatus.shared);
+    expect(exporter.value.prepared, same(prepared));
+    expect(await File(prepared.path).readAsBytes(), before);
+    expect(platform.saves, 0);
+    platform.results.add(const DocumentExportResult(
+      status: DocumentExportStatus.saved, externalMayBeIncomplete: false));
+    await exporter.save(prepared);
+    expect(platform.saves, 1);
+    expect(exporter.value.prepared, isNull);
+  });
+
   test('initialize reconciles storage without a platform channel', () async {
     final withoutChannel = NotebookExporter(root: root);
     exporters.add(withoutChannel);
@@ -354,7 +391,7 @@ void main() {
           isTrue,
         );
         expect(await Directory(destination).exists(), isFalse);
-        expect(budget, 4 * 1024 * 1024 * 1024 - 128 * 1024);
+        expect(budget, 3 * 1024 * 1024 * 1024 - 128 * 1024);
         final snapshot = await capture(CoreExportFormat.notebook)(
           destination,
           budget,
